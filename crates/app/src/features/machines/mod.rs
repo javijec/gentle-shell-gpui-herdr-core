@@ -10,6 +10,9 @@ pub enum MachinesEvent {
     Close,
     /// Attach the existing Herdr terminal address in a new GPUI tab.
     OpenTerminal(String),
+    /// Open an ordinary native PTY when the local machine is selected
+    /// and the default backend is 'local'.
+    NewLocalTerminal,
 }
 
 pub struct MachinesView {
@@ -68,16 +71,15 @@ impl MachinesView {
         }
     }
 
-    /// Launch a new shell on local core (None) or a named remote core.
+    /// New shell on this PC follows the local backend; remote machines always
+    /// use Herdr even when local PTYs are the default for ordinary tabs.
     fn new_shell(&mut self, machine: Option<String>, cx: &mut Context<Self>) {
         if self.busy { return; }
-        if std::env::var("GENTLE_SHELL_TERMINAL_BACKEND")
-            .is_ok_and(|v| v.eq_ignore_ascii_case("local"))
+        if machine.is_none()
+            && std::env::var("GENTLE_SHELL_TERMINAL_BACKEND")
+                .is_ok_and(|v| v.eq_ignore_ascii_case("local"))
         {
-            self.error = Some(
-                "Herdr shells are disabled by GENTLE_SHELL_TERMINAL_BACKEND=local.".into()
-            );
-            cx.notify();
+            cx.emit(MachinesEvent::NewLocalTerminal);
             return;
         }
         self.busy = true;
