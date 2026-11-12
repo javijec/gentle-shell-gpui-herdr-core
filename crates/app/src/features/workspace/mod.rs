@@ -503,6 +503,7 @@ impl Workspace {
             cwd,
             path: Some(path),
             session_file: None,
+            herdr_address: None,
             title: SharedString::default(),
             running: false,
             _subscriptions: Vec::new(),
