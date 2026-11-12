@@ -83,3 +83,8 @@ For fallback verification, stop GPUI and run:
 - Remote agent machine selection and remote bridge deployment are 4B/4C.
 - The bridge is launched using the local GPUI executable, so this stage does
   not support starting it directly on JaviPi.
+- For 4A, foreground RPC requests larger than 1 MiB are rejected to avoid
+  flooding the GPUI UI thread with many thousands of PTY fragments. Large
+  attachments need a later nonblocking binary/file transport.
+- Windows release builds use the GUI subsystem; correct inherited ConPTY
+  standard handles in the bridge must be verified separately from debug.
