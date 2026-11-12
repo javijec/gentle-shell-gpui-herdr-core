@@ -31,7 +31,7 @@ pub fn repo_root(path: &std::path::Path) -> PathBuf {
 
 pub fn register(cx: &mut App) {
     crate::features::files::init(cx);
-    let terminal: crate::shared::pane::PaneFactory =
+    let terminal: crate::shared::pane::TerminalPaneFactory =
         Rc::new(|cwd: PathBuf, address: Option<String>, window: &mut Window, cx: &mut App| {
             let view = cx.new(|cx| TerminalView::new_restored(cwd, address, window, cx));
             let focus = view.focus_handle(cx);
