@@ -198,6 +198,9 @@ impl Workspace {
 
     /// Herdr machine and terminal browser (all discovery/actions off the UI thread).
     pub(super) fn open_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::features::terminal::herdr_enabled() {
+            return;
+        }
         if matches!(&self.overlay, Some((Overlay::Machines(_), _))) {
             self.close_overlay(window, cx);
             return;
@@ -212,10 +215,6 @@ impl Workspace {
                     let address = address.clone();
                     this.close_overlay(window, cx);
                     this.open_herdr_terminal(address, window, cx);
-                }
-                MachinesEvent::NewLocalTerminal => {
-                    this.close_overlay(window, cx);
-                    this.on_new_terminal_tab(&NewTerminalTab, window, cx);
                 }
             },
         );
