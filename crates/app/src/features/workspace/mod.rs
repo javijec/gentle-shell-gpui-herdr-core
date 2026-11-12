@@ -113,6 +113,8 @@ struct Pane {
     path: Option<PathBuf>,
     /// Last conversation file seen, to save when it changes.
     session_file: Option<PathBuf>,
+    /// Last observed Herdr address, so it gets persisted when first assigned.
+    herdr_address: Option<String>,
     /// What the tab bar shows for this pane, kept here so drawing the chrome
     /// never reads the views of tabs that aren't shown (reading an entity
     /// while drawing makes its every notify redraw the window). Agents
@@ -130,7 +132,9 @@ impl Pane {
             .session
             .as_ref()
             .is_some_and(|s| s.read(cx).is_running());
-        let changed = title != self.title || running != self.running;
+        let address = self.item.terminal_address.as_ref().and_then(|get| get(cx));
+        let changed = title != self.title || running != self.running || address != self.herdr_address;
+        self.herdr_address = address;
         self.title = title;
         self.running = running;
         changed
