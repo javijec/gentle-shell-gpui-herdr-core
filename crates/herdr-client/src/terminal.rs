@@ -329,7 +329,7 @@ fn terminal_finished(payload: &[u8]) -> bool {
     };
     matches!(
         value["reason"].as_str(),
-        Some("exited" | "killed" | "host_shutdown" | "server_stop" | "stopped_by_restart")
+        Some("exited" | "killed")
     )
 }
 
@@ -405,10 +405,10 @@ fn stream(
     let mut writer = bridge.stdin.take().expect("framed bridge has stdin");
     // Resynchronize with GUI size/focus after offline edits, even when the
     // attached terminal already has an established viewer from another app.
-    let _ = write_frame(
-        &mut writer, channel, RESIZE,
-        &[initial.cols.to_le_bytes(), initial.rows.to_le_bytes()].concat(),
-    );
+    let mut initial_size = Vec::with_capacity(4);
+    initial_size.extend_from_slice(&initial.cols.to_le_bytes());
+    initial_size.extend_from_slice(&initial.rows.to_le_bytes());
+    let _ = write_frame(&mut writer, channel, RESIZE, &initial_size);
     let _ = write_frame(&mut writer, channel, FOCUS, &[u8::from(initial.focused)]);
     let child = bridge.child.clone();
     let output_writer = std::thread::spawn(move || {
@@ -585,7 +585,62 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{CREDIT, DATA, Error, check_response, encode_frame, read_frame};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::{
+        CREDIT, DATA, Command, Error, check_response, discard_offline, encode_frame,
+        read_frame, retry_delay, terminal_finished, wait_retry,
+    };
+
+    #[test]
+    fn final_close_is_not_retried_but_recoverable_close_is() {
+        assert!(terminal_finished(br#"{"reason":"exited","exit_code":0}"#));
+        assert!(terminal_finished(br#"{"reason":"killed"}"#));
+        assert!(!terminal_finished(b""));
+        assert!(!terminal_finished(br#"{"reason":"holder_lost"}"#));
+        assert!(!terminal_finished(br#"{"reason":"server_stop"}"#));
+        assert!(!terminal_finished(br#"{"reason":"stopped_by_restart"}"#));
+    }
+
+    #[test]
+    fn retry_backoff_is_bounded() {
+        assert_eq!(retry_delay(1), Duration::from_secs(1));
+        assert_eq!(retry_delay(2), Duration::from_secs(2));
+        assert_eq!(retry_delay(3), Duration::from_secs(4));
+        assert_eq!(retry_delay(4), Duration::from_secs(8));
+        assert_eq!(retry_delay(99), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn stale_input_and_credit_never_replay_into_next_viewer() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Command::Input(b"old command".to_vec(), false)).unwrap();
+        tx.send(Command::Credit(1, 4096)).unwrap();
+        tx.send(Command::Resize(80, 24)).unwrap();
+        let closed = AtomicBool::new(false);
+        assert!(discard_offline(&rx, &closed));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn manual_retry_requires_an_explicit_command() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Command::Reconnect).unwrap();
+        assert!(wait_retry(&rx, &AtomicBool::new(false), None));
+    }
+
+    #[test]
+    fn manual_retry_is_cancelled_by_detach() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Command::Detach).unwrap();
+        assert!(!wait_retry(
+            &rx,
+            &AtomicBool::new(false),
+            Some(Duration::from_secs(30)),
+        ));
+    }
 
     #[test]
     fn wire_format_is_little_endian_and_round_trips() {
