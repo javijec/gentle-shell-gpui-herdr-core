@@ -16,7 +16,7 @@ use super::{SessionView, attachments, builtins};
 use gentle_core::transcript::NoticeLevel;
 
 impl SessionView {
-    pub(super) fn process(&self) -> Option<Arc<PiProcess>> {
+    pub(super) fn process(&self) -> Option<Arc<RpcProcess>> {
         match &self.backend.status {
             BackendStatus::Ready(process) => Some(process.clone()),
             _ => None,
