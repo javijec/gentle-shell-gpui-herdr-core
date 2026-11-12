@@ -710,6 +710,7 @@ fn serve(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::io::Cursor;
 
     use serde_json::json;
@@ -719,9 +720,44 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        CREDIT, DATA, Command, Error, check_response, discard_offline, encode_frame,
-        read_frame, retry_delay, terminal_finished, wait_retry,
+        CREDIT, DATA, Command, Error, bridge_environment, check_response, discard_offline,
+        encode_frame, read_frame, retry_delay, terminal_finished, wait_retry,
     };
+
+    #[test]
+    fn remote_bridge_never_receives_windows_home_path_or_launcher_settings() {
+        let sample = |name: &str| -> Option<OsString> {
+            match name {
+                "PATH" => Some(r"C:\\Windows;C:\\tools".into()),
+                "HOME" => Some(r"C:\\Users\\javij".into()),
+                "GENTLE_SHELL_BIN" => Some(r"C:\\tools\\gentle-shell.cmd".into()),
+                "GENTLE_SHELL_ARGS" => Some("--link".into()),
+                "GENTLE_SHELL_HERDR_REMOTE_BIN" => Some("/srv/tools/bin/gentle-shell".into()),
+                _ => None,
+            }
+        };
+        let remote = bridge_environment(Some("javipi"), &sample);
+        assert!(remote.get("PATH").is_none());
+        assert!(remote.get("HOME").is_none());
+        assert!(remote.get("GENTLE_SHELL_ARGS").is_none());
+        assert_eq!(remote["GENTLE_SHELL_BIN"], "/srv/tools/bin/gentle-shell");
+        assert_eq!(remote["TERM"], "xterm-256color");
+
+        let local = bridge_environment(None, &sample);
+        assert_eq!(local["GENTLE_SHELL_ARGS"], "--link");
+        assert!(local["PATH"].as_str().unwrap().contains("Windows"));
+    }
+
+    #[test]
+    fn remote_bridge_only_uses_explicit_remote_path_override() {
+        let sample = |name: &str| -> Option<OsString> {
+            (name == "GENTLE_SHELL_HERDR_REMOTE_PATH")
+                .then(|| OsString::from("/srv/tools/npm-global/bin:/usr/bin"))
+        };
+        let env = bridge_environment(Some("javipi"), &sample);
+        assert_eq!(env["PATH"], "/srv/tools/npm-global/bin:/usr/bin");
+        assert!(env.get("USERPROFILE").is_none());
+    }
 
     #[test]
     fn final_close_is_not_retried_but_recoverable_close_is() {
