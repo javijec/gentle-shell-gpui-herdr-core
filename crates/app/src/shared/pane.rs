@@ -39,7 +39,7 @@ pub struct PaneItem {
     /// Whether closing the pane would lose edits (file panes); `None` never does.
     pub unsaved: Option<UnsavedProbe>,
     /// Herdr address for workspace persistence (None for non-Herdr panes).
-    pub terminal_address: Option<Rc<dyn Fn(&App) -> Option<String>>>, 
+    pub terminal_address: Option<Rc<dyn Fn(&App) -> Option<String>>>,
 }
 
 /// Reads a pane's "has unsaved edits" state.
