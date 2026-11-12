@@ -72,6 +72,35 @@ For fallback verification, stop GPUI and run:
     $env:GENTLE_SHELL_TERMINAL_BACKEND = "local"
     cargo run --locked -p gentle-shell-gpui
 
+## Diagnóstico: extensión o paquete local inexistente
+
+Si GPUI muestra `Cannot find module 'D:\\Programacion\\gentle-shell-herdr'`,
+el error viene de la inicialización de Pi, no de la conexión Herdr. Pi puede
+cargar rutas de `extensions` y `packages` desde los ajustes del agente
+(global o aislado) y del proyecto. No modificar esos archivos automáticamente.
+
+En PowerShell, revisar qué archivos contienen la ruta antigua:
+
+    $candidates = @(
+      "$HOME\.gentle-shell\agent\settings.json",
+      "$HOME\.pi\agent\settings.json",
+      ".pi\settings.json"
+    )
+    foreach ($file in $candidates) {
+      if (Test-Path $file) {
+        Select-String -Path $file -SimpleMatch "gentle-shell-herdr"
+      }
+    }
+    Test-Path "D:\Programacion\gentle-shell-herdr"
+
+Si la ruta apunta a un checkout borrado, corregir o eliminar solo esa entrada
+en el `settings.json` que la referencia; hacer respaldo antes. Si se trata
+de un paquete local, reinstalarlo en una ruta que exista.
+
+4A ahora espera la respuesta `get_state` de Pi antes de emitir READY. Si falla
+una extensión, la pestaña muestra el mensaje de arranque junto al stderr
+capturado; no intenta enviar solicitudes a un proceso que no inició.
+
 ## Known limits / not yet verified
 
 - This branch has not been compiled or manually run on Windows by the author.
