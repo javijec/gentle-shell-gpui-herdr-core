@@ -224,8 +224,13 @@ impl TerminalView {
         let (herdr_tx, herdr_rx) = async_channel::unbounded::<HerdrEvent>();
         let (pty, herdr, error) = if use_herdr {
             let size = geometry.window_size();
+            let working_directory = if cwd.is_dir() {
+                cwd.clone()
+            } else {
+                dirs::home_dir().unwrap_or_else(|| cwd.clone())
+            };
             let session = TerminalSession::spawn(
-                cwd.clone(),
+                working_directory,
                 size.num_cols,
                 size.num_lines,
                 move |event| {
