@@ -318,6 +318,33 @@ impl Workspace {
         }
     }
 
+    /// Attach an existing Herdr address as a new GPUI tab (never run another
+    /// shell). Do not silently substitute a local PTY if Herdr is disabled.
+    pub(super) fn open_herdr_terminal(
+        &mut self,
+        address: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if std::env::var("GENTLE_SHELL_TERMINAL_BACKEND")
+            .is_ok_and(|v| v.eq_ignore_ascii_case("local"))
+        {
+            window.push_notification(
+                Notification::info(
+                    "To open Herdr terminals, unset GENTLE_SHELL_TERMINAL_BACKEND=local."
+                ),
+                cx,
+            );
+            return;
+        }
+        let cwd = self.active_cwd(cx);
+        if let Some(pane) = self.new_factory_pane_restored(
+            PaneKind::Terminal, cwd, Some(address), window, cx,
+        ) {
+            self.push_pane_tab(pane, window, cx);
+        }
+    }
+
     pub(super) fn open_tab(
         &mut self,
         kind: PaneKind,
