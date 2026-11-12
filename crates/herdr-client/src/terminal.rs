@@ -547,7 +547,7 @@ fn serve(
     let mut failures = 0u32;
     let mut generation = 0u64;
     loop {
-        if !discard_offline(&rx, &cancelled) { return Ok(()); }
+        if !discard_offline(&rx, cancelled) { return Ok(()); }
         let size = *desired.lock().unwrap_or_else(|e| e.into_inner());
         let attempted = Bridge::connect(&executable).and_then(|(mut bridge, feature)| {
             let (channel, automatic) = bridge.attach(&address, size.cols, size.rows, generation > 0)?;
@@ -581,13 +581,13 @@ fn serve(
             report(TerminalEvent::NeedsReconnect(format!(
                 "Herdr {address}: disconnected ({error}). Automatic retries exhausted."
             )));
-            if !wait_retry(&rx, &cancelled, None) { return Ok(()); }
+            if !wait_retry(&rx, cancelled, None) { return Ok(()); }
             failures = 0;
         } else {
             report(TerminalEvent::Retrying(format!(
                 "Herdr {address}: connection lost ({error}). Retry {failures}/4..."
             )));
-            if !wait_retry(&rx, &cancelled, Some(retry_delay(failures))) {
+            if !wait_retry(&rx, cancelled, Some(retry_delay(failures))) {
                 return Ok(());
             }
         }
