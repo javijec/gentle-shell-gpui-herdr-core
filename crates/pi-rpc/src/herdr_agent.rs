@@ -23,6 +23,71 @@ const TRANSPORT_TIMEOUT: Duration = Duration::from_secs(12);
 const TRANSPORT_PROBE_ID: &str = "gs4a-transport-probe";
 type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
 
+/// Stage 4B opt-in machine selection until the per-tab UI is added in 4C.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteTarget {
+    machine: String,
+    cwd: PathBuf,
+    bridge: String,
+}
+
+fn remote_absolute_path(value: &str) -> bool {
+    // Evaluated on Windows, even though this path belongs to Linux ARM64.
+    value.starts_with('/')
+        && !value.contains('\\')
+        && !value.chars().any(char::is_control)
+        && !value.split('/').any(|part| part == ".." || part == ".")
+}
+
+fn validate_remote_target(
+    machine: Option<&str>,
+    cwd: Option<&str>,
+    bridge: Option<&str>,
+) -> Result<Option<RemoteTarget>> {
+    let Some(machine) = machine else {
+        anyhow::ensure!(cwd.is_none() && bridge.is_none(),
+            "Remote CWD/bridge is set without GENTLE_SHELL_HERDR_AGENT_MACHINE");
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        !machine.is_empty() && machine.len() <= 128
+            && machine.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+        "Invalid GENTLE_SHELL_HERDR_AGENT_MACHINE: use the exact registered Herdr machine name"
+    );
+    let cwd = cwd.ok_or_else(|| anyhow!(
+        "Set GENTLE_SHELL_HERDR_REMOTE_CWD to the JaviPi workspace, e.g. /srv/workspaces/JaviPi"
+    ))?;
+    let bridge = bridge.ok_or_else(|| anyhow!(
+        "Set GENTLE_SHELL_HERDR_REMOTE_BRIDGE to the absolute Linux ARM64 bridge executable path"
+    ))?;
+    anyhow::ensure!(remote_absolute_path(cwd),
+        "GENTLE_SHELL_HERDR_REMOTE_CWD must be an absolute Linux path without . or ..");
+    anyhow::ensure!(remote_absolute_path(bridge) && bridge != "/",
+        "GENTLE_SHELL_HERDR_REMOTE_BRIDGE must be an absolute Linux executable path");
+    Ok(Some(RemoteTarget {
+        machine: machine.to_string(),
+        cwd: PathBuf::from(cwd),
+        bridge: bridge.to_string(),
+    }))
+}
+
+impl RemoteTarget {
+    fn from_env() -> Result<Option<Self>> {
+        let read = |key: &str| -> Result<Option<String>> {
+            match std::env::var(key) {
+                Ok(value) => Ok(Some(value)),
+                Err(std::env::VarError::NotPresent) => Ok(None),
+                Err(_) => Err(anyhow!("{key} must contain UTF-8 characters")),
+            }
+        };
+        let machine = read("GENTLE_SHELL_HERDR_AGENT_MACHINE")?;
+        let cwd = read("GENTLE_SHELL_HERDR_REMOTE_CWD")?;
+        let bridge = read("GENTLE_SHELL_HERDR_REMOTE_BRIDGE")?;
+        validate_remote_target(machine.as_deref(), cwd.as_deref(), bridge.as_deref())
+    }
+}
+
+
 /// Verify both directions of Herdr's PTY, not just the bridge's child-pipe
 /// handshake. On Windows a terminal may display READY but never deliver input.
 fn verify_transport(
@@ -188,18 +253,33 @@ impl HerdrAgentProcess {
         cwd: PathBuf,
         resume: Option<&Path>,
     ) -> Result<(Arc<Self>, async_channel::Receiver<Incoming>)> {
-        let executable = std::env::current_exe().context("cannot locate GPUI bridge executable")?;
+        let remote = RemoteTarget::from_env()?;
         let ticks = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let token = format!("p{}{:x}", std::process::id(), ticks);
-        let mut argv = vec![
-            executable.to_string_lossy().into_owned(),
-            "--herdr-agent-bridge".into(),
-            token.clone(),
-        ];
-        if let Some(resume) = resume {
-            argv.push("--session".into());
-            argv.push(resume.to_string_lossy().into_owned());
-        }
+        let (target_cwd, argv, on) = if let Some(remote) = remote {
+            // Windows-local session files cannot be resumed on Linux: fail
+            // closed instead of leaking the Windows path onto JaviPi.
+            anyhow::ensure!(resume.is_none(),
+                "Cannot resume a Windows-local session on a remote machine in 4B; open a new agent tab");
+            (
+                remote.cwd,
+                vec![remote.bridge, token.clone()],
+                Some(remote.machine),
+            )
+        } else {
+            let executable = std::env::current_exe()
+                .context("cannot locate local GPUI bridge executable")?;
+            let mut argv = vec![
+                executable.to_string_lossy().into_owned(),
+                "--herdr-agent-bridge".into(),
+                token.clone(),
+            ];
+            if let Some(path) = resume {
+                argv.push("--session".into());
+                argv.push(path.to_string_lossy().into_owned());
+            }
+            (cwd, argv, None)
+        };
         let (events, rx) = async_channel::unbounded();
         let (started_tx, started_rx) = mpsc::sync_channel::<Result<()>>(1);
         let started_tx = Arc::new(Mutex::new(Some(started_tx)));
@@ -210,7 +290,7 @@ impl HerdrAgentProcess {
         let incoming = Arc::new(Mutex::new(IncomingState::new(token.clone())));
         let session_ref: SessionReference = Arc::new(Mutex::new(None));
 
-        let session = Arc::new(TerminalSession::spawn_program(cwd, argv, 240, 80, {
+        let session = Arc::new(TerminalSession::spawn_program_at(target_cwd, argv, on, 240, 80, {
             let address = address.clone();
             let pending = pending.clone();
             let ready = ready.clone();
