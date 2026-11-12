@@ -475,8 +475,32 @@ impl Drop for HerdrAgentProcess {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{Incoming, IncomingState, Pending};
+    use super::{Incoming, IncomingState, Pending, validate_remote_target};
     use crate::herdr_wire::encode;
+
+    #[test]
+    fn valid_remote_target_has_linux_paths_and_exact_machine_name() {
+        let target = validate_remote_target(
+            Some("javipi"),
+            Some("/srv/workspaces/JaviPi"),
+            Some("/home/dietpi/.local/bin/gentle-shell-herdr-bridge"),
+        ).unwrap().unwrap();
+        assert_eq!(target.machine, "javipi");
+        assert_eq!(target.cwd.to_str(), Some("/srv/workspaces/JaviPi"));
+        assert_eq!(target.bridge, "/home/dietpi/.local/bin/gentle-shell-herdr-bridge");
+        assert_eq!(validate_remote_target(None, None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn remote_selection_fails_closed_on_missing_or_windows_paths() {
+        assert!(validate_remote_target(Some("javipi"), None, Some("/bin/bridge")).is_err());
+        assert!(validate_remote_target(Some("javipi"), Some("/srv/JaviPi"), None).is_err());
+        assert!(validate_remote_target(Some("bad/name"), Some("/srv"), Some("/bin/bridge")).is_err());
+        assert!(validate_remote_target(Some("javipi"), Some(r"D:\\Programacion"), Some("/bin/bridge")).is_err());
+        assert!(validate_remote_target(Some("javipi"), Some("/srv/../tmp"), Some("/bin/bridge")).is_err());
+        assert!(validate_remote_target(Some("javipi"), Some("/srv/JaviPi"), Some("bridge")).is_err());
+        assert!(validate_remote_target(None, Some("/srv/JaviPi"), None).is_err());
+    }
 
     #[test]
     fn streamed_events_and_ui_requests_keep_original_types() {
