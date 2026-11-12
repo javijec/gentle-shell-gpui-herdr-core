@@ -7,11 +7,29 @@
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
+
+use serde_json::{Value, json};
 
 use pi_rpc::herdr_wire::{Decoder, encode, valid_token};
 
 type Output = Arc<Mutex<io::Stdout>>;
+const PROBE_ID: &str = "gs4a-startup";
+const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The READY handshake is not satisfied until Pi itself answers a request.
+fn probe_response(line: &[u8]) -> Option<Result<(), String>> {
+    let value: Value = serde_json::from_slice(line).ok()?;
+    if value["type"] != "response" || value["id"] != PROBE_ID {
+        return None;
+    }
+    if value["success"] == true {
+        Some(Ok(()))
+    } else {
+        Some(Err(value["error"].as_str().unwrap_or("get_state failed").to_owned()))
+    }
+}
 
 fn emit(out: &Output, token: &str, kind: char, payload: &[u8]) -> io::Result<()> {
     let mut stream = out.lock().unwrap_or_else(|e| e.into_inner());
@@ -26,6 +44,8 @@ fn stream_lines(
     out: Output,
     token: String,
     kind: char,
+    mut ready: Option<mpsc::SyncSender<Result<(), String>>>,
+    diagnostics: Option<Arc<Mutex<String>>>,
 ) -> io::Result<()> {
     let mut reader = io::BufReader::new(input);
     loop {
@@ -37,6 +57,22 @@ fn stream_lines(
         }
         if n > 8 * 1024 * 1024 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized Pi record"));
+        }
+        if kind == 'O'
+            && let Some(response) = probe_response(&line)
+        {
+            if let Some(tx) = ready.take() {
+                let _ = tx.try_send(response);
+            }
+            continue;
+        }
+        if kind == 'E'
+            && let Some(diagnostics) = &diagnostics
+        {
+            let mut buffer = diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+            if buffer.len() < 4096 {
+                buffer.push_str(&String::from_utf8_lossy(&line).chars().take(2048).collect::<String>());
+            }
         }
         emit(&out, &token, kind, &line)?;
     }
@@ -101,18 +137,49 @@ fn serve(args: &[String]) -> anyhow::Result<i32> {
     let child_stderr = child.stderr.take().ok_or_else(|| anyhow::anyhow!("no Pi stderr"))?;
 
     let output: Output = Arc::new(Mutex::new(io::stdout()));
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let diagnostics = Arc::new(Mutex::new(String::new()));
     let out_stdout = output.clone();
     let tok_stdout = token.clone();
     let stdout_thread = std::thread::spawn(move || {
-        stream_lines(child_stdout, out_stdout, tok_stdout, 'O')
+        stream_lines(child_stdout, out_stdout, tok_stdout, 'O', Some(ready_tx), None)
     });
     let out_stderr = output.clone();
     let tok_stderr = token.clone();
+    let log = diagnostics.clone();
     let stderr_thread = std::thread::spawn(move || {
-        stream_lines(child_stderr, out_stderr, tok_stderr, 'E')
+        stream_lines(child_stderr, out_stderr, tok_stderr, 'E', None, Some(log))
     });
 
-    // The agent is now accepting Pi JSONL through the bridge.
+    // A process handle is not a successful Pi launch. Check actual JSONL RPC
+    // before notifying GPUI: extensions, auth and configuration can fail.
+    serde_json::to_writer(&mut child_stdin, &json!({
+        "type": "get_state",
+        "id": PROBE_ID
+    }))?;
+    child_stdin.write_all(b"\n")?;
+    child_stdin.flush()?;
+
+    let start = match ready_rx.recv_timeout(PROBE_TIMEOUT) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(anyhow::anyhow!("Pi get_state rejected startup: {error}")),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(anyhow::anyhow!("Pi exited before responding to get_state"))
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err(anyhow::anyhow!("Pi did not respond to get_state within 15 seconds"))
+        }
+    };
+    if let Err(error) = start {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = stdout_thread.join();
+        let _ = stderr_thread.join();
+        let stderr = diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+        anyhow::bail!("Gentle Shell agent startup failed: {error}. {stderr}");
+    }
+
+    // Only now is the agent actually ready for GPUI's Pi RPC requests.
     emit(&output, token, 'R', b"")?;
 
     let input_token = token.clone();
@@ -141,4 +208,27 @@ fn serve(args: &[String]) -> anyhow::Result<i32> {
     let code = status.code().unwrap_or(1);
     emit(&output, token, 'X', code.to_string().as_bytes())?;
     Ok(code)
+}
+
+#[cfg(test)]
+mod startup_probe_tests {
+    use super::probe_response;
+
+    #[test]
+    fn ready_requires_successful_pi_get_state_response() {
+        assert_eq!(probe_response(
+            br#"{"type":"response","id":"gs4a-startup","success":true,"data":{}}"#
+        ), Some(Ok(())));
+        assert_eq!(probe_response(
+            br#"{"type":"response","id":"another-id","success":true}"#
+        ), None);
+        assert_eq!(probe_response(br#"{"type":"agent_start"}"#), None);
+    }
+
+    #[test]
+    fn failed_probe_is_not_reported_as_ready() {
+        assert_eq!(probe_response(
+            br#"{"type":"response","id":"gs4a-startup","success":false,"error":"extension failed"}"#
+        ), Some(Err("extension failed".to_owned())));
+    }
 }
