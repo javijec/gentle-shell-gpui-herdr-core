@@ -35,11 +35,16 @@ fn stop_owned_terminal(address: String) {
 struct IncomingState {
     wire: Decoder,
     jsonl: Vec<u8>,
+    stderr_tail: String,
 }
 
 impl IncomingState {
     fn new(token: String) -> Self {
-        Self { wire: Decoder::new(token), jsonl: Vec::new() }
+        Self {
+            wire: Decoder::new(token),
+            jsonl: Vec::new(),
+            stderr_tail: String::new(),
+        }
     }
 
     /// The outer stream can split a frame anywhere; a Pi record can itself
@@ -60,6 +65,9 @@ impl IncomingState {
                 }
                 'E' => {
                     let line = String::from_utf8_lossy(&frame.payload).into_owned();
+                    if self.stderr_tail.len() < 4096 {
+                        self.stderr_tail.push_str(&line);
+                    }
                     let _ = events.try_send(Incoming::Stderr(line));
                 }
                 'O' => {
@@ -164,8 +172,11 @@ impl HerdrAgentProcess {
                     if let Some(session) = session_ref.lock().unwrap().as_ref().and_then(Weak::upgrade) {
                         session.consumed(generation, bytes.len());
                     }
-                    let (started, exit) = incoming.lock().unwrap()
-                        .consume(&bytes, &pending, &events);
+                    let (started, exit, stderr_tail) = {
+                        let mut state = incoming.lock().unwrap();
+                        let (started, exit) = state.consume(&bytes, &pending, &events);
+                        (started, exit, state.stderr_tail.clone())
+                    };
                     if started {
                         ready.store(true, Ordering::Release);
                         if let Some(tx) = started_tx.lock().unwrap().take() {
@@ -177,7 +188,7 @@ impl HerdrAgentProcess {
                         pending.lock().unwrap().clear();
                         if let Some(tx) = started_tx.lock().unwrap().take() {
                             let _ = tx.send(Err(anyhow!(
-                                "Herdr RPC bridge exited before READY (code {code:?})"
+                                "Gentle Shell could not start under Herdr (code {code:?}): {stderr_tail}"
                             )));
                         }
                         let _ = events.try_send(Incoming::Exited(code));
@@ -200,7 +211,10 @@ impl HerdrAgentProcess {
                     ready.store(false, Ordering::Release);
                     pending.lock().unwrap().clear();
                     if let Some(tx) = started_tx.lock().unwrap().take() {
-                        let _ = tx.send(Err(anyhow!("Herdr bridge closed before READY")));
+                        let details = incoming.lock().unwrap().stderr_tail.clone();
+                        let _ = tx.send(Err(anyhow!(
+                            "Herdr bridge closed before Pi became ready: {details}"
+                        )));
                     }
                     let _ = events.try_send(Incoming::Exited(None));
                 }
