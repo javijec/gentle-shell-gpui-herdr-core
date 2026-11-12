@@ -178,6 +178,7 @@ pub struct HerdrAgentProcess {
     pending: Pending,
     next_id: AtomicU64,
     ready: Arc<AtomicBool>,
+    last_failure: Arc<Mutex<Option<String>>>,
     stopping: AtomicBool,
 }
 
@@ -205,6 +206,7 @@ impl HerdrAgentProcess {
         let address = Arc::new(Mutex::new(None));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let ready = Arc::new(AtomicBool::new(false));
+        let last_failure = Arc::new(Mutex::new(None));
         let incoming = Arc::new(Mutex::new(IncomingState::new(token.clone())));
         let session_ref: SessionReference = Arc::new(Mutex::new(None));
 
@@ -212,6 +214,7 @@ impl HerdrAgentProcess {
             let address = address.clone();
             let pending = pending.clone();
             let ready = ready.clone();
+            let last_failure = last_failure.clone();
             let session_ref = session_ref.clone();
             move |event| match event {
                 TerminalEvent::Assigned(value) => {
@@ -228,12 +231,16 @@ impl HerdrAgentProcess {
                         (started, exit, state.stderr_tail.clone())
                     };
                     if started {
+                        *last_failure.lock().unwrap() = None;
                         ready.store(true, Ordering::Release);
                         if let Some(tx) = started_tx.lock().unwrap().take() {
                             let _ = tx.send(Ok(()));
                         }
                     }
                     if let Some(code) = exit {
+                        *last_failure.lock().unwrap() = Some(format!(
+                            "Gentle Shell agent exited (code {code:?}): {stderr_tail}"
+                        ));
                         ready.store(false, Ordering::Release);
                         pending.lock().unwrap().clear();
                         if let Some(tx) = started_tx.lock().unwrap().take() {
@@ -247,6 +254,7 @@ impl HerdrAgentProcess {
                 TerminalEvent::Retrying(error)
                 | TerminalEvent::NeedsReconnect(error)
                 | TerminalEvent::Failed(error) => {
+                    *last_failure.lock().unwrap() = Some(error.clone());
                     ready.store(false, Ordering::Release);
                     pending.lock().unwrap().clear();
                     let _ = events.try_send(Incoming::Stderr(error.clone()));
@@ -258,6 +266,10 @@ impl HerdrAgentProcess {
                     }
                 }
                 TerminalEvent::Closed => {
+                    let details = incoming.lock().unwrap().stderr_tail.clone();
+                    *last_failure.lock().unwrap() = Some(format!(
+                        "Herdr agent terminal closed: {details}"
+                    ));
                     ready.store(false, Ordering::Release);
                     pending.lock().unwrap().clear();
                     if let Some(tx) = started_tx.lock().unwrap().take() {
@@ -294,6 +306,7 @@ impl HerdrAgentProcess {
                 pending,
                 next_id: AtomicU64::new(1),
                 ready,
+                last_failure,
                 stopping: AtomicBool::new(false),
             }),
             rx,
@@ -302,7 +315,9 @@ impl HerdrAgentProcess {
 
     fn write(&self, value: &Value) -> Result<()> {
         if !self.ready.load(Ordering::Acquire) {
-            return Err(anyhow!("Herdr RPC bridge is not connected"));
+            let details = self.last_failure.lock().unwrap().clone()
+                .unwrap_or_else(|| "Herdr RPC bridge is not connected".into());
+            return Err(anyhow!(details));
         }
         let mut json = serde_json::to_vec(value)?;
         json.push(b'\n');
@@ -331,9 +346,13 @@ impl HerdrAgentProcess {
             }
             Ok(rx)
         })();
+        let last_failure = self.last_failure.clone();
         async move {
-            let response = result?.recv().await
-                .map_err(|_| anyhow!("Herdr RPC bridge exited before replying"))?;
+            let response = result?.recv().await.map_err(|_| {
+                let details = last_failure.lock().unwrap().clone()
+                    .unwrap_or_else(|| "Herdr RPC bridge exited before replying".into());
+                anyhow!(details)
+            })?;
             if response.success {
                 Ok(response)
             } else {
