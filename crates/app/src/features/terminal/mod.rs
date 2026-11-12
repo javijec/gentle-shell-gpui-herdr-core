@@ -23,6 +23,8 @@ use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::{CursorShape, Processor, StdSyncHandler};
 use herdr_client::terminal::{TerminalEvent as HerdrEvent, TerminalSession};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::Sizable as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -110,6 +112,8 @@ pub struct TerminalView {
     herdr: Option<Arc<TerminalSession>>,
     herdr_address: Option<String>,
     last_focused: bool,
+    /// Manual reconnect is available only after bounded automatic retries.
+    herdr_needs_reconnect: bool,
     error: Option<SharedString>,
     focus_handle: FocusHandle,
     cwd: PathBuf,
@@ -264,13 +268,13 @@ impl TerminalView {
                 while let Ok(event) = herdr_rx.recv().await {
                     if this.update(cx, |this, cx| {
                         match event {
-                            HerdrEvent::Output(bytes) => {
+                            HerdrEvent::Output { generation, bytes } => {
                                 {
                                     let mut term = this.term.lock();
                                     parser.advance(&mut *term, &bytes);
                                 }
                                 if let Some(session) = &this.herdr {
-                                    session.consumed(bytes.len());
+                                    session.consumed(generation, bytes.len());
                                 }
                             }
                             HerdrEvent::Assigned(address) => {
@@ -279,19 +283,37 @@ impl TerminalView {
                             }
                             HerdrEvent::Retrying(message) => {
                                 this.error = Some(message.into());
+                                this.herdr_needs_reconnect = false;
                             }
-                            HerdrEvent::Attached(address) => {
+                            HerdrEvent::NeedsReconnect(message) => {
+                                this.error = Some(message.into());
+                                this.herdr_needs_reconnect = true;
+                            }
+                            HerdrEvent::Attached { address, recovered } => {
+                                if recovered {
+                                    // Herdr starts each new channel with an authoritative
+                                    // repaint. Drop partial ANSI sequences from the old
+                                    // connection, then clear the old screen.
+                                    parser = Processor::new();
+                                    let mut term = this.term.lock();
+                                    parser.advance(&mut *term, b"\x1bc");
+                                    this.osc_title = None;
+                                }
                                 this.herdr_address = Some(address);
+                                this.herdr_needs_reconnect = false;
                                 this.error = None;
                                 cx.emit(TerminalEvent::TitleChanged);
                             }
                             HerdrEvent::Closed => {
+                                this.herdr_needs_reconnect = false;
+                                this.error = None;
                                 if !this.exited {
                                     this.exited = true;
                                     cx.emit(TerminalEvent::Exited);
                                 }
                             }
                             HerdrEvent::Failed(error) => {
+                                this.herdr_needs_reconnect = false;
                                 this.error = Some(format!("Herdr: {error}").into());
                                 if !this.exited {
                                     this.exited = true;
@@ -333,6 +355,7 @@ impl TerminalView {
             herdr,
             herdr_address: if use_herdr { resume } else { None },
             last_focused: false,
+            herdr_needs_reconnect: false,
             error,
             focus_handle: cx.focus_handle(),
             cwd,
@@ -350,6 +373,15 @@ impl TerminalView {
     /// Persistent identity for workspace snapshots; None for a local PTY.
     pub fn herdr_address(&self) -> Option<String> {
         self.herdr_address.clone()
+    }
+
+    fn reconnect_herdr(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = &self.herdr {
+            session.reconnect();
+            self.herdr_needs_reconnect = false;
+            self.error = Some("Reconnecting to the existing Herdr terminal...".into());
+            cx.notify();
+        }
     }
 
     pub fn title(&self) -> SharedString {
@@ -1137,6 +1169,21 @@ impl Render for TerminalView {
                                 .text_size(px(12.))
                                 .text_color(ui::danger())
                                 .child(error),
+                        ),
+                )
+            })
+            .when(self.herdr_needs_reconnect, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .bottom(px(PADDING + 30.))
+                        .right(px(PADDING))
+                        .child(
+                            Button::new("herdr-manual-reconnect")
+                                .primary()
+                                .small()
+                                .label("Reconnect Herdr")
+                                .on_click(cx.listener(|this, _, _, cx| this.reconnect_herdr(cx))),
                         ),
                 )
             })
