@@ -81,6 +81,18 @@ fn json_round_trip() {
     // A file from before the sidebar was saved keeps it showing.
     assert!(minimal.sidebar);
     assert_eq!(SavedState::default().sidebar, minimal.sidebar);
+
+    // Files saved by older versions had no Herdr identity.
+    let legacy: SavedPane = serde_json::from_str(
+        r#"{"kind":"terminal","cwd":"/tmp/project","session":null}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.herdr_terminal, None);
+    let restored: SavedPane = serde_json::from_str(
+        r#"{"kind":"terminal","cwd":"/tmp/project","herdr_terminal":"javipi/t7"}"#,
+    )
+    .unwrap();
+    assert_eq!(restored.herdr_terminal.as_deref(), Some("javipi/t7"));
 }
 
 #[test]
