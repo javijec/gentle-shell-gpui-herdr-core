@@ -181,6 +181,10 @@ impl PaletteView {
             }
         });
         let mut commands = screen_rows();
+        if !crate::features::terminal::herdr_enabled() {
+            // Hide Machines from the command palette in native/local mode.
+            commands.retain(|row| row.action != PaletteAction::Machines);
+        }
         commands.extend(input.commands.into_iter().filter_map(command_row));
 
         let root = input.root.clone();
