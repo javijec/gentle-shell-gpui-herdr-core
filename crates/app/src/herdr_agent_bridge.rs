@@ -6,7 +6,7 @@
 
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use pi_rpc::herdr_wire::{Decoder, encode, valid_token};
