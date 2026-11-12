@@ -319,14 +319,16 @@ impl Workspace {
     }
 
     /// Attach an existing Herdr address as a new GPUI tab without running a
-    /// replacement shell. The explicit address overrides the default backend,
-    /// so local PTYs and remote Herdr sessions can share the same workspace.
+    /// replacement shell. Only available when Herdr is the selected backend.
     pub(super) fn open_herdr_terminal(
         &mut self,
         address: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !crate::features::terminal::herdr_enabled() {
+            return;
+        }
         let cwd = self.active_cwd(cx);
         if let Some(pane) = self.new_factory_pane_restored(
             PaneKind::Terminal, cwd, Some(address), window, cx,
