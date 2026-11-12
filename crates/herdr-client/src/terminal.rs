@@ -26,6 +26,8 @@ const AUTOMATIC_INPUT: u8 = 6;
 /// thread, or forward them to GPUI's async executor.
 #[derive(Debug)]
 pub enum TerminalEvent {
+    /// A permanent address has been allocated or selected; persist immediately.
+    Assigned(String),
     Attached(String),
     Output(Vec<u8>),
     Closed,
@@ -55,6 +57,7 @@ impl TerminalSession {
     /// attach instead of creating a new shell (useful for manual recovery).
     pub fn spawn(
         cwd: PathBuf,
+        resume: Option<String>,
         cols: u16,
         rows: u16,
         report: impl Fn(TerminalEvent) + Send + 'static,
@@ -62,7 +65,7 @@ impl TerminalSession {
         let (tx, rx) = mpsc::channel();
         let worker_tx = tx.clone();
         std::thread::spawn(move || {
-            if let Err(error) = serve(cwd, cols.max(1), rows.max(1), rx, worker_tx, &report) {
+            if let Err(error) = serve(cwd, resume, cols.max(1), rows.max(1), rx, worker_tx, &report) {
                 report(TerminalEvent::Failed(error.to_string()));
             }
         });
@@ -251,6 +254,7 @@ fn check_response(reply: Value, id: u64) -> Result<Value> {
 
 fn serve(
     cwd: PathBuf,
+    resume: Option<String>,
     cols: u16,
     rows: u16,
     rx: Receiver<Command>,
@@ -260,10 +264,14 @@ fn serve(
     let executable = std::env::var_os("GENTLE_SHELL_HERDR_HC")
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| OsString::from("hc"));
-    let address = match std::env::var("GENTLE_SHELL_HERDR_TERMINAL")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-    {
+    // A restored pane's address always takes priority over the legacy
+    // diagnostic override. Never silently create a replacement terminal if
+    // the old one is unavailable: it may still be running remotely.
+    let address = match resume.or_else(|| {
+        std::env::var("GENTLE_SHELL_HERDR_TERMINAL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+    }) {
         Some(address) => address,
         None => {
             let mut client = HerdrClient::connect_with_executable(&executable)?;
@@ -281,6 +289,7 @@ fn serve(
                 .to_owned()
         }
     };
+    report(TerminalEvent::Assigned(address.clone()));
     let (mut bridge, has_auto_feature) = Bridge::connect(&executable)?;
     let (channel, has_auto_attach) = bridge.attach(&address, cols, rows)?;
     let automatic = has_auto_feature && has_auto_attach;
