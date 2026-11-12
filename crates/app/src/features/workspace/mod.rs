@@ -126,6 +126,44 @@ struct Pane {
     _subscriptions: Vec<Subscription>,
 }
 
+/// Keep a dormant Herdr address in native mode without starting any
+/// Herdr process. When switching back to Herdr, the original address can be
+/// restored instead of silently losing it on workspace save.
+fn retained_herdr_address(
+    reported: Option<String>,
+    previous: Option<String>,
+    herdr_mode: bool,
+) -> Option<String> {
+    if herdr_mode {
+        reported
+    } else {
+        reported.or(previous)
+    }
+}
+
+#[cfg(test)]
+mod retained_herdr_address_tests {
+    use super::retained_herdr_address;
+
+    #[test]
+    fn local_mode_preserves_existing_remote_address() {
+        assert_eq!(
+            retained_herdr_address(None, Some("javipi/t17".into()), false),
+            Some("javipi/t17".into())
+        );
+        assert_eq!(retained_herdr_address(None, None, false), None);
+    }
+
+    #[test]
+    fn herdr_mode_uses_current_authoritative_address() {
+        assert_eq!(
+            retained_herdr_address(Some("t12".into()), Some("t11".into()), true),
+            Some("t12".into())
+        );
+        assert_eq!(retained_herdr_address(None, Some("t11".into()), true), None);
+    }
+}
+
 impl Pane {
     /// Re-read the title and busy state; whether either changed.
     fn sync_chrome(&mut self, cx: &App) -> bool {
@@ -134,7 +172,12 @@ impl Pane {
             .session
             .as_ref()
             .is_some_and(|s| s.read(cx).is_running());
-        let address = self.item.terminal_address.as_ref().and_then(|get| get(cx));
+        let reported = self.item.terminal_address.as_ref().and_then(|get| get(cx));
+        let address = retained_herdr_address(
+            reported,
+            self.herdr_address.clone(),
+            crate::features::terminal::herdr_enabled(),
+        );
         let changed = title != self.title || running != self.running || address != self.herdr_address;
         self.herdr_address = address;
         self.title = title;
