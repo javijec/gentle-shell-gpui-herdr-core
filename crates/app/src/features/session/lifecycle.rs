@@ -3,6 +3,7 @@
 //! the conversation state a fresh start or switch resets.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::component::WindowExt as _;
