@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use pi_rpc::herdr_wire::{Decoder, encode, valid_token};
+use crate::herdr_wire::{Decoder, encode, valid_token};
 
 type Output = Arc<Mutex<io::Stdout>>;
 const PROBE_ID: &str = "gs4a-startup";
