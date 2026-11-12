@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result, anyhow};
 use herdr_client::terminal::{TerminalEvent, TerminalSession};
 use serde_json::{Value, json};
 
-use super::herdr_wire::{Decoder, encode};
+use super::herdr_wire::{Decoder, encode_input};
 use super::{Incoming, Pending, Record, Response, UiAnswer, parse_record};
 
 const MAX_JSONL: usize = 8 * 1024 * 1024;
@@ -257,7 +257,7 @@ impl HerdrAgentProcess {
         // of PTY frames synchronously on the GPUI foreground thread.
         anyhow::ensure!(json.len() <= 1024 * 1024,
             "Herdr RPC 4A request exceeds the 1 MiB foreground limit");
-        for frame in encode(&self.token, 'I', &json) {
+        for frame in encode_input(&self.token, &json) {
             self.session.input(frame);
         }
         Ok(())
