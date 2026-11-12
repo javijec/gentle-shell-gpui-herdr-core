@@ -185,6 +185,7 @@ impl Workspace {
                 focus,
                 title,
                 unsaved: None,
+                terminal_address: None,
             },
             session: Some(session),
             cwd,
@@ -208,13 +209,24 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<PaneId> {
+        self.new_factory_pane_restored(kind, target, None, window, cx)
+    }
+
+    fn new_factory_pane_restored(
+        &mut self,
+        kind: PaneKind,
+        target: PathBuf,
+        herdr_terminal: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<PaneId> {
         let factories = PaneFactories::get(cx);
-        let factory = match kind {
-            PaneKind::Terminal => factories.terminal,
-            PaneKind::File => factories.file,
-            PaneKind::Agent => None,
+        let available = match kind {
+            PaneKind::Terminal => factories.terminal.is_some(),
+            PaneKind::File => factories.file.is_some(),
+            PaneKind::Agent => false,
         };
-        let Some(factory) = factory else {
+        if !available {
             window.push_notification(
                 Notification::info(format!(
                     "{} panes are not available in this build.",
@@ -227,7 +239,11 @@ impl Workspace {
             );
             return None;
         };
-        let item = factory(target.clone(), window, cx);
+        let item = match kind {
+            PaneKind::Terminal => (factories.terminal?)(target.clone(), herdr_terminal, window, cx),
+            PaneKind::File => (factories.file?)(target.clone(), window, cx),
+            PaneKind::Agent => return None,
+        };
         let id = self.alloc_id();
         let (cwd, path) = match kind {
             PaneKind::File => (
@@ -290,7 +306,7 @@ impl Workspace {
             }
             PaneKind::Terminal => {
                 PaneFactories::get(cx).terminal.as_ref()?;
-                self.new_factory_pane(PaneKind::Terminal, cwd, window, cx)
+                self.new_factory_pane_restored(PaneKind::Terminal, cwd, saved.herdr_terminal.clone(), window, cx)
             }
             PaneKind::File => {
                 let path = saved.path.clone().filter(|p| p.is_file())?;
