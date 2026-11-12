@@ -578,8 +578,26 @@ fn serve(
                 if let Some(path) = std::env::var_os("PATH") {
                     params["env"]["PATH"] = json!(path.to_string_lossy());
                 }
-                if let Some(bin) = std::env::var_os("GENTLE_SHELL_BIN") {
-                    params["env"]["GENTLE_SHELL_BIN"] = json!(bin.to_string_lossy());
+                // The Herdr daemon can outlive GPUI and therefore carry
+                // older environment values. Use the same non-secret launcher
+                // and profile selectors as the foreground GPUI process so
+                // Herdr agents load the same Pi configuration as local ones.
+                for name in [
+                    "GENTLE_SHELL_BIN",
+                    "GENTLE_SHELL_ARGS",
+                    "GENTLE_SHELL_HOME",
+                    "GENTLE_SHELL_CONFIG",
+                    "GENTLE_SHELL_USER_PI_HOME",
+                    "GENTLE_PI_AGENT_HOME",
+                    "GENTLE_PI_CONFIG_HOME",
+                    "GENTLE_SHELL_PI",
+                    "PI_CODING_AGENT_DIR",
+                    "HOME",
+                    "USERPROFILE",
+                ] {
+                    if let Some(value) = std::env::var_os(name) {
+                        params["env"][name] = json!(value.to_string_lossy());
+                    }
                 }
             }
             let run = client.call("terminal.run", params)?;
