@@ -410,7 +410,7 @@ impl Render for Workspace {
             .children(self.overlay.as_ref().map(|(overlay, _)| match overlay {
                 Overlay::Providers(view) => view.clone().into_any_element(),
                 Overlay::Sessions(view) => view.clone().into_any_element(),
-                Overlay::Machines(view) => view.clone().into_any_element()
+                Overlay::Machines(view) => view.clone().into_any_element(),
                 Overlay::Palette(view) => view.clone().into_any_element(),
                 Overlay::Usage(view) => view.clone().into_any_element(),
                 Overlay::Memory(view) => view.clone().into_any_element(),
