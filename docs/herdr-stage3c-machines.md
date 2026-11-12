@@ -17,16 +17,19 @@ comandos (Ctrl+K > Machines, o Cmd+K en macOS).
   `machine/tN`, nombre, cwd y estado.
 - Open: adjuntarse a una terminal existente en nueva pestaña; no ejecuta
   `terminal.run` y no crea otra sesión.
-- New shell: invoca `terminal.run {on: machine, no_parent: true, wait: false}`
-  en el core local y abre una pestaña con la dirección devuelta.
+- New shell: para máquinas remotas invoca `terminal.run {on: machine, no_parent: true, wait: false}`
+  en Herdr y abre una pestaña con la dirección devuelta. En el equipo local
+  respeta el backend predeterminado (`local`: PTY nativo; `herdr`: shell Herdr).
 - Connect: solicita `machine.connect` para una máquina desconectada.
 - Refresh: consulta `machine.list` y `terminal.list` otra vez.
 - Errores de Herdr visibles sin bloquear el resto de GPUI.
 
 Los paneles abiertos continúan usando el guardado del address de 3A y la
-reconexión de 3B. La selección `GENTLE_SHELL_TERMINAL_BACKEND=local` impide
-abrir una sesión Herdr y también crear nuevas shells desde Machines: no hay
-fallback silencioso a un PTY local ni procesos Herdr huérfanos.
+reconexión de 3B. El backend predeterminado controla únicamente las terminales
+locales nuevas. Una dirección Herdr explícita o restaurada se adjunta siempre
+a Herdr, incluso con `GENTLE_SHELL_TERMINAL_BACKEND=local`. Así pueden
+coexistir un CMD/PowerShell nativo y shells remotas de JaviPi en la misma
+ventana, sin crear una segunda sesión al abrir una dirección existente.
 
 ## Validación en Windows
 
@@ -37,6 +40,15 @@ fallback silencioso a un PTY local ni procesos Herdr huérfanos.
     cargo clippy --workspace --all-targets --locked -- -D warnings
     $env:GENTLE_SHELL_TERMINAL_BACKEND = "herdr"
     cargo run --locked -p gentle-shell-gpui
+
+Para verificar el modo mixto en Windows:
+
+    $env:GENTLE_SHELL_TERMINAL_BACKEND = "local"
+    cargo run --locked -p gentle-shell-gpui
+
+Abrir una pestaña local mediante "+" y luego Machines > JaviPi > New shell;
+ambas deben coexistir. Machines > JaviPi > Open debe adjuntar la dirección
+existente, incluso después de reiniciar GPUI.
 
 Si ya tenés esta rama local:
 
@@ -58,7 +70,10 @@ Si ya tenés esta rama local:
 39. Si está desconectada, Connect pide a Herdr la conexión, y Refresh refleja
     lo que reporte su estado.
 40. Sin `hc` accesible, Machines muestra un error en lugar de bloquear GPUI.
-41. Con el backend forzado `local`, New shell no crea procesos Herdr.
+41. Con backend `local`, una pestaña nueva y New shell en el grupo local
+    usan PTY nativo; Open y New shell en una máquina remota usan Herdr. Al
+    reiniciar GPUI, cada terminal conserva el backend que corresponde a su
+    dirección persistida. Ninguna acción Open duplica sesiones.
 
 Las comprobaciones 36–39 requieren una máquina remota configurada mediante
 Herdr; si no existe, deben marcarse NP, no como aprobadas.
