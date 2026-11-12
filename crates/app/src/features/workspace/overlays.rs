@@ -213,6 +213,10 @@ impl Workspace {
                     this.close_overlay(window, cx);
                     this.open_herdr_terminal(address, window, cx);
                 }
+                MachinesEvent::NewLocalTerminal => {
+                    this.close_overlay(window, cx);
+                    this.on_new_terminal_tab(&NewTerminalTab, window, cx);
+                }
             },
         );
         self.overlay = Some((Overlay::Machines(view), subscription));
