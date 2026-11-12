@@ -63,10 +63,10 @@ impl Decoder {
         let mut result = Vec::new();
         for &byte in bytes {
             if byte == b'\n' {
-                if !self.discarding {
-                    if let Some(frame) = self.parse_line() {
-                        result.push(frame);
-                    }
+                if !self.discarding
+                    && let Some(frame) = self.parse_line()
+                {
+                    result.push(frame);
                 }
                 self.pending.clear();
                 self.discarding = false;
