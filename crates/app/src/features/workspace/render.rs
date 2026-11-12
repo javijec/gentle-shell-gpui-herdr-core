@@ -172,6 +172,16 @@ impl Render for Workspace {
                                     )
                                     .children(crate::features::music::title_button(&self.music, cx))
                                     .children(self.render_devices_button(cx))
+                                    .child(
+                                        Button::new("title-machines")
+                                            .ghost()
+                                            .xsmall()
+                                            .icon(Icon::new(IconName::SquareTerminal))
+                                            .tooltip("Machines: Herdr computers and persistent terminals")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.open_machines(window, cx)
+                                            })),
+                                    )
                                     .children(self.render_tray(cx))
                                     .child({
                                         let weak = cx.entity().downgrade();
@@ -400,6 +410,7 @@ impl Render for Workspace {
             .children(self.overlay.as_ref().map(|(overlay, _)| match overlay {
                 Overlay::Providers(view) => view.clone().into_any_element(),
                 Overlay::Sessions(view) => view.clone().into_any_element(),
+                Overlay::Machines(view) => view.clone().into_any_element(),
                 Overlay::Palette(view) => view.clone().into_any_element(),
                 Overlay::Usage(view) => view.clone().into_any_element(),
                 Overlay::Memory(view) => view.clone().into_any_element(),
