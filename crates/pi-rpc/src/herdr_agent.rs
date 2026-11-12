@@ -308,8 +308,42 @@ impl Drop for HerdrAgentProcess {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{IncomingState, Pending};
+    use super::{Incoming, IncomingState, Pending};
     use crate::herdr_wire::encode;
+
+    #[test]
+    fn streamed_events_and_ui_requests_keep_original_types() {
+        let pending: Pending = Arc::new(Mutex::new(Default::default()));
+        let (events, rx) = async_channel::unbounded();
+        let mut parser = IncomingState::new("test".into());
+        let jsonl = concat!(
+            "{\"type\":\"message_update\",\"value\":\"hello\"}\n",
+            "{\"type\":\"extension_ui_request\",\"id\":\"ui1\",",
+            "\"method\":\"confirm\",\"title\":\"Allow?\",\"message\":\"Run?\"}\n"
+        );
+        let framed = encode("test", 'O', jsonl.as_bytes()).concat();
+        for chunk in framed.chunks(19) {
+            parser.consume(chunk, &pending, &events);
+        }
+        match rx.try_recv().unwrap() {
+            Incoming::Event(event) => assert_eq!(event["value"], "hello"),
+            _ => panic!("expected message_update event"),
+        }
+        match rx.try_recv().unwrap() {
+            Incoming::Ui(ui) => assert_eq!(ui.id, "ui1"),
+            _ => panic!("expected extension UI request"),
+        }
+    }
+
+    #[test]
+    fn echoed_commands_cannot_become_ui_events() {
+        let pending: Pending = Arc::new(Mutex::new(Default::default()));
+        let (events, rx) = async_channel::unbounded();
+        let mut parser = IncomingState::new("test".into());
+        let echo = encode("test", 'I', b"{\"type\":\"message_update\"}\n").concat();
+        parser.consume(&echo, &pending, &events);
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn response_reassembly_correlates_request_ids() {
