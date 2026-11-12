@@ -48,6 +48,11 @@ pub fn run(args: Vec<String>) -> i32 {
     match serve(&args) {
         Ok(code) => code,
         Err(error) => {
+            if let Some(token) = args.first().filter(|token| valid_token(token)) {
+                let output = Arc::new(Mutex::new(io::stdout()));
+                let _ = emit(&output, token, 'E', format!("{error:#}").as_bytes());
+                let _ = emit(&output, token, 'X', b"1");
+            }
             eprintln!("Herdr RPC bridge: {error:#}");
             1
         }
@@ -111,7 +116,7 @@ fn serve(args: &[String]) -> anyhow::Result<i32> {
     emit(&output, token, 'R', b"")?;
 
     let input_token = token.clone();
-    std::thread::spawn(move || {
+    let _input_thread = std::thread::spawn(move || {
         let mut decoder = Decoder::new(input_token);
         let mut stdin = io::stdin();
         let mut chunk = [0_u8; 2048];
