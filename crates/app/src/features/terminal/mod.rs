@@ -200,6 +200,11 @@ fn mono_font() -> Font {
 
 impl TerminalView {
     pub fn new(cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_restored(cwd, None, window, cx)
+    }
+
+    /// Reconnect a saved Herdr address, or start a fresh terminal if absent.
+    pub fn new_restored(cwd: PathBuf, resume: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (tx, rx) = async_channel::unbounded::<TermEvent>();
         let listener = Listener(tx);
         let dims = TermDims {
@@ -231,6 +236,7 @@ impl TerminalView {
             };
             let session = TerminalSession::spawn(
                 working_directory,
+                resume.clone(),
                 size.num_cols,
                 size.num_lines,
                 move |event| {
@@ -268,7 +274,7 @@ impl TerminalView {
                                     session.consumed(bytes.len());
                                 }
                             }
-                            HerdrEvent::Attached(address) => {
+                            HerdrEvent::Assigned(address) | HerdrEvent::Attached(address) => {
                                 this.herdr_address = Some(address);
                                 cx.emit(TerminalEvent::TitleChanged);
                             }
@@ -318,7 +324,7 @@ impl TerminalView {
             term,
             pty,
             herdr,
-            herdr_address: None,
+            herdr_address: if use_herdr { resume } else { None },
             last_focused: false,
             error,
             focus_handle: cx.focus_handle(),
@@ -334,6 +340,11 @@ impl TerminalView {
     }
 
     /// OSC title if the shell set one, otherwise `user@cwd-leaf`.
+    /// Persistent identity for workspace snapshots; None for a local PTY.
+    pub fn herdr_address(&self) -> Option<String> {
+        self.herdr_address.clone()
+    }
+
     pub fn title(&self) -> SharedString {
         if let Some(title) = self.osc_title.as_ref().filter(|t| !t.trim().is_empty()) {
             return title.clone().into();
