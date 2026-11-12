@@ -183,20 +183,42 @@ fn serve(args: &[String]) -> anyhow::Result<i32> {
     emit(&output, token, 'R', b"")?;
 
     let input_token = token.clone();
+    let input_log = output.clone();
     let _input_thread = std::thread::spawn(move || {
-        let mut decoder = Decoder::new(input_token);
+        let mut decoder = Decoder::new(input_token.clone());
         let mut stdin = io::stdin();
         let mut chunk = [0_u8; 2048];
-        while let Ok(count) = stdin.read(&mut chunk) {
-            if count == 0 {
-                break;
-            }
+        loop {
+            let count = match stdin.read(&mut chunk) {
+                Ok(0) => {
+                    let _ = emit(&input_log, &input_token, 'E', b"Herdr bridge PTY stdin reached EOF");
+                    break;
+                }
+                Ok(count) => count,
+                Err(error) => {
+                    let _ = emit(
+                        &input_log, &input_token, 'E',
+                        format!("Herdr bridge PTY input error: {error}").as_bytes(),
+                    );
+                    break;
+                }
+            };
             for frame in decoder.push(&chunk[..count]) {
-                if frame.kind == 'I' && child_stdin.write_all(&frame.payload).is_err() {
+                if frame.kind == 'I'
+                    && let Err(error) = child_stdin.write_all(&frame.payload)
+                {
+                    let _ = emit(
+                        &input_log, &input_token, 'E',
+                        format!("Pi RPC stdin write failed: {error}").as_bytes(),
+                    );
                     return;
                 }
             }
-            if child_stdin.flush().is_err() {
+            if let Err(error) = child_stdin.flush() {
+                let _ = emit(
+                    &input_log, &input_token, 'E',
+                    format!("Pi RPC stdin flush failed: {error}").as_bytes(),
+                );
                 return;
             }
         }
