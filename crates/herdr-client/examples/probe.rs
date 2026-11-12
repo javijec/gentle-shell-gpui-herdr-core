@@ -29,5 +29,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         let state = terminal["state"].as_str().unwrap_or("<unknown>");
         println!("{address}: {state}");
     }
+    let machines = client.list_machines()?;
+    println!("{} registered machines", machines.machines.len());
+    for machine in machines.machines {
+        let name = machine["name"].as_str().unwrap_or("<unnamed>");
+        println!("machine: {name}");
+    }
     Ok(())
 }
