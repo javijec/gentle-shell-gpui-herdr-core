@@ -46,8 +46,11 @@ If you already have this branch locally, fetch and fast-forward instead.
 ## Manual validation (42–48)
 
 42. Launch GPUI with GENTLE_SHELL_TERMINAL_BACKEND=herdr.
-    In a new agent tab, send a short prompt and observe the reply. An hc ls
-    entry labeled gentle-shell=rpc-agent should appear for the agent.
+    In a new agent tab, verify that the model selector populates, then send
+    a short prompt and observe the reply. An hc ls entry labeled
+    gentle-shell=rpc-agent should appear for the agent. Startup now requires
+    two acknowledgments: Pi get_state on child pipes and get_state through
+    the full Herdr PTY input/output path.
 43. Continue a conversation with several streaming responses; verify markdown,
     tool execution and message updates, not just a one-line get_state reply.
 44. Test extensions' UI dialogs and commands: requests must flow both ways.
@@ -106,8 +109,12 @@ capturado; no intenta enviar solicitudes a un proceso que no inició.
 - This branch has not been compiled or manually run on Windows by the author.
   It must remain a draft PR until Windows tests and clippy pass.
 - Echo, wrapping, and Windows ConPTY behavior in a real Herdr PTY need a smoke
-  test. The framed codec has synthetic round-trip and correlation tests, but
-  those do not replace a real Pi RPC agent run.
+  test. Input frames now use terminal Enter (CR), and the bridge accepts CR,
+  LF, and CRLF delimiters. The local Herdr agent is not accepted as started
+  until a separate get_state command completes the full PTY round trip.
+  A stalled input path fails startup with a specific 12-second probe error,
+  rather than opening a tab with empty models. Synthetic tests are not
+  a substitute for a real Pi RPC agent run.
 - RPC sessions do not yet recover across a disconnected Herdr viewer (4D).
 - Remote agent machine selection and remote bridge deployment are 4B/4C.
 - The bridge is launched using the local GPUI executable, so this stage does
