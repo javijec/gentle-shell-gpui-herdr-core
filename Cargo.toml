@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/pi-rpc", "crates/app"]
+members = ["crates/core", "crates/pi-rpc", "crates/app", "crates/herdr-client"]
 
 [workspace.package]
 version = "0.1.13"
