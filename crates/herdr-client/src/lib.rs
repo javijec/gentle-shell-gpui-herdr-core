@@ -49,6 +49,13 @@ pub struct TerminalList {
     pub hidden_finished: u64,
 }
 
+/// Machines known to this local Herdr core. Their terminal addresses have
+/// the form machine/tN. Remote fields remain opaque for API compatibility.
+#[derive(Debug, Deserialize)]
+pub struct MachineList {
+    pub machines: Vec<Value>,
+}
+
 /// Owns only the hc connect forwarding process, never the herdr-core daemon.
 /// Disconnecting this client does not terminate managed terminals.
 struct Bridge(Child);
@@ -127,8 +134,14 @@ impl HerdrClient {
         Ok(serde_json::from_value(reply)?)
     }
 
+    /// Machines currently registered in Herdr Core (local/remote discovery).
+    pub fn list_machines(&mut self) -> Result<MachineList> {
+        let reply = self.rpc.call("machine.list", json!({}))?;
+        Ok(serde_json::from_value(reply)?)
+    }
+
     /// Call any plain-mode JSON-RPC method. Not for terminal.attach: that
-    /// requires a framed-mode connection, which is a later milestone.
+    /// requires a framed-mode connection, handled by terminal::TerminalSession.
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value> {
         self.rpc.call(method, params)
     }
@@ -159,7 +172,7 @@ fn parse_hello(reply: Value) -> Result<Hello> {
 mod tests {
     use serde_json::json;
 
-    use super::{Error, PROTOCOL_GENERATION, TerminalList, parse_hello};
+    use super::{Error, MachineList, PROTOCOL_GENERATION, TerminalList, parse_hello};
 
     #[test]
     fn accepts_generation_one_plain_mode_hello() {
@@ -187,6 +200,16 @@ mod tests {
             "methods": ["terminal.list"],
         }));
         assert!(matches!(result, Err(Error::Protocol(_))));
+    }
+
+    #[test]
+    fn parses_remote_machine_list() {
+        let list: MachineList = serde_json::from_value(json!({
+            "machines": [{"name": "javipi", "online": true, "extra": 1}],
+        }))
+        .unwrap();
+        assert_eq!(list.machines[0]["name"], "javipi");
+        assert_eq!(list.machines[0]["extra"], 1);
     }
 
     #[test]
