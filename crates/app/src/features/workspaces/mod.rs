@@ -29,6 +29,9 @@ pub struct SavedPane {
     /// The conversation an agent pane had, resumed when it still exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<PathBuf>,
+    /// Persistent Herdr terminal address: local tN or remote machine/tN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub herdr_terminal: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
