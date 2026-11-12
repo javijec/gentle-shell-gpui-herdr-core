@@ -36,6 +36,7 @@ pub fn register(cx: &mut App) {
             let view = cx.new(|cx| TerminalView::new_restored(cwd, address, window, cx));
             let focus = view.focus_handle(cx);
             let title_view = view.clone();
+            let address_view = view.clone();
             PaneItem {
                 kind: PaneKind::Terminal,
                 view: view.into(),
@@ -43,7 +44,7 @@ pub fn register(cx: &mut App) {
                 title: Rc::new(move |cx: &App| title_view.read(cx).title()),
                 unsaved: None,
                 terminal_address: Some(Rc::new(move |cx: &App| {
-                    title_view.read(cx).herdr_address()
+                    address_view.read(cx).herdr_address()
                 })),
             }
         });
