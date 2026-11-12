@@ -6,6 +6,9 @@
 //! on Unicode line separators, which are valid inside JSON strings.
 
 pub mod file_cache;
+pub mod herdr_wire;
+mod herdr_agent;
+pub use herdr_agent::HerdrAgentProcess;
 mod home;
 mod launch;
 mod login;
