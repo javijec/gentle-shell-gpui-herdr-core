@@ -2190,6 +2190,7 @@ dependencies = [
  "flate2",
  "gentle-core",
  "gpui-kit",
+ "herdr-client",
  "gtk",
  "ignore",
  "image",
