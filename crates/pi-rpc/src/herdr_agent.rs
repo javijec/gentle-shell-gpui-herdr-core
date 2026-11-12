@@ -175,6 +175,11 @@ impl HerdrAgentProcess {
                     if let Some(code) = exit {
                         ready.store(false, Ordering::Release);
                         pending.lock().unwrap().clear();
+                        if let Some(tx) = started_tx.lock().unwrap().take() {
+                            let _ = tx.send(Err(anyhow!(
+                                "Herdr RPC bridge exited before READY (code {code:?})"
+                            )));
+                        }
                         let _ = events.try_send(Incoming::Exited(code));
                     }
                 }
@@ -233,6 +238,11 @@ impl HerdrAgentProcess {
         }
         let mut json = serde_json::to_vec(value)?;
         json.push(b'\n');
+        // This first delivery is optimized for ordinary text turns. Reject
+        // oversized binary attachments instead of queueing tens of thousands
+        // of PTY frames synchronously on the GPUI foreground thread.
+        anyhow::ensure!(json.len() <= 1024 * 1024,
+            "Herdr RPC 4A request exceeds the 1 MiB foreground limit");
         for frame in encode(&self.token, 'I', &json) {
             self.session.input(frame);
         }
