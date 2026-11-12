@@ -27,6 +27,31 @@ pub struct MachinesView {
 
 impl EventEmitter<MachinesEvent> for MachinesView {}
 
+/// Only this computer follows the selected native PTY default. A remote
+/// machine always uses Herdr, even in the same GPUI window.
+fn opens_native_local_shell(machine: Option<&str>, backend: Option<&str>) -> bool {
+    machine.is_none() && backend.is_some_and(|v| v.eq_ignore_ascii_case("local"))
+}
+
+#[cfg(test)]
+mod mixed_backend_tests {
+    use super::opens_native_local_shell;
+
+    #[test]
+    fn native_local_machine_uses_native_pty() {
+        assert!(opens_native_local_shell(None, Some("local")));
+        assert!(opens_native_local_shell(None, Some("LOCAL")));
+        assert!(!opens_native_local_shell(None, Some("herdr")));
+    }
+
+    #[test]
+    fn remote_machine_always_uses_herdr() {
+        assert!(!opens_native_local_shell(Some("javipi"), Some("local")));
+        assert!(!opens_native_local_shell(Some("javipi"), Some("herdr")));
+        assert!(!opens_native_local_shell(Some("javipi"), None));
+    }
+}
+
 impl MachinesView {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
@@ -75,10 +100,8 @@ impl MachinesView {
     /// use Herdr even when local PTYs are the default for ordinary tabs.
     fn new_shell(&mut self, machine: Option<String>, cx: &mut Context<Self>) {
         if self.busy { return; }
-        if machine.is_none()
-            && std::env::var("GENTLE_SHELL_TERMINAL_BACKEND")
-                .is_ok_and(|v| v.eq_ignore_ascii_case("local"))
-        {
+        let backend = std::env::var("GENTLE_SHELL_TERMINAL_BACKEND").ok();
+        if opens_native_local_shell(machine.as_deref(), backend.as_deref()) {
             cx.emit(MachinesEvent::NewLocalTerminal);
             return;
         }
