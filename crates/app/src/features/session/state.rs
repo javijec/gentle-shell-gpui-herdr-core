@@ -18,7 +18,7 @@ const DEFAULT_THINKING_LEVELS: [&str; 5] = ["off", "minimal", "low", "medium", "
 
 pub(super) enum BackendStatus {
     Starting,
-    Ready(Arc<PiProcess>),
+    Ready(Arc<RpcProcess>),
     Failed(String),
     Exited(Option<i32>),
 }
