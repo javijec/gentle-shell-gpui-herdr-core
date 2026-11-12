@@ -5313,7 +5313,9 @@ version = "0.1.13"
 dependencies = [
  "anyhow",
  "async-channel",
+ "base64",
  "dunce",
+ "herdr-client",
  "serde",
  "serde_json",
  "which",
