@@ -9,7 +9,7 @@ use std::time::Duration;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
-use pi_rpc::PiProcess;
+use pi_rpc::{HerdrAgentProcess, PiProcess, RpcProcess};
 
 use super::SessionView;
 use super::state::BackendStatus;
