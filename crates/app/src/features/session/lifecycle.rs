@@ -258,7 +258,13 @@ impl SessionView {
                         spec.args.push(path.display().to_string());
                     }
                     let version = pi_rpc::backend_version(&spec);
-                    let (process, rx) = PiProcess::spawn(&spec)?;
+                    let (process, rx) = if crate::features::terminal::herdr_enabled() {
+                        let (backend, rx) = HerdrAgentProcess::spawn(cwd, resume.as_deref())?;
+                        (Arc::new(RpcProcess::Herdr(backend)), rx)
+                    } else {
+                        let (backend, rx) = PiProcess::spawn(&spec)?;
+                        (Arc::new(RpcProcess::Native(backend)), rx)
+                    };
                     anyhow::Ok((process, rx, version))
                 })
                 .await;
