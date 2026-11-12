@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pi_rpc::{PiProcess, UiMethod};
+use pi_rpc::{RpcProcess, UiMethod};
 use serde_json::Value;
 
 use super::view;
