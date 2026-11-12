@@ -129,9 +129,9 @@ mod tests {
     fn ignores_other_processes_echoed_inputs_and_noise() {
         let mut decoder = Decoder::new("own".into());
         let mut data = b"\x1b[31mgarbage\r\n".to_vec();
-        data.extend(encode("other", 'O', b"not ours"));
-        data.extend(encode("own", 'I', b"echoed"));
-        data.extend(encode("own", 'R', b""));
+        data.extend(encode("other", 'O', b"not ours").concat());
+        data.extend(encode("own", 'I', b"echoed").concat());
+        data.extend(encode("own", 'R', b"").concat());
         let frames = decoder.push(&data);
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].kind, 'I');
