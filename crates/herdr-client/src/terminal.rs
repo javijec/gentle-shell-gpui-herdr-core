@@ -627,7 +627,7 @@ fn serve(
             let size = *desired.lock().unwrap_or_else(|e| e.into_inner());
             let mut params = json!({
                 "cwd": cwd.to_string_lossy(),
-                "on": on,
+                "on": on.as_deref(),
                 "no_parent": true,
                 "wait": false,
                 "size": {"cols": size.cols, "rows": size.rows},
