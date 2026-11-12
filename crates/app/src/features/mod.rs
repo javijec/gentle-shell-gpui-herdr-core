@@ -7,7 +7,6 @@ pub mod devices;
 pub mod files;
 pub mod git;
 pub mod machines;
-pub mod machines;
 pub mod memory;
 pub mod music;
 pub mod notices;
