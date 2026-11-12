@@ -95,7 +95,7 @@ impl TerminalSession {
         rows: u16,
         report: impl Fn(TerminalEvent) + Send + 'static,
     ) -> Self {
-        Self::spawn_inner(cwd, resume, None, cols, rows, report)
+        Self::spawn_inner(cwd, resume, None, None, cols, rows, report)
     }
 
     /// Start a specific argv under Herdr Core, rather than a user's shell.
@@ -108,13 +108,27 @@ impl TerminalSession {
         rows: u16,
         report: impl Fn(TerminalEvent) + Send + 'static,
     ) -> Self {
-        Self::spawn_inner(cwd, None, Some(argv), cols, rows, report)
+        Self::spawn_inner(cwd, None, Some(argv), None, cols, rows, report)
+    }
+
+    /// Run an explicit argv on a Herdr-registered machine, with a *remote*
+    /// absolute working directory. This never uses a Windows process path.
+    pub fn spawn_program_on(
+        machine: String,
+        cwd: PathBuf,
+        argv: Vec<String>,
+        cols: u16,
+        rows: u16,
+        report: impl Fn(TerminalEvent) + Send + 'static,
+    ) -> Self {
+        Self::spawn_inner(cwd, None, Some(argv), Some(machine), cols, rows, report)
     }
 
     fn spawn_inner(
         cwd: PathBuf,
         resume: Option<String>,
         argv: Option<Vec<String>>,
+        on: Option<String>,
         cols: u16,
         rows: u16,
         report: impl Fn(TerminalEvent) + Send + 'static,
@@ -139,7 +153,7 @@ impl TerminalSession {
                 desired: &worker_desired,
                 report: &report,
             };
-            if let Err(error) = serve(cwd, resume, argv, rx, &state)
+            if let Err(error) = serve(cwd, resume, argv, on, rx, &state)
                 && !worker_cancelled.load(Ordering::SeqCst)
             {
                 report(TerminalEvent::Failed(error.to_string()));
@@ -527,10 +541,49 @@ fn stream(
     }
 }
 
+/// Environment for an explicitly launched Pi RPC bridge. A remote bridge
+/// must not inherit Windows launcher paths or profile directories.
+fn bridge_environment(
+    on: Option<&str>,
+    get: &dyn Fn(&str) -> Option<OsString>,
+) -> Value {
+    let mut env = json!({
+        "TERM": "xterm-256color",
+        "COLORTERM": "truecolor",
+        "TERM_PROGRAM": "GentleShell",
+    });
+    if on.is_some() {
+        for (host_key, remote_key) in [
+            ("GENTLE_SHELL_HERDR_REMOTE_BIN", "GENTLE_SHELL_BIN"),
+            ("GENTLE_SHELL_HERDR_REMOTE_PATH", "PATH"),
+        ] {
+            if let Some(value) = get(host_key).filter(|s| !s.is_empty()) {
+                env[remote_key] = json!(value.to_string_lossy());
+            }
+        }
+    } else {
+        if let Some(value) = get("PATH") {
+            env["PATH"] = json!(value.to_string_lossy());
+        }
+        for key in [
+            "GENTLE_SHELL_BIN", "GENTLE_SHELL_ARGS", "GENTLE_SHELL_HOME",
+            "GENTLE_SHELL_CONFIG", "GENTLE_SHELL_USER_PI_HOME",
+            "GENTLE_PI_AGENT_HOME", "GENTLE_PI_CONFIG_HOME",
+            "GENTLE_SHELL_PI", "PI_CODING_AGENT_DIR", "HOME", "USERPROFILE",
+        ] {
+            if let Some(value) = get(key).filter(|s| !s.is_empty()) {
+                env[key] = json!(value.to_string_lossy());
+            }
+        }
+    }
+    env
+}
+
 fn serve(
     cwd: PathBuf,
     resume: Option<String>,
     argv: Option<Vec<String>>,
+    on: Option<String>,
     mut rx: Receiver<Command>,
     state: &ConnectionState<'_>,
 ) -> Result<()> {
@@ -560,6 +613,7 @@ fn serve(
             let size = *desired.lock().unwrap_or_else(|e| e.into_inner());
             let mut params = json!({
                 "cwd": cwd.to_string_lossy(),
+                "on": on,
                 "no_parent": true,
                 "wait": false,
                 "size": {"cols": size.cols, "rows": size.rows},
@@ -572,33 +626,13 @@ fn serve(
                 }
                 params["argv"] = json!(program);
                 params["labels"] = json!({"gentle-shell": "rpc-agent"});
-                // Core may be running with an older service environment.
-                // Only the explicitly launched local agent bridge inherits
-                // these launch paths, not ordinary user terminal sessions.
-                if let Some(path) = std::env::var_os("PATH") {
-                    params["env"]["PATH"] = json!(path.to_string_lossy());
-                }
-                // The Herdr daemon can outlive GPUI and therefore carry
-                // older environment values. Use the same non-secret launcher
-                // and profile selectors as the foreground GPUI process so
-                // Herdr agents load the same Pi configuration as local ones.
-                for name in [
-                    "GENTLE_SHELL_BIN",
-                    "GENTLE_SHELL_ARGS",
-                    "GENTLE_SHELL_HOME",
-                    "GENTLE_SHELL_CONFIG",
-                    "GENTLE_SHELL_USER_PI_HOME",
-                    "GENTLE_PI_AGENT_HOME",
-                    "GENTLE_PI_CONFIG_HOME",
-                    "GENTLE_SHELL_PI",
-                    "PI_CODING_AGENT_DIR",
-                    "HOME",
-                    "USERPROFILE",
-                ] {
-                    if let Some(value) = std::env::var_os(name) {
-                        params["env"][name] = json!(value.to_string_lossy());
-                    }
-                }
+                // Windows host PATH/HOME must NEVER leak onto an ARM64 remote.
+                // A remote Herdr Core resolves its own PATH, HOME and Pi auth;
+                // only opt-in target-specific overrides can be forwarded.
+                params["env"] = bridge_environment(
+                    on.as_deref(),
+                    &|name| std::env::var_os(name),
+                );
             }
             let run = client.call("terminal.run", params)?;
             run["address"]
