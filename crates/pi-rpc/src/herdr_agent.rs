@@ -21,6 +21,17 @@ const MAX_JSONL: usize = 8 * 1024 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
 
+/// An agent terminal is ours to stop; never issue a global core shutdown.
+fn stop_owned_terminal(address: String) {
+    let _ = std::thread::Builder::new().name("herdr-agent-stop".into()).spawn(move || {
+        let executable = std::env::var_os("GENTLE_SHELL_HERDR_HC")
+            .filter(|x| !x.is_empty()).unwrap_or_else(|| "hc".into());
+        if let Ok(mut client) = herdr_client::HerdrClient::connect_with_executable(executable) {
+            let _ = client.call("terminal.kill", json!({"terminal":address}));
+        }
+    });
+}
+
 struct IncomingState {
     wire: Decoder,
     jsonl: Vec<u8>,
@@ -191,10 +202,16 @@ impl HerdrAgentProcess {
             }
         }));
         *session_ref.lock().unwrap() = Some(Arc::downgrade(&session));
-        match started_rx.recv_timeout(STARTUP_TIMEOUT) {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => return Err(error),
-            Err(_) => return Err(anyhow!("Herdr RPC bridge did not become ready within 30 seconds")),
+        if let Err(error) = match started_rx.recv_timeout(STARTUP_TIMEOUT) {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!("Herdr RPC bridge did not become ready within 30 seconds")),
+        } {
+            // A launch can allocate a terminal before the bridge reports READY.
+            // Reclaim it on failure rather than leave an orphaned Pi process.
+            if let Some(address) = address.lock().unwrap().clone() {
+                stop_owned_terminal(address);
+            }
+            return Err(error);
         }
         Ok((
             Arc::new(Self {
@@ -266,13 +283,7 @@ impl HerdrAgentProcess {
         self.ready.store(false, Ordering::Release);
         self.pending.lock().unwrap().clear();
         if let Some(address) = self.address.lock().unwrap().clone() {
-            let _ = std::thread::Builder::new().name("herdr-agent-stop".into()).spawn(move || {
-                let executable = std::env::var_os("GENTLE_SHELL_HERDR_HC")
-                    .filter(|x| !x.is_empty()).unwrap_or_else(|| "hc".into());
-                if let Ok(mut client) = herdr_client::HerdrClient::connect_with_executable(executable) {
-                    let _ = client.call("terminal.kill", json!({"terminal":address}));
-                }
-            });
+            stop_owned_terminal(address);
         }
     }
 }
