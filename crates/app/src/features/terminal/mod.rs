@@ -199,7 +199,8 @@ fn mono_font() -> Font {
 }
 
 impl TerminalView {
-    pub fn new(cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// Reconnect a saved Herdr address, or start a fresh terminal if absent.
+    pub fn new_restored(cwd: PathBuf, resume: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (tx, rx) = async_channel::unbounded::<TermEvent>();
         let listener = Listener(tx);
         let dims = TermDims {
@@ -219,8 +220,11 @@ impl TerminalView {
         };
         // Opt-in while the new backend is validated. Unset/local retains
         // the existing Alacritty PTY path without any extra dependencies.
-        let use_herdr = std::env::var("GENTLE_SHELL_TERMINAL_BACKEND")
-            .is_ok_and(|value| value.eq_ignore_ascii_case("herdr"));
+        let use_herdr = match std::env::var("GENTLE_SHELL_TERMINAL_BACKEND") {
+            Ok(value) if value.eq_ignore_ascii_case("local") => false,
+            Ok(value) if value.eq_ignore_ascii_case("herdr") => true,
+            _ => resume.is_some(),
+        };
         let (herdr_tx, herdr_rx) = async_channel::unbounded::<HerdrEvent>();
         let (pty, herdr, error) = if use_herdr {
             let size = geometry.window_size();
@@ -231,6 +235,7 @@ impl TerminalView {
             };
             let session = TerminalSession::spawn(
                 working_directory,
+                resume.clone(),
                 size.num_cols,
                 size.num_lines,
                 move |event| {
@@ -268,8 +273,16 @@ impl TerminalView {
                                     session.consumed(bytes.len());
                                 }
                             }
+                            HerdrEvent::Assigned(address) => {
+                                this.herdr_address = Some(address);
+                                cx.emit(TerminalEvent::TitleChanged);
+                            }
+                            HerdrEvent::Retrying(message) => {
+                                this.error = Some(message.into());
+                            }
                             HerdrEvent::Attached(address) => {
                                 this.herdr_address = Some(address);
+                                this.error = None;
                                 cx.emit(TerminalEvent::TitleChanged);
                             }
                             HerdrEvent::Closed => {
@@ -318,7 +331,7 @@ impl TerminalView {
             term,
             pty,
             herdr,
-            herdr_address: None,
+            herdr_address: if use_herdr { resume } else { None },
             last_focused: false,
             error,
             focus_handle: cx.focus_handle(),
@@ -334,6 +347,11 @@ impl TerminalView {
     }
 
     /// OSC title if the shell set one, otherwise `user@cwd-leaf`.
+    /// Persistent identity for workspace snapshots; None for a local PTY.
+    pub fn herdr_address(&self) -> Option<String> {
+        self.herdr_address.clone()
+    }
+
     pub fn title(&self) -> SharedString {
         if let Some(title) = self.osc_title.as_ref().filter(|t| !t.trim().is_empty()) {
             return title.clone().into();

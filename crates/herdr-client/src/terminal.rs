@@ -8,7 +8,8 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -26,6 +27,9 @@ const AUTOMATIC_INPUT: u8 = 6;
 /// thread, or forward them to GPUI's async executor.
 #[derive(Debug)]
 pub enum TerminalEvent {
+    /// A permanent address has been allocated or selected; persist immediately.
+    Assigned(String),
+    Retrying(String),
     Attached(String),
     Output(Vec<u8>),
     Closed,
@@ -55,6 +59,7 @@ impl TerminalSession {
     /// attach instead of creating a new shell (useful for manual recovery).
     pub fn spawn(
         cwd: PathBuf,
+        resume: Option<String>,
         cols: u16,
         rows: u16,
         report: impl Fn(TerminalEvent) + Send + 'static,
@@ -62,7 +67,7 @@ impl TerminalSession {
         let (tx, rx) = mpsc::channel();
         let worker_tx = tx.clone();
         std::thread::spawn(move || {
-            if let Err(error) = serve(cwd, cols.max(1), rows.max(1), rx, worker_tx, &report) {
+            if let Err(error) = serve(cwd, resume, cols.max(1), rows.max(1), rx, worker_tx, &report) {
                 report(TerminalEvent::Failed(error.to_string()));
             }
         });
@@ -251,6 +256,7 @@ fn check_response(reply: Value, id: u64) -> Result<Value> {
 
 fn serve(
     cwd: PathBuf,
+    resume: Option<String>,
     cols: u16,
     rows: u16,
     rx: Receiver<Command>,
@@ -260,10 +266,14 @@ fn serve(
     let executable = std::env::var_os("GENTLE_SHELL_HERDR_HC")
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| OsString::from("hc"));
-    let address = match std::env::var("GENTLE_SHELL_HERDR_TERMINAL")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-    {
+    // A restored pane's address always takes priority over the legacy
+    // diagnostic override. Never silently create a replacement terminal if
+    // the old one is unavailable: it may still be running remotely.
+    let address = match resume.or_else(|| {
+        std::env::var("GENTLE_SHELL_HERDR_TERMINAL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+    }) {
         Some(address) => address,
         None => {
             let mut client = HerdrClient::connect_with_executable(&executable)?;
@@ -281,8 +291,35 @@ fn serve(
                 .to_owned()
         }
     };
-    let (mut bridge, has_auto_feature) = Bridge::connect(&executable)?;
-    let (channel, has_auto_attach) = bridge.attach(&address, cols, rows)?;
+    report(TerminalEvent::Assigned(address.clone()));
+    // An existing remote machine may need time to reconnect after the app
+    // starts. Retry attaching the SAME address. Do not call terminal.run again:
+    // it would create a duplicate process while the old terminal is still alive.
+    let mut attempts = 0u32;
+    let (mut bridge, has_auto_feature, channel, has_auto_attach) = loop {
+        let attempted = Bridge::connect(&executable).and_then(|(mut bridge, feature)| {
+            let (channel, automatic) = bridge.attach(&address, cols, rows)?;
+            Ok((bridge, feature, channel, automatic))
+        });
+        match attempted {
+            Ok(attached) => break attached,
+            Err(error) => {
+                attempts += 1;
+                if attempts >= 5 {
+                    return Err(error);
+                }
+                report(TerminalEvent::Retrying(format!(
+                    "Herdr attach to {address} failed ({error}); reconnecting ({attempts}/4)"
+                )));
+                // 1, 2, 4, 8 seconds, interruptible by pane close.
+                let delay = Duration::from_secs(1 << (attempts - 1));
+                match rx.recv_timeout(delay) {
+                    Ok(Command::Detach) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                    _ => {}
+                }
+            }
+        }
+    };
     let automatic = has_auto_feature && has_auto_attach;
     report(TerminalEvent::Attached(address));
 

@@ -38,6 +38,8 @@ pub struct PaneItem {
     pub title: Rc<dyn Fn(&App) -> SharedString>,
     /// Whether closing the pane would lose edits (file panes); `None` never does.
     pub unsaved: Option<UnsavedProbe>,
+    /// Herdr address for workspace persistence (None for non-Herdr panes).
+    pub terminal_address: Option<Rc<dyn Fn(&App) -> Option<String>>>,
 }
 
 /// Reads a pane's "has unsaved edits" state.
@@ -45,12 +47,14 @@ pub type UnsavedProbe = Rc<dyn Fn(&App) -> bool>;
 
 /// Builds a pane for a folder (terminal) or a file (file viewer).
 pub type PaneFactory = Rc<dyn Fn(PathBuf, &mut Window, &mut App) -> PaneItem>;
+/// A terminal factory also receives the persisted Herdr address, if any.
+pub type TerminalPaneFactory = Rc<dyn Fn(PathBuf, Option<String>, &mut Window, &mut App) -> PaneItem>;
 
 /// Pane kinds other modules provide; a `None` factory makes the actions that
 /// need it show a notice instead.
 #[derive(Clone, Default)]
 pub struct PaneFactories {
-    pub terminal: Option<PaneFactory>,
+    pub terminal: Option<TerminalPaneFactory>,
     pub file: Option<PaneFactory>,
     /// A file's changes against HEAD (saved and restored as a file pane).
     pub diff: Option<PaneFactory>,

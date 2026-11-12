@@ -10,18 +10,21 @@ fn sample() -> SavedState {
         cwd: PathBuf::from("/tmp/project"),
         path: None,
         session: Some(PathBuf::from("/tmp/sessions/a.jsonl")),
+        herdr_terminal: None,
     };
     let terminal = SavedPane {
         kind: PaneKind::Terminal,
         cwd: PathBuf::from("/tmp/project"),
         path: None,
         session: None,
+        herdr_terminal: Some("remote/t7".to_string()),
     };
     let file = SavedPane {
         kind: PaneKind::File,
         cwd: PathBuf::from("/tmp/project"),
         path: Some(PathBuf::from("/tmp/project/README.md")),
         session: None,
+        herdr_terminal: None,
     };
     SavedState {
         version: VERSION,
@@ -70,6 +73,7 @@ fn json_round_trip() {
     assert_eq!(back, state);
     // Optional fields stay out of the file and default back in.
     assert!(!json.contains("\"path\":null"));
+    assert!(json.contains("\"herdr_terminal\":\"remote/t7\""));
     let minimal: SavedState =
         serde_json::from_str(r#"{"workspaces":[{"name":"x","root":"/x"}]}"#).unwrap();
     assert_eq!(minimal.workspaces[0].tabs.len(), 0);
@@ -77,6 +81,18 @@ fn json_round_trip() {
     // A file from before the sidebar was saved keeps it showing.
     assert!(minimal.sidebar);
     assert_eq!(SavedState::default().sidebar, minimal.sidebar);
+
+    // Files saved by older versions had no Herdr identity.
+    let legacy: SavedPane = serde_json::from_str(
+        r#"{"kind":"terminal","cwd":"/tmp/project","session":null}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.herdr_terminal, None);
+    let restored: SavedPane = serde_json::from_str(
+        r#"{"kind":"terminal","cwd":"/tmp/project","herdr_terminal":"javipi/t7"}"#,
+    )
+    .unwrap();
+    assert_eq!(restored.herdr_terminal.as_deref(), Some("javipi/t7"));
 }
 
 #[test]

@@ -53,6 +53,7 @@ impl Workspace {
                 .session
                 .as_ref()
                 .and_then(|s| s.read(cx).session_file()),
+            herdr_terminal: pane.item.terminal_address.as_ref().and_then(|get| get(cx)),
         })
     }
 
@@ -108,8 +109,16 @@ impl Workspace {
     /// Re-renders when a pane's title or busy state changed.
     pub(super) fn refresh_titles(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
+        let mut terminal_identity_changed = false;
         for pane in self.panes.values_mut() {
+            let previous = pane.herdr_address.clone();
             changed |= pane.sync_chrome(cx);
+            terminal_identity_changed |= pane.herdr_address != previous;
+        }
+        // Persist the address when Herdr assigns it. Other title changes
+        // (e.g. shell OSC updates) should only redraw, not rewrite JSON.
+        if terminal_identity_changed {
+            self.schedule_save(cx);
         }
         if changed {
             cx.notify();

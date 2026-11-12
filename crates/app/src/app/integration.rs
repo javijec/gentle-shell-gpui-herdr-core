@@ -31,17 +31,21 @@ pub fn repo_root(path: &std::path::Path) -> PathBuf {
 
 pub fn register(cx: &mut App) {
     crate::features::files::init(cx);
-    let terminal: crate::shared::pane::PaneFactory =
-        Rc::new(|cwd: PathBuf, window: &mut Window, cx: &mut App| {
-            let view = cx.new(|cx| TerminalView::new(cwd, window, cx));
+    let terminal: crate::shared::pane::TerminalPaneFactory =
+        Rc::new(|cwd: PathBuf, address: Option<String>, window: &mut Window, cx: &mut App| {
+            let view = cx.new(|cx| TerminalView::new_restored(cwd, address, window, cx));
             let focus = view.focus_handle(cx);
             let title_view = view.clone();
+            let address_view = view.clone();
             PaneItem {
                 kind: PaneKind::Terminal,
                 view: view.into(),
                 focus,
                 title: Rc::new(move |cx: &App| title_view.read(cx).title()),
                 unsaved: None,
+                terminal_address: Some(Rc::new(move |cx: &App| {
+                    address_view.read(cx).herdr_address()
+                })),
             }
         });
     let file: crate::shared::pane::PaneFactory =
@@ -53,6 +57,7 @@ pub fn register(cx: &mut App) {
                 kind: PaneKind::File,
                 view: view.into(),
                 focus,
+                terminal_address: None,
                 unsaved: {
                     let view = title_view.clone();
                     Some(Rc::new(move |cx: &App| view.read(cx).has_unsaved()))
@@ -72,6 +77,7 @@ pub fn register(cx: &mut App) {
                 focus,
                 title: Rc::new(move |cx: &App| title_view.read(cx).title()),
                 unsaved: None,
+                terminal_address: None,
             }
         });
     cx.set_global(PaneFactories {
