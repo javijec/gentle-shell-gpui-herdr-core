@@ -202,10 +202,14 @@ fn mono_font() -> Font {
     font(ui::MONO)
 }
 
-/// An address selects its owning Herdr Core regardless of the default
-/// backend for newly created terminals.
-fn choose_herdr_backend(resuming_herdr: bool, backend: Option<&str>) -> bool {
-    resuming_herdr || backend.is_some_and(|name| name.eq_ignore_ascii_case("herdr"))
+/// Explicit, process-wide backend selection. Only "herdr" connects to
+/// Herdr Core. "local", unset, or unrecognized values stay fully native.
+pub(crate) fn herdr_enabled() -> bool {
+    choose_herdr_backend(std::env::var("GENTLE_SHELL_TERMINAL_BACKEND").ok().as_deref())
+}
+
+fn choose_herdr_backend(backend: Option<&str>) -> bool {
+    backend.is_some_and(|name| name.eq_ignore_ascii_case("herdr"))
 }
 
 #[cfg(test)]
@@ -213,17 +217,17 @@ mod backend_choice_tests {
     use super::choose_herdr_backend;
 
     #[test]
-    fn local_default_starts_native_terminal() {
-        assert!(!choose_herdr_backend(false, Some("local")));
-        assert!(!choose_herdr_backend(false, None));
-        assert!(choose_herdr_backend(false, Some("HeRdR")));
+    fn explicit_herdr_uses_core_for_every_new_terminal() {
+        assert!(choose_herdr_backend(Some("herdr")));
+        assert!(choose_herdr_backend(Some("HeRdR")));
     }
 
     #[test]
-    fn saved_remote_address_overrides_native_default() {
-        assert!(choose_herdr_backend(true, Some("local")));
-        assert!(choose_herdr_backend(true, None));
-        assert!(choose_herdr_backend(true, Some("herdr")));
+    fn local_unset_or_unknown_never_uses_core() {
+        assert!(!choose_herdr_backend(Some("local")));
+        assert!(!choose_herdr_backend(Some("LOCAL")));
+        assert!(!choose_herdr_backend(None));
+        assert!(!choose_herdr_backend(Some("unexpected")));
     }
 }
 
@@ -247,11 +251,10 @@ impl TerminalView {
             cell,
             dims,
         };
-        // An explicit/persisted Herdr address always uses Herdr, even when
-        // newly created terminals default to the local Alacritty PTY.
-        // This allows local and remote terminals to coexist in one window.
-        let backend = std::env::var("GENTLE_SHELL_TERMINAL_BACKEND").ok();
-        let use_herdr = choose_herdr_backend(resume.is_some(), backend.as_deref());
+        // Backend selection is strict: local mode never connects to Herdr,
+        // including when the workspace contains a saved Herdr address.
+        // Herdr mode uses Core for all newly opened terminals.
+        let use_herdr = herdr_enabled();
         let (herdr_tx, herdr_rx) = async_channel::unbounded::<HerdrEvent>();
         let (pty, herdr, error) = if use_herdr {
             let size = geometry.window_size();
