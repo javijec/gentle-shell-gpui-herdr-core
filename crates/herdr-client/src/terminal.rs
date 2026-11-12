@@ -580,6 +580,19 @@ fn bridge_environment(
     env
 }
 
+/// A remote terminal.run must return an address owned by that machine.
+/// Reject older/incompatible Core versions that unexpectedly start locally.
+fn validate_started_address(address: &str, on: Option<&str>) -> Result<()> {
+    if let Some(machine) = on
+        && !address.starts_with(&format!("{machine}/"))
+    {
+        return Err(Error::Protocol(format!(
+            "Herdr asked to run on {machine}, but terminal.run returned {address}"
+        )));
+    }
+    Ok(())
+}
+
 fn serve(
     cwd: PathBuf,
     resume: Option<String>,
@@ -636,10 +649,17 @@ fn serve(
                 );
             }
             let run = client.call("terminal.run", params)?;
-            run["address"]
+            let address = run["address"]
                 .as_str()
                 .ok_or_else(|| Error::Protocol("terminal.run returned no address".into()))?
-                .to_owned()
+                .to_owned();
+            if let Err(error) = validate_started_address(&address, on.as_deref()) {
+                // A rejected/misrouted terminal belongs to this launch;
+                // do not leave it running on Windows as an accidental fallback.
+                let _ = client.call("terminal.kill", json!({"terminal": address}));
+                return Err(error);
+            }
+            address
         }
     };
     if cancelled.load(Ordering::SeqCst) { return Ok(()); }
@@ -708,8 +728,18 @@ mod tests {
 
     use super::{
         CREDIT, DATA, Command, Error, bridge_environment, check_response, discard_offline,
-        encode_frame, read_frame, retry_delay, terminal_finished, wait_retry,
+        encode_frame, read_frame, retry_delay, terminal_finished, validate_started_address,
+        wait_retry,
     };
+
+    #[test]
+    fn remote_run_must_return_a_terminal_on_the_selected_machine() {
+        assert!(validate_started_address("javipi/t8", Some("javipi")).is_ok());
+        assert!(validate_started_address("t8", None).is_ok());
+        assert!(validate_started_address("t8", Some("javipi")).is_err());
+        assert!(validate_started_address("other/t8", Some("javipi")).is_err());
+        assert!(validate_started_address("javipi-other/t8", Some("javipi")).is_err());
+    }
 
     #[test]
     fn remote_bridge_never_receives_windows_home_path_or_launcher_settings() {
