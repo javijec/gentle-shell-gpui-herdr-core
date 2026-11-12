@@ -27,6 +27,7 @@ pub enum PaletteAction {
     Providers,
     Profiles,
     Sessions,
+    Machines,
     Usage,
     Memory,
     Devices,
