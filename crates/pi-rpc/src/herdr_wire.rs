@@ -41,6 +41,20 @@ pub fn encode(token: &str, kind: char, bytes: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// Terminal input must use the terminal's Enter key (CR), not an LF
+/// character: ConPTY and canonical Unix terminals do not always interpret
+/// a raw LF as a submitted input line. The decoder accepts either CR or LF.
+pub fn encode_input(token: &str, bytes: &[u8]) -> Vec<Vec<u8>> {
+    encode(token, 'I', bytes)
+        .into_iter()
+        .map(|mut frame| {
+            // encode produces exactly one final LF per frame.
+            *frame.last_mut().expect("nonempty encoded frame") = b'\r';
+            frame
+        })
+        .collect()
+}
+
 /// Keeps incomplete CRLF lines between framed stream events. Input echoed by
 /// the PTY is ignored by listeners which only accept expected frame kinds.
 pub struct Decoder {
@@ -62,7 +76,7 @@ impl Decoder {
     pub fn push(&mut self, bytes: &[u8]) -> Vec<Frame> {
         let mut result = Vec::new();
         for &byte in bytes {
-            if byte == b'\n' {
+            if byte == b'\n' || byte == b'\r' {
                 if !self.discarding
                     && let Some(frame) = self.parse_line()
                 {
@@ -105,7 +119,7 @@ impl Decoder {
 
 #[cfg(test)]
 mod tests {
-    use super::{Decoder, MAX_CHUNK, encode, valid_token};
+    use super::{Decoder, MAX_CHUNK, encode, encode_input, valid_token};
 
     #[test]
     fn unicode_binary_and_newlines_round_trip() {
@@ -136,6 +150,22 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].kind, 'I');
         assert_eq!(frames[1].kind, 'R');
+    }
+
+    #[test]
+    fn pty_input_uses_enter_and_decoder_accepts_crlf_and_cr() {
+        let frames = encode_input("abc", b"{\"type\":\"get_state\"}\n");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].last(), Some(&b'\r'));
+        let mut decoder = Decoder::new("abc".into());
+        let mut received = decoder.push(&frames.concat());
+        assert_eq!(received.len(), 1);
+        assert_eq!(received.remove(0).payload, b"{\"type\":\"get_state\"}\n");
+        let ordinary = encode("abc", 'O', b"hello").concat();
+        let mut crlf = ordinary[..ordinary.len() - 1].to_vec();
+        crlf.extend_from_slice(b"\r\n");
+        assert_eq!(decoder.push(&crlf).len(), 1);
+        assert!(decoder.push(b"\n").is_empty());
     }
 
     #[test]
