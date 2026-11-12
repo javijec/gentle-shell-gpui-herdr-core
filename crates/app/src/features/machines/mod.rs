@@ -10,9 +10,6 @@ pub enum MachinesEvent {
     Close,
     /// Attach the existing Herdr terminal address in a new GPUI tab.
     OpenTerminal(String),
-    /// Open an ordinary native PTY when the local machine is selected
-    /// and the default backend is 'local'.
-    NewLocalTerminal,
 }
 
 pub struct MachinesView {
@@ -27,31 +24,6 @@ pub struct MachinesView {
 
 impl EventEmitter<MachinesEvent> for MachinesView {}
 
-/// Only this computer follows the selected native PTY default. A remote
-/// machine always uses Herdr, even in the same GPUI window.
-fn opens_native_local_shell(machine: Option<&str>, backend: Option<&str>) -> bool {
-    machine.is_none() && backend.is_some_and(|v| v.eq_ignore_ascii_case("local"))
-}
-
-#[cfg(test)]
-mod mixed_backend_tests {
-    use super::opens_native_local_shell;
-
-    #[test]
-    fn native_local_machine_uses_native_pty() {
-        assert!(opens_native_local_shell(None, Some("local")));
-        assert!(opens_native_local_shell(None, Some("LOCAL")));
-        assert!(!opens_native_local_shell(None, Some("herdr")));
-    }
-
-    #[test]
-    fn remote_machine_always_uses_herdr() {
-        assert!(!opens_native_local_shell(Some("javipi"), Some("local")));
-        assert!(!opens_native_local_shell(Some("javipi"), Some("herdr")));
-        assert!(!opens_native_local_shell(Some("javipi"), None));
-    }
-}
-
 impl MachinesView {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
@@ -63,13 +35,19 @@ impl MachinesView {
             _load: Task::ready(()),
             _action: Task::ready(()),
         };
-        this.refresh(cx);
+        // Defense in depth: even a programmatic view construction must never
+        // connect to Herdr while the native/local backend is selected.
+        if crate::features::terminal::herdr_enabled() {
+            this.refresh(cx);
+        }
         this
     }
 
     /// Background discovery must never block UI painting or key handling.
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.busy { return; }
+        if !crate::features::terminal::herdr_enabled() || self.busy {
+            return;
+        }
         self.loading = true;
         self.error = None;
         let job = cx.background_executor().spawn(async { model::discover() });
@@ -89,6 +67,9 @@ impl MachinesView {
 
     /// Open exactly this address; no terminal.run and no process duplication.
     fn open_terminal(&mut self, address: String, cx: &mut Context<Self>) {
+        if !crate::features::terminal::herdr_enabled() {
+            return;
+        }
         if self.snapshot.as_ref().is_some_and(|snapshot| {
             snapshot.terminals.iter().any(|t| t.address == address && t.live())
         }) {
@@ -96,13 +77,10 @@ impl MachinesView {
         }
     }
 
-    /// New shell on this PC follows the local backend; remote machines always
-    /// use Herdr even when local PTYs are the default for ordinary tabs.
+    /// All shells in Machines use Herdr Core. This action is unavailable
+    /// under the native/local backend.
     fn new_shell(&mut self, machine: Option<String>, cx: &mut Context<Self>) {
-        if self.busy { return; }
-        let backend = std::env::var("GENTLE_SHELL_TERMINAL_BACKEND").ok();
-        if opens_native_local_shell(machine.as_deref(), backend.as_deref()) {
-            cx.emit(MachinesEvent::NewLocalTerminal);
+        if !crate::features::terminal::herdr_enabled() || self.busy {
             return;
         }
         self.busy = true;
@@ -131,7 +109,9 @@ impl MachinesView {
 
     /// Explicitly request a machine connection; do not SSH from GPUI itself.
     fn connect_machine(&mut self, name: String, cx: &mut Context<Self>) {
-        if self.busy { return; }
+        if !crate::features::terminal::herdr_enabled() || self.busy {
+            return;
+        }
         self.busy = true;
         self.error = None;
         self.info = Some(format!("Connecting to {name}..."));
