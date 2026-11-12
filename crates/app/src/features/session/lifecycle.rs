@@ -252,20 +252,22 @@ impl SessionView {
             let spawned = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut spec = pi_rpc::resolve_backend(&cwd)?;
-                    if let Some(path) = &resume {
-                        spec.args.push("--session".into());
-                        spec.args.push(path.display().to_string());
-                    }
-                    let version = pi_rpc::backend_version(&spec);
-                    let (process, rx) = if crate::features::terminal::herdr_enabled() {
+                    if crate::features::terminal::herdr_enabled() {
+                        // Herdr mode must not launch even a version-probe Pi
+                        // process outside Core. The bridge resolves Pi inside
+                        // its Herdr-managed terminal, never in this GUI.
                         let (backend, rx) = HerdrAgentProcess::spawn(cwd, resume.as_deref())?;
-                        (Arc::new(RpcProcess::Herdr(backend)), rx)
+                        anyhow::Ok((Arc::new(RpcProcess::Herdr(backend)), rx, None))
                     } else {
+                        let mut spec = pi_rpc::resolve_backend(&cwd)?;
+                        if let Some(path) = &resume {
+                            spec.args.push("--session".into());
+                            spec.args.push(path.display().to_string());
+                        }
+                        let version = pi_rpc::backend_version(&spec);
                         let (backend, rx) = PiProcess::spawn(&spec)?;
-                        (Arc::new(RpcProcess::Native(backend)), rx)
-                    };
-                    anyhow::Ok((process, rx, version))
+                        anyhow::Ok((Arc::new(RpcProcess::Native(backend)), rx, version))
+                    }
                 })
                 .await;
             let rx = match spawned {
