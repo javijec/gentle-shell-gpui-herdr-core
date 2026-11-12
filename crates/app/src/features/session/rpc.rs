@@ -8,7 +8,7 @@ use std::time::Instant;
 use anyhow::Result;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
-use pi_rpc::PiProcess;
+use pi_rpc::RpcProcess;
 use serde_json::{Value, json};
 
 use super::state::{BackendStatus, ModelInfo};
@@ -16,7 +16,7 @@ use super::{SessionView, attachments, builtins};
 use gentle_core::transcript::NoticeLevel;
 
 impl SessionView {
-    pub(super) fn process(&self) -> Option<Arc<PiProcess>> {
+    pub(super) fn process(&self) -> Option<Arc<RpcProcess>> {
         match &self.backend.status {
             BackendStatus::Ready(process) => Some(process.clone()),
             _ => None,

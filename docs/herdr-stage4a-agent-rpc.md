@@ -1,0 +1,126 @@
+# Stage 4A — Local Pi RPC over Herdr Core (draft)
+
+## Goal
+
+In HERDR mode, not just terminal panes but every Gentle Shell agent tab
+starts through the local Herdr Core. LOCAL mode keeps the existing native
+PiProcess transport and never calls Herdr. There is no automatic fallback.
+
+4A uses Herdr on the same computer as GPUI. Choosing a remote host or running
+the GPUI bridge binary on a different OS is explicitly out of scope until 4B.
+
+## Implementation
+
+- A new pi-rpc RpcProcess wrapper preserves the existing request/response and
+  Incoming event interfaces in the application. The app selects exactly one
+  backend according to GENTLE_SHELL_TERMINAL_BACKEND.
+- HerdrAgentProcess launches the current GPUI executable as a Herdr-managed
+  terminal with argv [exe, --herdr-agent-bridge, token, ...].
+- The bridge launches gentle-shell --mode rpc in a subprocess with real stdin/
+  stdout pipes, preserving interactive Pi JSONL and extension UI requests.
+- The Herdr PTY is not a transparent byte stream; JSONL is therefore chunked
+  into base64 frames (maximum 96 unencoded bytes per frame). Only tagged,
+  token-matching OUT frames become Pi RPC data. Echoed input and arbitrary
+  terminal noise are discarded.
+- Startup waits for an explicit READY frame. Request IDs are correlated to
+  responses. The GUI still receives the same Incoming event types as native.
+- Transport loss fails the agent tab closed: no silent fallback to a native
+  process and no replay of prompts after connection loss.
+- On shutdown or failed startup, only the bridge terminal owned by the agent
+  is killed through terminal.kill. Herdr Core itself stays running.
+- Existing session --session paths are forwarded to the bridge on startup.
+
+Herdr Core's machine.exec is not used: it is a bounded one-shot execution
+interface, unsuitable for an indefinitely running bidirectional Pi agent.
+
+## Windows checkout
+
+    git fetch https://github.com/javijec/gentle-shell-gpui-herdr-core.git feature/herdr-stage4a-agent-rpc
+    git switch -c feature/herdr-stage4a-agent-rpc FETCH_HEAD
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets --locked -- -D warnings
+    cargo test --workspace --locked
+
+If you already have this branch locally, fetch and fast-forward instead.
+
+## Manual validation (42–48)
+
+42. Launch GPUI with GENTLE_SHELL_TERMINAL_BACKEND=herdr.
+    In a new agent tab, verify that the model selector populates, then send
+    a short prompt and observe the reply. An hc ls entry labeled
+    gentle-shell=rpc-agent should appear for the agent. Startup now requires
+    two acknowledgments: Pi get_state on child pipes and get_state through
+    the full Herdr PTY input/output path.
+43. Continue a conversation with several streaming responses; verify markdown,
+    tool execution and message updates, not just a one-line get_state reply.
+44. Test extensions' UI dialogs and commands: requests must flow both ways.
+45. Open a second agent tab. Requests must go to their own process/ID channel
+    without crossing messages.
+46. Close an agent and verify only its owned Herdr terminal ends (the Herdr
+    daemon and other terminals must remain alive).
+47. Close GPUI and start it with GENTLE_SHELL_TERMINAL_BACKEND=local. Agent tabs
+    must use native PiProcess. Machines must remain hidden; no hc process should
+    start as a result of agent UI operations.
+48. Start HERDR mode with GENTLE_SHELL_HERDR_HC pointing to a nonexistent
+    executable. The agent must show a failure and must not open native Pi
+    behind the scenes.
+
+PowerShell:
+
+    $env:GENTLE_SHELL_TERMINAL_BACKEND = "herdr"
+    cargo run --locked -p gentle-shell-gpui
+
+For fallback verification, stop GPUI and run:
+
+    $env:GENTLE_SHELL_TERMINAL_BACKEND = "local"
+    cargo run --locked -p gentle-shell-gpui
+
+## Diagnóstico: extensión o paquete local inexistente
+
+Si GPUI muestra `Cannot find module 'D:\\Programacion\\gentle-shell-herdr'`,
+el error viene de la inicialización de Pi, no de la conexión Herdr. Pi puede
+cargar rutas de `extensions` y `packages` desde los ajustes del agente
+(global o aislado) y del proyecto. No modificar esos archivos automáticamente.
+
+En PowerShell, revisar qué archivos contienen la ruta antigua:
+
+    $candidates = @(
+      "$HOME\.gentle-shell\agent\settings.json",
+      "$HOME\.pi\agent\settings.json",
+      ".pi\settings.json"
+    )
+    foreach ($file in $candidates) {
+      if (Test-Path $file) {
+        Select-String -Path $file -SimpleMatch "gentle-shell-herdr"
+      }
+    }
+    Test-Path "D:\Programacion\gentle-shell-herdr"
+
+Si la ruta apunta a un checkout borrado, corregir o eliminar solo esa entrada
+en el `settings.json` que la referencia; hacer respaldo antes. Si se trata
+de un paquete local, reinstalarlo en una ruta que exista.
+
+4A ahora espera la respuesta `get_state` de Pi antes de emitir READY. Si falla
+una extensión, la pestaña muestra el mensaje de arranque junto al stderr
+capturado; no intenta enviar solicitudes a un proceso que no inició.
+
+## Known limits / not yet verified
+
+- This branch has not been compiled or manually run on Windows by the author.
+  It must remain a draft PR until Windows tests and clippy pass.
+- Echo, wrapping, and Windows ConPTY behavior in a real Herdr PTY need a smoke
+  test. Input frames now use terminal Enter (CR), and the bridge accepts CR,
+  LF, and CRLF delimiters. The local Herdr agent is not accepted as started
+  until a separate get_state command completes the full PTY round trip.
+  A stalled input path fails startup with a specific 12-second probe error,
+  rather than opening a tab with empty models. Synthetic tests are not
+  a substitute for a real Pi RPC agent run.
+- RPC sessions do not yet recover across a disconnected Herdr viewer (4D).
+- Remote agent machine selection and remote bridge deployment are 4B/4C.
+- The bridge is launched using the local GPUI executable, so this stage does
+  not support starting it directly on JaviPi.
+- For 4A, foreground RPC requests larger than 1 MiB are rejected to avoid
+  flooding the GPUI UI thread with many thousands of PTY fragments. Large
+  attachments need a later nonblocking binary/file transport.
+- Windows release builds use the GUI subsystem; correct inherited ConPTY
+  standard handles in the bridge must be verified separately from debug.

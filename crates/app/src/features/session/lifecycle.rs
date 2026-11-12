@@ -3,12 +3,13 @@
 //! the conversation state a fresh start or switch resets.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
-use pi_rpc::PiProcess;
+use pi_rpc::{HerdrAgentProcess, PiProcess, RpcProcess};
 
 use super::SessionView;
 use super::state::BackendStatus;
@@ -251,14 +252,22 @@ impl SessionView {
             let spawned = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut spec = pi_rpc::resolve_backend(&cwd)?;
-                    if let Some(path) = &resume {
-                        spec.args.push("--session".into());
-                        spec.args.push(path.display().to_string());
+                    if crate::features::terminal::herdr_enabled() {
+                        // Herdr mode must not launch even a version-probe Pi
+                        // process outside Core. The bridge resolves Pi inside
+                        // its Herdr-managed terminal, never in this GUI.
+                        let (backend, rx) = HerdrAgentProcess::spawn(cwd, resume.as_deref())?;
+                        anyhow::Ok((Arc::new(RpcProcess::Herdr(backend)), rx, None))
+                    } else {
+                        let mut spec = pi_rpc::resolve_backend(&cwd)?;
+                        if let Some(path) = &resume {
+                            spec.args.push("--session".into());
+                            spec.args.push(path.display().to_string());
+                        }
+                        let version = pi_rpc::backend_version(&spec);
+                        let (backend, rx) = PiProcess::spawn(&spec)?;
+                        anyhow::Ok((Arc::new(RpcProcess::Native(backend)), rx, version))
                     }
-                    let version = pi_rpc::backend_version(&spec);
-                    let (process, rx) = PiProcess::spawn(&spec)?;
-                    anyhow::Ok((process, rx, version))
                 })
                 .await;
             let rx = match spawned {

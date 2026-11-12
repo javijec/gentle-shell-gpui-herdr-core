@@ -95,6 +95,30 @@ impl TerminalSession {
         rows: u16,
         report: impl Fn(TerminalEvent) + Send + 'static,
     ) -> Self {
+        Self::spawn_inner(cwd, resume, None, cols, rows, report)
+    }
+
+    /// Start a specific argv under Herdr Core, rather than a user's shell.
+    /// This is used only for the local-machine RPC bridge in stage 4A.
+    /// The exact address is returned through TerminalEvent::Assigned.
+    pub fn spawn_program(
+        cwd: PathBuf,
+        argv: Vec<String>,
+        cols: u16,
+        rows: u16,
+        report: impl Fn(TerminalEvent) + Send + 'static,
+    ) -> Self {
+        Self::spawn_inner(cwd, None, Some(argv), cols, rows, report)
+    }
+
+    fn spawn_inner(
+        cwd: PathBuf,
+        resume: Option<String>,
+        argv: Option<Vec<String>>,
+        cols: u16,
+        rows: u16,
+        report: impl Fn(TerminalEvent) + Send + 'static,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let connected = Arc::new(AtomicBool::new(false));
@@ -115,7 +139,7 @@ impl TerminalSession {
                 desired: &worker_desired,
                 report: &report,
             };
-            if let Err(error) = serve(cwd, resume, rx, &state)
+            if let Err(error) = serve(cwd, resume, argv, rx, &state)
                 && !worker_cancelled.load(Ordering::SeqCst)
             {
                 report(TerminalEvent::Failed(error.to_string()));
@@ -506,6 +530,7 @@ fn stream(
 fn serve(
     cwd: PathBuf,
     resume: Option<String>,
+    argv: Option<Vec<String>>,
     mut rx: Receiver<Command>,
     state: &ConnectionState<'_>,
 ) -> Result<()> {
@@ -517,24 +542,65 @@ fn serve(
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| OsString::from("hc"));
     // Resolve once. NEVER call terminal.run again after this point.
-    let address = match resume.or_else(|| {
-        std::env::var("GENTLE_SHELL_HERDR_TERMINAL")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-    }) {
+    // An explicit command cannot be redirected by the generic resume env var.
+    let selected = if argv.is_some() {
+        resume
+    } else {
+        resume.or_else(|| {
+            std::env::var("GENTLE_SHELL_HERDR_TERMINAL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+    };
+    let address = match selected {
         Some(address) => address,
         None => {
             if cancelled.load(Ordering::SeqCst) { return Ok(()); }
             let mut client = HerdrClient::connect_with_executable(&executable)?;
             let size = *desired.lock().unwrap_or_else(|e| e.into_inner());
-            let run = client.call("terminal.run", json!({
+            let mut params = json!({
                 "cwd": cwd.to_string_lossy(),
                 "no_parent": true,
                 "wait": false,
                 "size": {"cols": size.cols, "rows": size.rows},
                 "env": {"TERM": "xterm-256color", "COLORTERM": "truecolor",
                         "TERM_PROGRAM": "GentleShell"}
-            }))?;
+            });
+            if let Some(program) = argv {
+                if program.is_empty() {
+                    return Err(Error::Protocol("RPC bridge argv cannot be empty".into()));
+                }
+                params["argv"] = json!(program);
+                params["labels"] = json!({"gentle-shell": "rpc-agent"});
+                // Core may be running with an older service environment.
+                // Only the explicitly launched local agent bridge inherits
+                // these launch paths, not ordinary user terminal sessions.
+                if let Some(path) = std::env::var_os("PATH") {
+                    params["env"]["PATH"] = json!(path.to_string_lossy());
+                }
+                // The Herdr daemon can outlive GPUI and therefore carry
+                // older environment values. Use the same non-secret launcher
+                // and profile selectors as the foreground GPUI process so
+                // Herdr agents load the same Pi configuration as local ones.
+                for name in [
+                    "GENTLE_SHELL_BIN",
+                    "GENTLE_SHELL_ARGS",
+                    "GENTLE_SHELL_HOME",
+                    "GENTLE_SHELL_CONFIG",
+                    "GENTLE_SHELL_USER_PI_HOME",
+                    "GENTLE_PI_AGENT_HOME",
+                    "GENTLE_PI_CONFIG_HOME",
+                    "GENTLE_SHELL_PI",
+                    "PI_CODING_AGENT_DIR",
+                    "HOME",
+                    "USERPROFILE",
+                ] {
+                    if let Some(value) = std::env::var_os(name) {
+                        params["env"][name] = json!(value.to_string_lossy());
+                    }
+                }
+            }
+            let run = client.call("terminal.run", params)?;
             run["address"]
                 .as_str()
                 .ok_or_else(|| Error::Protocol("terminal.run returned no address".into()))?

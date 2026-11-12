@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-channel.workspace = true
+base64 = "0.22"
+herdr-client = { path = "../herdr-client" }
 dunce = "1"
 serde.workspace = true
 serde_json.workspace = true
