@@ -112,6 +112,7 @@ mod tests {
         let bytes = "hola 👋\r\n\0".repeat(40).into_bytes();
         let frames = encode("abc123", 'O', &bytes);
         assert!(frames.len() > 1);
+        assert!(frames.iter().all(|frame| frame.len() < 240));
         let mut decoder = Decoder::new("abc123".into());
         let mut actual = Vec::new();
         for byte in frames.concat().chunks(17) {
