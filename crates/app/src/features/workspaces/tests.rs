@@ -10,18 +10,21 @@ fn sample() -> SavedState {
         cwd: PathBuf::from("/tmp/project"),
         path: None,
         session: Some(PathBuf::from("/tmp/sessions/a.jsonl")),
+        herdr_terminal: None,
     };
     let terminal = SavedPane {
         kind: PaneKind::Terminal,
         cwd: PathBuf::from("/tmp/project"),
         path: None,
         session: None,
+        herdr_terminal: Some("remote/t7".to_string()),
     };
     let file = SavedPane {
         kind: PaneKind::File,
         cwd: PathBuf::from("/tmp/project"),
         path: Some(PathBuf::from("/tmp/project/README.md")),
         session: None,
+        herdr_terminal: None,
     };
     SavedState {
         version: VERSION,
@@ -70,6 +73,7 @@ fn json_round_trip() {
     assert_eq!(back, state);
     // Optional fields stay out of the file and default back in.
     assert!(!json.contains("\"path\":null"));
+    assert!(json.contains("\"herdr_terminal\":\"remote/t7\""));
     let minimal: SavedState =
         serde_json::from_str(r#"{"workspaces":[{"name":"x","root":"/x"}]}"#).unwrap();
     assert_eq!(minimal.workspaces[0].tabs.len(), 0);
