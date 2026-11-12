@@ -111,19 +111,6 @@ impl TerminalSession {
         Self::spawn_inner(cwd, None, Some(argv), None, cols, rows, report)
     }
 
-    /// Run an explicit argv on a Herdr-registered machine, with a *remote*
-    /// absolute working directory. This never uses a Windows process path.
-    pub fn spawn_program_on(
-        machine: String,
-        cwd: PathBuf,
-        argv: Vec<String>,
-        cols: u16,
-        rows: u16,
-        report: impl Fn(TerminalEvent) + Send + 'static,
-    ) -> Self {
-        Self::spawn_inner(cwd, None, Some(argv), Some(machine), cols, rows, report)
-    }
-
     /// Launch a managed program either here (None) or on a registered
     /// remote machine (Some). Used by the Pi RPC backend without duplicating
     /// the output callback's state machine.
