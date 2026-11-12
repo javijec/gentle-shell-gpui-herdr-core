@@ -8,7 +8,8 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -28,6 +29,7 @@ const AUTOMATIC_INPUT: u8 = 6;
 pub enum TerminalEvent {
     /// A permanent address has been allocated or selected; persist immediately.
     Assigned(String),
+    Retrying(String),
     Attached(String),
     Output(Vec<u8>),
     Closed,
@@ -290,8 +292,34 @@ fn serve(
         }
     };
     report(TerminalEvent::Assigned(address.clone()));
-    let (mut bridge, has_auto_feature) = Bridge::connect(&executable)?;
-    let (channel, has_auto_attach) = bridge.attach(&address, cols, rows)?;
+    // An existing remote machine may need time to reconnect after the app
+    // starts. Retry attaching the SAME address. Do not call terminal.run again:
+    // it would create a duplicate process while the old terminal is still alive.
+    let mut attempts = 0u32;
+    let (mut bridge, has_auto_feature, channel, has_auto_attach) = loop {
+        let attempted = Bridge::connect(&executable).and_then(|(mut bridge, feature)| {
+            let (channel, automatic) = bridge.attach(&address, cols, rows)?;
+            Ok((bridge, feature, channel, automatic))
+        });
+        match attempted {
+            Ok(attached) => break attached,
+            Err(error) => {
+                attempts += 1;
+                if attempts >= 5 {
+                    return Err(error);
+                }
+                report(TerminalEvent::Retrying(format!(
+                    "Herdr attach to {address} failed ({error}); reconnecting ({attempts}/4)"
+                )));
+                // 1, 2, 4, 8 seconds, interruptible by pane close.
+                let delay = Duration::from_secs(1 << (attempts - 1));
+                match rx.recv_timeout(delay) {
+                    Ok(Command::Detach) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                    _ => {}
+                }
+            }
+        }
+    };
     let automatic = has_auto_feature && has_auto_attach;
     report(TerminalEvent::Attached(address));
 
