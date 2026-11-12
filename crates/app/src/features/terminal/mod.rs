@@ -273,8 +273,16 @@ impl TerminalView {
                                     session.consumed(bytes.len());
                                 }
                             }
-                            HerdrEvent::Assigned(address) | HerdrEvent::Attached(address) => {
+                            HerdrEvent::Assigned(address) => {
                                 this.herdr_address = Some(address);
+                                cx.emit(TerminalEvent::TitleChanged);
+                            }
+                            HerdrEvent::Retrying(message) => {
+                                this.error = Some(message.into());
+                            }
+                            HerdrEvent::Attached(address) => {
+                                this.herdr_address = Some(address);
+                                this.error = None;
                                 cx.emit(TerminalEvent::TitleChanged);
                             }
                             HerdrEvent::Closed => {
