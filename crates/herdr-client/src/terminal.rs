@@ -282,12 +282,12 @@ impl Bridge {
         Ok((bridge, automatic))
     }
 
-    fn attach(&mut self, address: &str, cols: u16, rows: u16) -> Result<(u32, bool)> {
+    fn attach(&mut self, address: &str, cols: u16, rows: u16, resumed: bool) -> Result<(u32, bool)> {
         let request = json!({
             "jsonrpc": "2.0", "id": 2, "method": "terminal.attach",
             "params": {
                 "terminal": address, "cols": cols, "rows": rows,
-                "observe": false, "history": 0
+                "observe": false, "history": 0, "resumed": resumed
             }
         });
         write_frame(self.stdin.as_mut().unwrap(), 0, DATA, request.to_string().as_bytes())?;
@@ -534,7 +534,7 @@ fn serve(
         if !discard_offline(&rx, &cancelled) { return Ok(()); }
         let size = *desired.lock().unwrap_or_else(|e| e.into_inner());
         let attempted = Bridge::connect(&executable).and_then(|(mut bridge, feature)| {
-            let (channel, automatic) = bridge.attach(&address, size.cols, size.rows)?;
+            let (channel, automatic) = bridge.attach(&address, size.cols, size.rows, generation > 0)?;
             Ok((bridge, feature, channel, automatic))
         });
         let error = match attempted {
