@@ -124,6 +124,20 @@ impl TerminalSession {
         Self::spawn_inner(cwd, None, Some(argv), Some(machine), cols, rows, report)
     }
 
+    /// Launch a managed program either here (None) or on a registered
+    /// remote machine (Some). Used by the Pi RPC backend without duplicating
+    /// the output callback's state machine.
+    pub fn spawn_program_at(
+        cwd: PathBuf,
+        argv: Vec<String>,
+        on: Option<String>,
+        cols: u16,
+        rows: u16,
+        report: impl Fn(TerminalEvent) + Send + 'static,
+    ) -> Self {
+        Self::spawn_inner(cwd, None, Some(argv), on, cols, rows, report)
+    }
+
     fn spawn_inner(
         cwd: PathBuf,
         resume: Option<String>,
