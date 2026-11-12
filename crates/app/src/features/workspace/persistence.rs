@@ -53,6 +53,7 @@ impl Workspace {
                 .session
                 .as_ref()
                 .and_then(|s| s.read(cx).session_file()),
+            herdr_terminal: pane.item.terminal_address.as_ref().and_then(|get| get(cx)),
         })
     }
 
@@ -112,6 +113,9 @@ impl Workspace {
             changed |= pane.sync_chrome(cx);
         }
         if changed {
+            // The terminal title also changes when its first Herdr address
+            // becomes known, so persist it without waiting for app shutdown.
+            self.schedule_save(cx);
             cx.notify();
         }
     }
