@@ -20,6 +20,7 @@ use gpui_kit::*;
 
 use crate::features::files::FileTreeView;
 use crate::features::machines::{MachinesEvent, MachinesView};
+use crate::features::machines::{MachinesEvent, MachinesView};
 use crate::features::memory::{MemoryEvent, MemoryView};
 use crate::features::notices::{self, Notices};
 use crate::features::onboarding::{OnboardingEvent, OnboardingView, Probe};
@@ -95,6 +96,7 @@ pub enum WorkspaceEvent {
 enum Overlay {
     Providers(Entity<ProvidersView>),
     Sessions(Entity<SessionsView>),
+    Machines(Entity<MachinesView>),
     Machines(Entity<MachinesView>),
     Palette(Entity<PaletteView>),
     Usage(Entity<UsageView>),
