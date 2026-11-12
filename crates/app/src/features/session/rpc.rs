@@ -8,7 +8,7 @@ use std::time::Instant;
 use anyhow::Result;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
-use pi_rpc::PiProcess;
+use pi_rpc::RpcProcess;
 use serde_json::{Value, json};
 
 use super::state::{BackendStatus, ModelInfo};
