@@ -47,6 +47,40 @@ pub enum Incoming {
 
 type Pending = Arc<Mutex<HashMap<String, async_channel::Sender<Response>>>>;
 
+/// An agent backend exposed uniformly to GPUI. Both variants use the
+/// same request/response records and UI event model; only their transports
+/// differ. Native remains the explicit offline/diagnostic fallback.
+pub enum RpcProcess {
+    Native(Arc<PiProcess>),
+    Herdr(Arc<HerdrAgentProcess>),
+}
+
+impl RpcProcess {
+    pub fn request(
+        &self,
+        command: Value,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Response>> + Send>> {
+        match self {
+            Self::Native(process) => Box::pin(process.request(command)),
+            Self::Herdr(process) => Box::pin(process.request(command)),
+        }
+    }
+
+    pub fn respond_ui(&self, id: &str, answer: UiAnswer) -> Result<()> {
+        match self {
+            Self::Native(process) => process.respond_ui(id, answer),
+            Self::Herdr(process) => process.respond_ui(id, answer),
+        }
+    }
+
+    pub fn shutdown(&self, grace: Duration) {
+        match self {
+            Self::Native(process) => process.shutdown(grace),
+            Self::Herdr(process) => process.shutdown(grace),
+        }
+    }
+}
+
 /// A running Pi RPC child process.
 pub struct PiProcess {
     stdin: Mutex<Option<ChildStdin>>,
