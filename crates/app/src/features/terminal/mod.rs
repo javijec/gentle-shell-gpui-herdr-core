@@ -21,7 +21,8 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::tty;
-use alacritty_terminal::vte::ansi::CursorShape;
+use alacritty_terminal::vte::ansi::{CursorShape, Processor, StdSyncHandler};
+use herdr_client::terminal::{TerminalEvent as HerdrEvent, TerminalSession};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -106,6 +107,9 @@ impl Geometry {
 pub struct TerminalView {
     term: Arc<FairMutex<Term<Listener>>>,
     pty: Option<EventLoopSender>,
+    herdr: Option<Arc<TerminalSession>>,
+    herdr_address: Option<String>,
+    last_focused: bool,
     error: Option<SharedString>,
     focus_handle: FocusHandle,
     cwd: PathBuf,
@@ -213,15 +217,78 @@ impl TerminalView {
             cell,
             dims,
         };
-        let (pty, error) = match spawn_pty(&cwd, term.clone(), listener, geometry.window_size()) {
-            Ok(sender) => (Some(sender), None),
-            Err(err) => (
-                None,
-                Some(SharedString::from(format!(
-                    "Could not start the shell: {err}"
-                ))),
-            ),
+        // Opt-in while the new backend is validated. Unset/local retains
+        // the existing Alacritty PTY path without any extra dependencies.
+        let use_herdr = std::env::var("GENTLE_SHELL_TERMINAL_BACKEND")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("herdr"));
+        let (herdr_tx, herdr_rx) = async_channel::unbounded::<HerdrEvent>();
+        let (pty, herdr, error) = if use_herdr {
+            let size = geometry.window_size();
+            let session = TerminalSession::spawn(
+                cwd.clone(),
+                size.num_cols,
+                size.num_lines,
+                move |event| {
+                    let _ = herdr_tx.try_send(event);
+                },
+            );
+            (None, Some(Arc::new(session)), None)
+        } else {
+            match spawn_pty(&cwd, term.clone(), listener, geometry.window_size()) {
+                Ok(sender) => (Some(sender), None, None),
+                Err(err) => (
+                    None,
+                    None,
+                    Some(SharedString::from(format!(
+                        "Could not start the shell: {err}"
+                    ))),
+                ),
+            }
         };
+
+        if use_herdr {
+            // Keep the ANSI processor across chunks: multi-byte characters and
+            // partial escape sequences may straddle Herdr DATA frames.
+            cx.spawn(async move |this, cx| {
+                let mut parser: Processor<StdSyncHandler> = Processor::new();
+                while let Ok(event) = herdr_rx.recv().await {
+                    if this.update(cx, |this, cx| {
+                        match event {
+                            HerdrEvent::Output(bytes) => {
+                                {
+                                    let mut term = this.term.lock();
+                                    parser.advance(&mut *term, &bytes);
+                                }
+                                if let Some(session) = &this.herdr {
+                                    session.consumed(bytes.len());
+                                }
+                            }
+                            HerdrEvent::Attached(address) => {
+                                this.herdr_address = Some(address);
+                                cx.emit(TerminalEvent::TitleChanged);
+                            }
+                            HerdrEvent::Closed => {
+                                if !this.exited {
+                                    this.exited = true;
+                                    cx.emit(TerminalEvent::Exited);
+                                }
+                            }
+                            HerdrEvent::Failed(error) => {
+                                this.error = Some(format!("Herdr: {error}").into());
+                                if !this.exited {
+                                    this.exited = true;
+                                    cx.emit(TerminalEvent::Exited);
+                                }
+                            }
+                        }
+                        cx.notify();
+                    }).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
 
         cx.spawn(async move |this, cx| {
             while let Ok(event) = rx.recv().await {
@@ -245,6 +312,9 @@ impl TerminalView {
         Self {
             term,
             pty,
+            herdr,
+            herdr_address: None,
+            last_focused: false,
             error,
             focus_handle: cx.focus_handle(),
             cwd,
@@ -262,6 +332,9 @@ impl TerminalView {
     pub fn title(&self) -> SharedString {
         if let Some(title) = self.osc_title.as_ref().filter(|t| !t.trim().is_empty()) {
             return title.clone().into();
+        }
+        if let Some(address) = &self.herdr_address {
+            return format!("hc:{address}").into();
         }
         let user = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
@@ -298,7 +371,21 @@ impl TerminalView {
             return;
         }
         if let Some(pty) = &self.pty {
-            let _ = pty.send(Msg::Input(bytes));
+            let _ = pty.send(Msg::Input(bytes.clone()));
+        }
+        if let Some(herdr) = &self.herdr {
+            herdr.input(bytes.into_owned());
+        }
+    }
+
+    /// Automatic replies from the terminal emulator do not count as human
+    /// activity in Herdr when automatic_input is negotiated.
+    fn write_auto(&self, bytes: Vec<u8>) {
+        if let Some(pty) = &self.pty {
+            let _ = pty.send(Msg::Input(bytes.clone().into()));
+        }
+        if let Some(herdr) = &self.herdr {
+            herdr.automatic_input(bytes);
         }
     }
 
@@ -365,16 +452,16 @@ impl TerminalView {
                     .read_from_clipboard()
                     .and_then(|item| item.text())
                     .unwrap_or_default();
-                self.write(format(&text).into_bytes());
+                self.write_auto(format(&text).into_bytes());
             }
             TermEvent::ColorRequest(index, format) => {
                 let rgb = colors::for_index(index, self.term.lock().colors());
-                self.write(format(rgb).into_bytes());
+                self.write_auto(format(rgb).into_bytes());
             }
-            TermEvent::PtyWrite(text) => self.write(text.into_bytes()),
+            TermEvent::PtyWrite(text) => self.write_auto(text.into_bytes()),
             TermEvent::TextAreaSizeRequest(format) => {
                 let size = self.geometry.borrow().window_size();
-                self.write(format(size).into_bytes());
+                self.write_auto(format(size).into_bytes());
             }
             TermEvent::ChildExit(_) | TermEvent::Exit => {
                 if !self.exited {
@@ -954,8 +1041,17 @@ impl Render for TerminalView {
         let cell = self.cell_size(window);
         let focused = self.focus_handle.is_focused(window);
         self.term.lock().is_focused = focused;
+        if focused != self.last_focused {
+            if let Some(herdr) = &self.herdr {
+                herdr.focus(focused);
+            }
+            self.last_focused = focused;
+        }
         let term = self.term.clone();
         let pty = self.pty.clone();
+        // Avoid retaining the session from a transient paint closure after
+        // the owning pane has been closed.
+        let herdr = self.herdr.as_ref().map(Arc::downgrade);
         let geometry = self.geometry.clone();
         let focus_handle = self.focus_handle.clone();
         let entity = cx.entity();
@@ -974,6 +1070,9 @@ impl Render for TerminalView {
                     term.resize(geometry.dims);
                     if let Some(pty) = &pty {
                         let _ = pty.send(Msg::Resize(geometry.window_size()));
+                    }
+                    if let Some(herdr) = herdr.as_ref().and_then(std::sync::Weak::upgrade) {
+                        herdr.resize(columns as u16, lines as u16);
                     }
                 }
                 build_frame(&term, bounds.origin, cell, focused)
