@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod rpc;
+pub mod terminal;
 
 use std::ffi::OsStr;
 use std::io::BufReader;
