@@ -24,6 +24,7 @@ use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::{CursorShape, Processor, StdSyncHandler};
 use herdr_client::terminal::{TerminalEvent as HerdrEvent, TerminalSession};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::Sizable as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
