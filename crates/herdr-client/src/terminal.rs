@@ -632,7 +632,7 @@ fn serve(
                 // only opt-in target-specific overrides can be forwarded.
                 params["env"] = bridge_environment(
                     on.as_deref(),
-                    &|name| std::env::var_os(name),
+                    &std::env::var_os,
                 );
             }
             let run = client.call("terminal.run", params)?;
