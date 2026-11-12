@@ -1,10 +1,11 @@
 //! Client for the herdr-core terminal runtime.
 //!
-//! Stage 1 uses hc connect, which forwards JSON-RPC over stdin/stdout on
-//! Windows, Linux and macOS. It intentionally does not take control of a PTY,
-//! attach to a terminal, or alter the GPUI app's existing terminal panes.
+//! The discovery client uses plain-mode JSON-RPC. The terminal module
+//! additionally supports framed terminal.attach streams for GPUI panels.
+//! Both paths use hc connect on Windows, Linux and macOS.
 //!
-//! Calls are synchronous: run them off the GPUI UI thread.
+//! Plain-mode calls are synchronous: run them off the GPUI UI thread.
+//! TerminalSession starts a dedicated I/O worker for framed streams.
 
 #![forbid(unsafe_code)]
 
