@@ -5,7 +5,7 @@
 //! frames. Closing a viewer detaches; it never kills the managed program.
 
 use std::ffi::OsString;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
