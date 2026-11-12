@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
 use herdr_client::terminal::{TerminalEvent, TerminalSession};
@@ -19,7 +19,57 @@ use super::{Incoming, Pending, Record, Response, UiAnswer, parse_record};
 
 const MAX_JSONL: usize = 8 * 1024 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const TRANSPORT_TIMEOUT: Duration = Duration::from_secs(12);
+const TRANSPORT_PROBE_ID: &str = "gs4a-transport-probe";
 type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
+
+/// Verify both directions of Herdr's PTY, not just the bridge's child-pipe
+/// handshake. On Windows a terminal may display READY but never deliver input.
+fn verify_transport(
+    session: &TerminalSession,
+    token: &str,
+    pending: &Pending,
+    ready: &AtomicBool,
+) -> Result<()> {
+    if !ready.load(Ordering::Acquire) {
+        return Err(anyhow!("Herdr bridge disconnected before its transport check"));
+    }
+    let (tx, rx) = async_channel::bounded(1);
+    pending.lock().unwrap().insert(TRANSPORT_PROBE_ID.to_string(), tx);
+    let check = (|| {
+        let command = json!({"type": "get_state", "id": TRANSPORT_PROBE_ID});
+        let mut bytes = serde_json::to_vec(&command)?;
+        bytes.push(b'\n');
+        for frame in encode_input(token, &bytes) {
+            session.input(frame);
+        }
+        let deadline = Instant::now() + TRANSPORT_TIMEOUT;
+        loop {
+            match rx.try_recv() {
+                Ok(reply) if reply.success => return Ok(()),
+                Ok(reply) => return Err(anyhow!(
+                    "Herdr RPC transport probe failed: {}",
+                    reply.error.unwrap_or_else(|| "get_state returned failure".into())
+                )),
+                Err(async_channel::TryRecvError::Closed) => {
+                    return Err(anyhow!("Herdr RPC transport closed before answering get_state"));
+                }
+                Err(async_channel::TryRecvError::Empty) => {}
+            }
+            if !ready.load(Ordering::Acquire) {
+                return Err(anyhow!("Herdr RPC transport disconnected during get_state"));
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "Herdr PTY did not deliver the get_state round trip within 12 seconds"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    })();
+    pending.lock().unwrap().remove(TRANSPORT_PROBE_ID);
+    check
+}
 
 /// An agent terminal is ours to stop; never issue a global core shutdown.
 fn stop_owned_terminal(address: String) {
@@ -221,12 +271,16 @@ impl HerdrAgentProcess {
             }
         }));
         *session_ref.lock().unwrap() = Some(Arc::downgrade(&session));
-        if let Err(error) = match started_rx.recv_timeout(STARTUP_TIMEOUT) {
+        let started = match started_rx.recv_timeout(STARTUP_TIMEOUT) {
             Ok(result) => result,
             Err(_) => Err(anyhow!("Herdr RPC bridge did not become ready within 30 seconds")),
-        } {
-            // A launch can allocate a terminal before the bridge reports READY.
-            // Reclaim it on failure rather than leave an orphaned Pi process.
+        };
+        // Bridge READY is insufficient: test a real RPC command through
+        // terminal input + decoded output before SessionView refreshes models.
+        let verified = started.and_then(|()| verify_transport(
+            &session, &token, &pending, &ready,
+        ));
+        if let Err(error) = verified {
             if let Some(address) = address.lock().unwrap().clone() {
                 stop_owned_terminal(address);
             }
