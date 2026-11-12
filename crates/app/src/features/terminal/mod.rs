@@ -202,6 +202,31 @@ fn mono_font() -> Font {
     font(ui::MONO)
 }
 
+/// An address selects its owning Herdr Core regardless of the default
+/// backend for newly created terminals.
+fn choose_herdr_backend(resuming_herdr: bool, backend: Option<&str>) -> bool {
+    resuming_herdr || backend.is_some_and(|name| name.eq_ignore_ascii_case("herdr"))
+}
+
+#[cfg(test)]
+mod backend_choice_tests {
+    use super::choose_herdr_backend;
+
+    #[test]
+    fn local_default_starts_native_terminal() {
+        assert!(!choose_herdr_backend(false, Some("local")));
+        assert!(!choose_herdr_backend(false, None));
+        assert!(choose_herdr_backend(false, Some("HeRdR")));
+    }
+
+    #[test]
+    fn saved_remote_address_overrides_native_default() {
+        assert!(choose_herdr_backend(true, Some("local")));
+        assert!(choose_herdr_backend(true, None));
+        assert!(choose_herdr_backend(true, Some("herdr")));
+    }
+}
+
 impl TerminalView {
     /// Reconnect a saved Herdr address, or start a fresh terminal if absent.
     pub fn new_restored(cwd: PathBuf, resume: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -222,13 +247,11 @@ impl TerminalView {
             cell,
             dims,
         };
-        // Opt-in while the new backend is validated. Unset/local retains
-        // the existing Alacritty PTY path without any extra dependencies.
-        let use_herdr = match std::env::var("GENTLE_SHELL_TERMINAL_BACKEND") {
-            Ok(value) if value.eq_ignore_ascii_case("local") => false,
-            Ok(value) if value.eq_ignore_ascii_case("herdr") => true,
-            _ => resume.is_some(),
-        };
+        // An explicit/persisted Herdr address always uses Herdr, even when
+        // newly created terminals default to the local Alacritty PTY.
+        // This allows local and remote terminals to coexist in one window.
+        let backend = std::env::var("GENTLE_SHELL_TERMINAL_BACKEND").ok();
+        let use_herdr = choose_herdr_backend(resume.is_some(), backend.as_deref());
         let (herdr_tx, herdr_rx) = async_channel::unbounded::<HerdrEvent>();
         let (pty, herdr, error) = if use_herdr {
             let size = geometry.window_size();
