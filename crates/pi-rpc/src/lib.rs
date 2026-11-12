@@ -7,6 +7,7 @@
 
 pub mod file_cache;
 pub mod herdr_wire;
+pub mod herdr_bridge;
 mod herdr_agent;
 pub use herdr_agent::HerdrAgentProcess;
 mod home;
