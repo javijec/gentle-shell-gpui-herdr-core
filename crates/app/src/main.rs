@@ -13,8 +13,12 @@ use platform::instance;
 fn main() {
     // `gentle-device …` (the agents' command) runs here and exits.
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some("--device") {
-        std::process::exit(features::devices::cli::run(args.collect()));
+    match args.next().as_deref() {
+        Some("--device") => std::process::exit(features::devices::cli::run(args.collect())),
+        Some("--herdr-agent-bridge") => {
+            std::process::exit(herdr_agent_bridge::run(args.collect()));
+        }
+        _ => {}
     }
     // An explicit folder selects (or creates) the workspace rooted there;
     // without one the last workspace is restored.
