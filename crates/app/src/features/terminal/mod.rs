@@ -199,10 +199,6 @@ fn mono_font() -> Font {
 }
 
 impl TerminalView {
-    pub fn new(cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::new_restored(cwd, None, window, cx)
-    }
-
     /// Reconnect a saved Herdr address, or start a fresh terminal if absent.
     pub fn new_restored(cwd: PathBuf, resume: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (tx, rx) = async_channel::unbounded::<TermEvent>();
@@ -224,8 +220,11 @@ impl TerminalView {
         };
         // Opt-in while the new backend is validated. Unset/local retains
         // the existing Alacritty PTY path without any extra dependencies.
-        let use_herdr = std::env::var("GENTLE_SHELL_TERMINAL_BACKEND")
-            .is_ok_and(|value| value.eq_ignore_ascii_case("herdr"));
+        let use_herdr = match std::env::var("GENTLE_SHELL_TERMINAL_BACKEND") {
+            Ok(value) if value.eq_ignore_ascii_case("local") => false,
+            Ok(value) if value.eq_ignore_ascii_case("herdr") => true,
+            _ => resume.is_some(),
+        };
         let (herdr_tx, herdr_rx) = async_channel::unbounded::<HerdrEvent>();
         let (pty, herdr, error) = if use_herdr {
             let size = geometry.window_size();
