@@ -572,6 +572,15 @@ fn serve(
                 }
                 params["argv"] = json!(program);
                 params["labels"] = json!({"gentle-shell": "rpc-agent"});
+                // Core may be running with an older service environment.
+                // Only the explicitly launched local agent bridge inherits
+                // these launch paths, not ordinary user terminal sessions.
+                if let Some(path) = std::env::var_os("PATH") {
+                    params["env"]["PATH"] = json!(path.to_string_lossy());
+                }
+                if let Some(bin) = std::env::var_os("GENTLE_SHELL_BIN") {
+                    params["env"]["GENTLE_SHELL_BIN"] = json!(bin.to_string_lossy());
+                }
             }
             let run = client.call("terminal.run", params)?;
             run["address"]
