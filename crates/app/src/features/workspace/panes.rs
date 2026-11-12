@@ -240,6 +240,13 @@ impl Workspace {
             );
             return None;
         };
+        // Retain persisted Herdr identity across a native/local-only run.
+        // The terminal view will use a native PTY and never call hc in that mode.
+        let dormant_herdr_address = if crate::features::terminal::herdr_enabled() {
+            None
+        } else {
+            herdr_terminal.clone()
+        };
         let item = match kind {
             PaneKind::Terminal => (factories.terminal?)(target.clone(), herdr_terminal, window, cx),
             PaneKind::File => (factories.file?)(target.clone(), window, cx),
@@ -262,7 +269,7 @@ impl Workspace {
             cwd,
             path,
             session_file: None,
-            herdr_address: None,
+            herdr_address: dormant_herdr_address,
             title: SharedString::default(),
             running: false,
             _subscriptions: Vec::new(),
