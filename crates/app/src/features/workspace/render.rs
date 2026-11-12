@@ -172,16 +172,18 @@ impl Render for Workspace {
                                     )
                                     .children(crate::features::music::title_button(&self.music, cx))
                                     .children(self.render_devices_button(cx))
-                                    .child(
-                                        Button::new("title-machines")
-                                            .ghost()
-                                            .xsmall()
-                                            .icon(Icon::new(IconName::SquareTerminal))
-                                            .tooltip("Machines: Herdr computers and persistent terminals")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.open_machines(window, cx)
-                                            })),
-                                    )
+                                    .when(crate::features::terminal::herdr_enabled(), |bar| {
+                                        bar.child(
+                                            Button::new("title-machines")
+                                                .ghost()
+                                                .xsmall()
+                                                .icon(Icon::new(IconName::SquareTerminal))
+                                                .tooltip("Machines: Herdr computers and persistent terminals")
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.open_machines(window, cx)
+                                                })),
+                                        )
+                                    })
                                     .children(self.render_tray(cx))
                                     .child({
                                         let weak = cx.entity().downgrade();
