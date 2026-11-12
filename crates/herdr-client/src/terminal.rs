@@ -412,7 +412,11 @@ fn stream(
     rx: Receiver<Command>,
     state: &ConnectionState<'_>,
 ) -> (Receiver<Command>, StreamEnd) {
-    let ConnectionState { tx, cancelled, connected, desired, report } = state;
+    let tx = state.tx;
+    let cancelled = state.cancelled;
+    let connected = state.connected;
+    let desired = state.desired;
+    let report = state.report;
     let initial = *desired.lock().unwrap_or_else(|e| e.into_inner());
     let mut writer = bridge.stdin.take().expect("framed bridge has stdin");
     // Resynchronize with GUI size/focus after offline edits, even when the
@@ -505,7 +509,10 @@ fn serve(
     mut rx: Receiver<Command>,
     state: &ConnectionState<'_>,
 ) -> Result<()> {
-    let ConnectionState { cancelled, connected, desired, report, .. } = state;
+    let cancelled = state.cancelled;
+    let connected = state.connected;
+    let desired = state.desired;
+    let report = state.report;
     let executable = std::env::var_os("GENTLE_SHELL_HERDR_HC")
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| OsString::from("hc"));
