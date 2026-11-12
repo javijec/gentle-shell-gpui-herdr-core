@@ -240,6 +240,13 @@ impl Workspace {
             );
             return None;
         };
+        // Retain persisted Herdr identity across a native/local-only run.
+        // The terminal view will use a native PTY and never call hc in that mode.
+        let dormant_herdr_address = if crate::features::terminal::herdr_enabled() {
+            None
+        } else {
+            herdr_terminal.clone()
+        };
         let item = match kind {
             PaneKind::Terminal => (factories.terminal?)(target.clone(), herdr_terminal, window, cx),
             PaneKind::File => (factories.file?)(target.clone(), window, cx),
@@ -262,7 +269,7 @@ impl Workspace {
             cwd,
             path,
             session_file: None,
-            herdr_address: None,
+            herdr_address: dormant_herdr_address,
             title: SharedString::default(),
             running: false,
             _subscriptions: Vec::new(),
@@ -315,6 +322,25 @@ impl Workspace {
                 PaneFactories::get(cx).file.as_ref()?;
                 self.new_factory_pane(PaneKind::File, path, window, cx)
             }
+        }
+    }
+
+    /// Attach an existing Herdr address as a new GPUI tab without running a
+    /// replacement shell. Only available when Herdr is the selected backend.
+    pub(super) fn open_herdr_terminal(
+        &mut self,
+        address: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !crate::features::terminal::herdr_enabled() {
+            return;
+        }
+        let cwd = self.active_cwd(cx);
+        if let Some(pane) = self.new_factory_pane_restored(
+            PaneKind::Terminal, cwd, Some(address), window, cx,
+        ) {
+            self.push_pane_tab(pane, window, cx);
         }
     }
 

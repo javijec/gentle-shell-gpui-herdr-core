@@ -53,7 +53,11 @@ impl Workspace {
                 .session
                 .as_ref()
                 .and_then(|s| s.read(cx).session_file()),
-            herdr_terminal: pane.item.terminal_address.as_ref().and_then(|get| get(cx)),
+            herdr_terminal: retained_herdr_address(
+                pane.item.terminal_address.as_ref().and_then(|get| get(cx)),
+                pane.herdr_address.clone(),
+                crate::features::terminal::herdr_enabled(),
+            ),
         })
     }
 

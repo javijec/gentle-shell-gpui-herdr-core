@@ -43,6 +43,12 @@ pub(super) fn screen_rows() -> Vec<Row> {
             PaletteAction::Sessions,
         ),
         row(
+            IconName::SquareTerminal,
+            "Machines",
+            "View Herdr computers, persistent terminals and remote shells",
+            PaletteAction::Machines,
+        ),
+        row(
             IconName::Brain,
             "Memory",
             "Browse and search Engram, the persistent memory",

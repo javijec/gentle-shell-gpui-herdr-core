@@ -62,6 +62,17 @@ struct DesiredState {
     focused: bool,
 }
 
+/// Shared I/O state for a terminal worker and each successive viewer channel.
+/// Kept as one unit so reconnect paths use the same cancel flag, target size
+/// and event reporter without passing many unrelated arguments.
+struct ConnectionState<'a> {
+    tx: &'a Sender<Command>,
+    cancelled: &'a AtomicBool,
+    connected: &'a AtomicBool,
+    desired: &'a Mutex<DesiredState>,
+    report: &'a dyn Fn(TerminalEvent),
+}
+
 /// One GPUI terminal pane, with stable identity across transport reconnects.
 /// Closing it detaches the viewer, never kills the process owned by Herdr.
 pub struct TerminalSession {
@@ -97,13 +108,17 @@ impl TerminalSession {
         let worker_connected = connected.clone();
         let worker_desired = desired.clone();
         std::thread::spawn(move || {
-            if let Err(error) = serve(
-                cwd, resume, rx, worker_tx, worker_cancelled.clone(),
-                worker_connected, worker_desired, &report,
-            ) {
-                if !worker_cancelled.load(Ordering::SeqCst) {
-                    report(TerminalEvent::Failed(error.to_string()));
-                }
+            let state = ConnectionState {
+                tx: &worker_tx,
+                cancelled: &worker_cancelled,
+                connected: &worker_connected,
+                desired: &worker_desired,
+                report: &report,
+            };
+            if let Err(error) = serve(cwd, resume, rx, &state)
+                && !worker_cancelled.load(Ordering::SeqCst)
+            {
+                report(TerminalEvent::Failed(error.to_string()));
             }
         });
         Self { tx, cancelled, connected, desired }
@@ -395,12 +410,13 @@ fn stream(
     automatic: bool,
     generation: u64,
     rx: Receiver<Command>,
-    tx: &Sender<Command>,
-    cancelled: &AtomicBool,
-    connected: &AtomicBool,
-    desired: &Mutex<DesiredState>,
-    report: &impl Fn(TerminalEvent),
+    state: &ConnectionState<'_>,
 ) -> (Receiver<Command>, StreamEnd) {
+    let tx = state.tx;
+    let cancelled = state.cancelled;
+    let connected = state.connected;
+    let desired = state.desired;
+    let report = state.report;
     let initial = *desired.lock().unwrap_or_else(|e| e.into_inner());
     let mut writer = bridge.stdin.take().expect("framed bridge has stdin");
     // Resynchronize with GUI size/focus after offline edits, even when the
@@ -491,12 +507,12 @@ fn serve(
     cwd: PathBuf,
     resume: Option<String>,
     mut rx: Receiver<Command>,
-    tx: Sender<Command>,
-    cancelled: Arc<AtomicBool>,
-    connected: Arc<AtomicBool>,
-    desired: Arc<Mutex<DesiredState>>,
-    report: &impl Fn(TerminalEvent),
+    state: &ConnectionState<'_>,
 ) -> Result<()> {
+    let cancelled = state.cancelled;
+    let connected = state.connected;
+    let desired = state.desired;
+    let report = state.report;
     let executable = std::env::var_os("GENTLE_SHELL_HERDR_HC")
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| OsString::from("hc"));
@@ -531,7 +547,7 @@ fn serve(
     let mut failures = 0u32;
     let mut generation = 0u64;
     loop {
-        if !discard_offline(&rx, &cancelled) { return Ok(()); }
+        if !discard_offline(&rx, cancelled) { return Ok(()); }
         let size = *desired.lock().unwrap_or_else(|e| e.into_inner());
         let attempted = Bridge::connect(&executable).and_then(|(mut bridge, feature)| {
             let (channel, automatic) = bridge.attach(&address, size.cols, size.rows, generation > 0)?;
@@ -545,8 +561,7 @@ fn serve(
                 connected.store(true, Ordering::SeqCst);
                 report(TerminalEvent::Attached { address: address.clone(), recovered });
                 let (returned, end) = stream(
-                    bridge, channel, feature && automatic, generation, rx, &tx,
-                    &cancelled, &connected, &desired, report,
+                    bridge, channel, feature && automatic, generation, rx, state,
                 );
                 rx = returned;
                 if cancelled.load(Ordering::SeqCst) { return Ok(()); }
@@ -566,13 +581,13 @@ fn serve(
             report(TerminalEvent::NeedsReconnect(format!(
                 "Herdr {address}: disconnected ({error}). Automatic retries exhausted."
             )));
-            if !wait_retry(&rx, &cancelled, None) { return Ok(()); }
+            if !wait_retry(&rx, cancelled, None) { return Ok(()); }
             failures = 0;
         } else {
             report(TerminalEvent::Retrying(format!(
                 "Herdr {address}: connection lost ({error}). Retry {failures}/4..."
             )));
-            if !wait_retry(&rx, &cancelled, Some(retry_delay(failures))) {
+            if !wait_retry(&rx, cancelled, Some(retry_delay(failures))) {
                 return Ok(());
             }
         }
