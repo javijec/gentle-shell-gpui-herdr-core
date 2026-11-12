@@ -3,6 +3,7 @@
 mod app;
 mod cli;
 mod features;
+mod herdr_agent_bridge;
 mod platform;
 mod shared;
 
