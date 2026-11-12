@@ -71,6 +71,15 @@ impl MachinesView {
     /// Launch a new shell on local core (None) or a named remote core.
     fn new_shell(&mut self, machine: Option<String>, cx: &mut Context<Self>) {
         if self.busy { return; }
+        if std::env::var("GENTLE_SHELL_TERMINAL_BACKEND")
+            .is_ok_and(|v| v.eq_ignore_ascii_case("local"))
+        {
+            self.error = Some(
+                "Herdr shells are disabled by GENTLE_SHELL_TERMINAL_BACKEND=local.".into()
+            );
+            cx.notify();
+            return;
+        }
         self.busy = true;
         self.error = None;
         self.info = Some(match &machine {
