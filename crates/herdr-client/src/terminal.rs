@@ -190,12 +190,14 @@ impl Bridge {
         serde_json::to_writer(&mut *writer, &hello)?;
         writer.write_all(b"\n")?;
         writer.flush()?;
-        let mut line = String::new();
-        let n = bridge.stdout.read_line(&mut line)?;
-        if n == 0 || n > 1024 * 1024 {
+        let mut line = Vec::new();
+        let n = (&mut bridge.stdout)
+            .take(1024 * 1024 + 1)
+            .read_until(b'\n', &mut line)?;
+        if n == 0 || n > 1024 * 1024 || !line.ends_with(b"\n") {
             return Err(Error::Protocol("missing or excessive Herdr hello reply".into()));
         }
-        let reply: Value = serde_json::from_str(&line)?;
+        let reply: Value = serde_json::from_slice(&line)?;
         let result = check_response(reply, 1)?;
         if result["generation"].as_u64() != Some(PROTOCOL_GENERATION as u64)
             || result["framed"] != true
@@ -327,7 +329,6 @@ fn serve(
             }
             Ok(frame) if frame.channel == 0 && frame.kind == DATA => {
                 // No other calls are outstanding after terminal.attach.
-                let _ = frame;
             }
             Ok(_) => {}
             Err(e) => break Err(e),
