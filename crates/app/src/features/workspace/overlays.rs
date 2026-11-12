@@ -75,6 +75,7 @@ impl Workspace {
         match action {
             PaletteAction::Providers => self.open_providers(window, cx),
             PaletteAction::Sessions => self.open_sessions(window, cx),
+            PaletteAction::Machines => self.open_machines(window, cx),
             PaletteAction::Profiles => self.open_profiles(window, cx),
             PaletteAction::Usage => self.open_usage(window, cx),
             PaletteAction::Memory => self.open_memory(window, cx),
@@ -193,6 +194,29 @@ impl Workspace {
                 tree.update(cx, |tree, cx| tree.show_changes(window, cx));
             }
         }
+    }
+
+    /// Herdr machine and terminal browser (all discovery/actions off the UI thread).
+    pub(super) fn open_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(&self.overlay, Some((Overlay::Machines(_), _))) {
+            self.close_overlay(window, cx);
+            return;
+        }
+        let view = cx.new(|cx| MachinesView::new(window, cx));
+        let subscription = cx.subscribe_in(
+            &view,
+            window,
+            |this, _, event: &MachinesEvent, window, cx| match event {
+                MachinesEvent::Close => this.close_overlay(window, cx),
+                MachinesEvent::OpenTerminal(address) => {
+                    let address = address.clone();
+                    this.close_overlay(window, cx);
+                    this.open_herdr_terminal(address, window, cx);
+                }
+            },
+        );
+        self.overlay = Some((Overlay::Machines(view), subscription));
+        cx.notify();
     }
 
     pub(super) fn open_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
