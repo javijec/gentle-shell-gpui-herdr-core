@@ -357,6 +357,9 @@ pub struct Workspace {
     overlay: Option<(Overlay, Subscription)>,
     sidebar: Option<AnyView>,
     remote_files: Option<Entity<RemoteFilesView>>,
+    /// In-memory remote editors tied to individual agents. Switching Machines
+    /// must not silently discard a draft or redirect it to another agent.
+    remote_file_drafts: Vec<Entity<RemoteFilesView>>,
     _remote_files_events: Option<Subscription>,
     sidebar_visible: bool,
     /// Independent right-side Windows Files / Changes / Branches dock.
@@ -493,6 +496,7 @@ impl Workspace {
             overlay: None,
             sidebar: None,
             remote_files: None,
+            remote_file_drafts: Vec::new(),
             _remote_files_events: None,
             // Machines and local Files have separate dock positions.
             // Default to showing both without restoring the old tab strip.
