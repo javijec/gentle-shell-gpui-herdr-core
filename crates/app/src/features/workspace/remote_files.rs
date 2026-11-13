@@ -4,6 +4,19 @@
 
 use super::*;
 
+/// Scope a browser click to the currently selected remote agent's Linux
+/// project; the bridge additionally checks symlinks and realpath.
+fn remote_file_in_root(root: &str, path: &str) -> bool {
+    if root.is_empty() || !root.starts_with('/') || !path.starts_with('/')
+        || path == root || path.len() > 2048 || path.contains('\\')
+        || path.bytes().any(|byte| byte < 32 || byte == 127)
+        || path.split('/').any(|part| part == "." || part == "..")
+    {
+        return false;
+    }
+    root == "/" || path.starts_with(&(root.to_owned() + "/"))
+}
+
 impl Workspace {
     /// A selected Linux file opens beside its agent in the main workspace,
     /// just like a local FileView preview. Files stays a directory browser.
@@ -18,10 +31,7 @@ impl Workspace {
         };
         // A path is never translated to Windows. This preliminary lexical
         // check protects the UI; Herdr bridge also validates realpath/root.
-        if !path.starts_with('/') || path == root
-            || !(root == "/" || path.starts_with(&(root.clone() + "/")))
-            || path.split('/').any(|part| part == ".." || part == ".")
-        {
+        if !remote_file_in_root(&root, &path) {
             window.push_notification(Notification::info(
                 "Remote path is outside the selected agent's project.",
             ), cx);
@@ -150,5 +160,27 @@ impl Workspace {
         );
         self.remote_files = Some(view);
         self._remote_files_events = Some(sub);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remote_file_in_root;
+
+    #[test]
+    fn remote_file_navigation_is_machine_and_root_scoped() {
+        assert!(remote_file_in_root("/srv/workspaces/JaviPi",
+            "/srv/workspaces/JaviPi/prepare-boot.ps1"));
+        assert!(!remote_file_in_root("/srv/workspaces/JaviPi",
+            "/srv/workspaces/JaviPi2/prepare-boot.ps1"));
+        assert!(!remote_file_in_root("/srv/workspaces/JaviPi",
+            "/srv/workspaces/Other/demo.txt"));
+        assert!(!remote_file_in_root("/srv/workspaces/JaviPi",
+            "/srv/workspaces/JaviPi/../Other/demo.txt"));
+        assert!(!remote_file_in_root("/srv/workspaces/JaviPi",
+            "C:\\Users\\demo\\readme.md"));
+        assert!(!remote_file_in_root("/", "/"));
+        assert!(remote_file_in_root("/", "/etc/hosts"));
+        assert!(!remote_file_in_root("/", "/etc/../hosts"));
     }
 }
