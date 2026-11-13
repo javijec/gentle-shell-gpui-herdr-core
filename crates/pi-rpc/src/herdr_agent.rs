@@ -24,6 +24,17 @@ const REMOTE_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const TRANSPORT_TIMEOUT: Duration = Duration::from_secs(12);
 const REATTACH_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(45);
 const REATTACH_PROBE_INTERVAL: Duration = Duration::from_secs(4);
+const REATTACH_FAST_PROBE_INTERVAL: Duration = Duration::from_millis(1200);
+
+fn reattach_probe_delay(attempts: u32) -> Duration {
+    // Old VT repaints can swallow the first get_state frame. Retry quickly
+    // while the viewer becomes live, then back off to avoid flooding Pi4.
+    if attempts < 4 {
+        REATTACH_FAST_PROBE_INTERVAL
+    } else {
+        REATTACH_PROBE_INTERVAL
+    }
+}
 type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
 
 /// Inline Node.js bridge is injected as argv via Herdr Core on JaviPi.
@@ -315,7 +326,7 @@ fn verify_transport(
         } else {
             TRANSPORT_TIMEOUT
         };
-        let mut next_retry = Instant::now() + REATTACH_PROBE_INTERVAL;
+        let mut next_retry = Instant::now() + reattach_probe_delay(1);
         let mut attempts = 1u32;
         loop {
             match rx.try_recv() {
@@ -347,7 +358,7 @@ fn verify_transport(
             if reattaching && now >= next_retry {
                 send();
                 attempts += 1;
-                next_retry = now + REATTACH_PROBE_INTERVAL;
+                next_retry = now + reattach_probe_delay(attempts);
             }
             std::thread::sleep(Duration::from_millis(30));
         }
@@ -518,7 +529,9 @@ impl HerdrAgentProcess {
     ) -> Result<(Arc<Self>, async_channel::Receiver<Incoming>)> {
         // Inspect the existing terminal before attaching: a stale or foreign
         // address must fail closed instead of launching another Pi agent.
+        let startup_clock = Instant::now();
         let inspected = existing.map(inspect_existing).transpose()?;
+        let inspected_at = Instant::now();
         let local_ended = existing.is_some() && inspected.as_ref().is_some_and(Option::is_none);
         // A dead local agent's saved address is not a live reattachment
         // target. Preserve its local-only intent even if legacy global
@@ -792,12 +805,24 @@ impl HerdrAgentProcess {
                 startup_timeout.as_secs(),
             )),
         };
+        let attached_at = Instant::now();
         // Bridge READY is insufficient: test a real RPC command through
         // terminal input + decoded output before SessionView refreshes models.
         let probe_id = format!("{id_prefix}-probe");
         let verified = started.and_then(|()| verify_transport(
             &session, &token, &pending, &ready, &probe_id, reattaching,
         ));
+        if remote_start && startup_clock.elapsed() >= Duration::from_secs(2) {
+            // Stage-specific diagnostics rather than guessing that a slow
+            // JaviPi connect was caused by the UI, SSH, Pi startup, or repaint.
+            eprintln!(
+                "gentle-shell-gpui: Herdr remote startup reattach={} inspect={}ms attach_or_ready={}ms rpc_probe={}ms",
+                reattaching,
+                inspected_at.duration_since(startup_clock).as_millis(),
+                attached_at.duration_since(inspected_at).as_millis(),
+                attached_at.elapsed().as_millis(),
+            );
+        }
         if let Err(error) = verified {
             allow_reconnect.store(false, Ordering::Release);
             // Never kill an *existing* agent just because this viewer failed
@@ -956,6 +981,15 @@ mod tests {
     };
     use crate::herdr_wire::encode;
     use serde_json::json;
+
+    #[test]
+    fn recovered_probe_retries_early_then_backs_off() {
+        use super::{reattach_probe_delay, REATTACH_FAST_PROBE_INTERVAL, REATTACH_PROBE_INTERVAL};
+        assert_eq!(reattach_probe_delay(1), REATTACH_FAST_PROBE_INTERVAL);
+        assert_eq!(reattach_probe_delay(2), REATTACH_FAST_PROBE_INTERVAL);
+        assert_eq!(reattach_probe_delay(3), REATTACH_FAST_PROBE_INTERVAL);
+        assert_eq!(reattach_probe_delay(4), REATTACH_PROBE_INTERVAL);
+    }
 
     #[test]
     fn stopped_local_bridge_restarts_but_stopped_remote_fails_closed() {
