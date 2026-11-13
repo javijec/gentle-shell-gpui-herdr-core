@@ -46,8 +46,9 @@ pub enum SessionEvent {
     /// A Gentle Shell command whose UI is terminal-only was run (typed or
     /// from the palette): open the app's own screen for it instead.
     OpenScreen(gentle_core::commands::Screen),
-    /// The thinking level was set to `max`: the window plays its surge.
-    MaxEffort,
+    /// The thinking level was set (and the backend took it): the window
+    /// plays that level's surge.
+    Effort(String),
     /// Gentle Design's canvas opened, refreshed or stopped: the window keeps
     /// it in its instance tray (or reloads the card already showing it).
     DesignCanvas(crate::features::browser::CanvasNotice),
@@ -70,6 +71,7 @@ pub enum SessionEvent {
 struct Chrome {
     title: String,
     running: bool,
+    needs_you: bool,
     session_file: Option<PathBuf>,
     models: u64,
 }
@@ -308,6 +310,11 @@ impl SessionView {
         self.transcript.running
     }
 
+    /// A dialog (a question, a confirmation) waits for an answer.
+    pub fn needs_you(&self) -> bool {
+        !self.extension.dialogs.is_empty()
+    }
+
     pub fn composer(&self) -> Entity<TextareaState> {
         self.composer.clone()
     }
@@ -385,6 +392,7 @@ impl SessionView {
         let chrome = Chrome {
             title: self.title(),
             running: self.is_running(),
+            needs_you: self.needs_you(),
             session_file: self.session_file(),
             models: self.models.rev,
         };

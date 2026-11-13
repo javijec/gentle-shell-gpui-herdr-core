@@ -24,7 +24,7 @@ use crate::features::memory::{MemoryEvent, MemoryView};
 use crate::features::notices::{self, Notices};
 use crate::features::onboarding::{OnboardingEvent, OnboardingView, Probe};
 use crate::features::palette::{
-    Category, PaletteAction, PaletteEvent, PaletteInput, PaletteView, WorkspaceRow,
+    Activity, Category, PaletteAction, PaletteEvent, PaletteInput, PaletteView, WorkspaceRow,
 };
 use crate::features::profiles::{ModelChoice, ProfilesEvent, ProfilesView};
 use crate::features::providers::{ProvidersEvent, ProvidersView};
@@ -39,6 +39,7 @@ use crate::shared::ui;
 use gentle_core::commands::Screen;
 
 mod actions;
+mod closed;
 mod layout;
 mod overlays;
 mod panes;
@@ -69,6 +70,7 @@ actions!(
         NewAgentPane,
         NewTerminalPane,
         ClosePane,
+        ReopenClosed,
         FocusNextPane,
         FocusPrevPane,
         ToggleSidebar,
@@ -125,6 +127,7 @@ struct Pane {
     /// refresh it on `SessionEvent::ChromeChanged`, everything on the title poll.
     title: SharedString,
     running: bool,
+    needs_you: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -170,20 +173,22 @@ impl Pane {
     /// Re-read the title and busy state; whether either changed.
     fn sync_chrome(&mut self, cx: &App) -> bool {
         let title = (self.item.title)(cx);
-        let running = self
-            .session
-            .as_ref()
-            .is_some_and(|s| s.read(cx).is_running());
+        let (running, needs_you) = self.session.as_ref().map_or((false, false), |s| {
+            let session = s.read(cx);
+            (session.is_running(), session.needs_you())
+        });
         let reported = self.item.terminal_address.as_ref().and_then(|get| get(cx));
         let address = retained_herdr_address(
             reported,
             self.herdr_address.clone(),
             crate::features::terminal::herdr_enabled(),
         );
-        let changed = title != self.title || running != self.running || address != self.herdr_address;
+        let changed = title != self.title || running != self.running
+            || needs_you != self.needs_you || address != self.herdr_address;
         self.herdr_address = address;
         self.title = title;
         self.running = running;
+        self.needs_you = needs_you;
         changed
     }
 }
@@ -355,7 +360,7 @@ pub struct Workspace {
     renaming: Option<TabRename>,
     /// The max-effort surge playing over the window (its run number and when
     /// it started), and the timer that clears it.
-    surge: Option<(u64, std::time::Instant)>,
+    surge: Option<(u64, std::time::Instant, crate::shared::surge::Level)>,
     surge_runs: u64,
     _surge_end: Option<Task<()>>,
     /// Web and device stages, in creation order: shown ones float and tile,
@@ -368,6 +373,8 @@ pub struct Workspace {
     /// While a pane is dragged: the pane under the pointer and where it would
     /// land there.
     drop_hint: Option<(PaneId, DropZone)>,
+    closed: Vec<closed::Closed>,
+    close_hover: bool,
     /// gentle-stream, behind the title bar's ♪ button.
     music: Entity<Music>,
     /// Simulators and emulators, docked at the right or floating.
@@ -437,6 +444,7 @@ impl Workspace {
             }),
             // The title-bar update pill follows this app's own update state.
             cx.observe_global::<crate::features::app_update::AppUpdate>(|_, cx| cx.notify()),
+            cx.observe_global::<crate::features::hydration::Hydration>(|_, cx| cx.notify()),
             // Keep a multi-stage grid filling the window as it resizes. A
             // lone card keeps whatever size the user gave it.
             cx.observe_window_bounds(window, |this, window, cx| {
@@ -478,6 +486,8 @@ impl Workspace {
             next_stage: 1,
             resume_welcome: None,
             drop_hint: None,
+            closed: Vec::new(),
+            close_hover: false,
             music,
             devices,
             _surge_end: None,
@@ -631,6 +641,11 @@ impl Workspace {
         });
     }
 
+    /// Open an agent tab in a local worktree folder.
+    pub fn open_agent_tab(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_tab(PaneKind::Agent, folder, None, None, window, cx);
+    }
+
     /// Put `view` in the left sidebar slot (cmd-b toggles it).
     pub fn set_sidebar(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.sidebar = Some(view);
@@ -675,6 +690,7 @@ impl Workspace {
             agent_target: None,
             title: SharedString::default(),
             running: false,
+            needs_you: false,
             _subscriptions: Vec::new(),
         };
         pane.sync_chrome(cx);
