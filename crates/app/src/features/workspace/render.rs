@@ -18,11 +18,20 @@ impl Render for Workspace {
         }
         // The two docks are independent: Machines lives on the left, while
         // the existing native FileTreeView always occupies the right.
-        let files = self.sidebar.clone().filter(|_| self.files_sidebar_open);
-        let navigator_visible = self.sidebar_visible;
+        self.sync_remote_files(window, cx);
         let selected_remote = self.active_session().is_some_and(|session| {
             session.read(cx).is_remote_herdr()
         });
+        let files: Option<AnyView> = if self.files_sidebar_open {
+            if selected_remote {
+                self.remote_files.as_ref().map(|view| view.clone().into())
+            } else {
+                self.sidebar.clone()
+            }
+        } else {
+            None
+        };
+        let navigator_visible = self.sidebar_visible;
         let has_sidebar = true;
         // Below this the screen buttons fold into one overflow menu.
         let narrow = window.viewport_size().width < px(900.);
@@ -485,7 +494,7 @@ impl Render for Workspace {
                                                             ui::muted()
                                                         })
                                                         .child(if selected_remote {
-                                                            "Local Windows files · not remote"
+                                                            "Remote Linux files · read-only"
                                                         } else {
                                                             "Local Windows files"
                                                         }),
