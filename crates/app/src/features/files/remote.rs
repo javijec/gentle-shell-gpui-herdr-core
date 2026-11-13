@@ -330,6 +330,14 @@ impl RemoteFilesView {
                 match response {
                     Ok(reply) => {
                         if let Some(content) = reply.data["content"].as_str() {
+                            let is_markdown = this.pane_path.is_some()
+                                && std::path::Path::new(&path).extension()
+                                    .is_some_and(|e| e.eq_ignore_ascii_case("md")
+                                        || e.eq_ignore_ascii_case("mdx"));
+                            this.markdown = is_markdown.then(|| (
+                                MdMode::last(),
+                                cx.new(|cx| TextViewState::markdown(content, cx)),
+                            ));
                             this.preview = Some(RemotePreview {
                                 path,
                                 content: content.to_owned(),
@@ -374,11 +382,48 @@ impl RemoteFilesView {
         let editor = cx.new(|cx| super::source_editor(file, content, window, cx));
         editor.update(cx, |input, cx| input.focus(window, cx));
         self._editor_events = Some(cx.subscribe(&editor,
-            |_, _, event: &InputEvent, cx| {
-                if let InputEvent::Change = event { cx.notify(); }
+            |this, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    this.schedule_markdown_preview(cx);
+                    cx.notify();
+                }
             }));
         self.editor = Some(editor);
         self.error = None;
+        cx.notify();
+    }
+
+    /// The Markdown view is shared with FileView; only the file bytes are
+    /// remote. Debounce re-rendering on edits just as the local editor does.
+    fn sync_markdown_preview(&mut self, cx: &mut Context<Self>) {
+        let (Some(editor), Some((_, preview))) = (&self.editor, &self.markdown) else {
+            return;
+        };
+        let text = editor.read(cx).text().to_string();
+        preview.update(cx, |view, cx| view.set_text(&text, cx));
+    }
+
+    fn schedule_markdown_preview(&mut self, cx: &mut Context<Self>) {
+        if self.markdown.is_none() { return; }
+        self._markdown_debounce = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(150)).await;
+            let _ = this.update(cx, |this, cx| this.sync_markdown_preview(cx));
+        });
+    }
+
+    fn set_markdown_mode(&mut self, mode: MdMode, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((active, _)) = self.markdown.as_mut() else { return; };
+        mode.remember();
+        *active = mode;
+        if mode != MdMode::Edit {
+            self.sync_markdown_preview(cx);
+        }
+        if mode == MdMode::Preview {
+            self.focus.focus(window, cx);
+        } else if let Some(editor) = &self.editor {
+            editor.update(cx, |editor, cx| editor.focus(window, cx));
+        }
         cx.notify();
     }
 
