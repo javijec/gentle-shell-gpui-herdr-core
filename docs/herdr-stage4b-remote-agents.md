@@ -86,6 +86,22 @@ en esta etapa 4B. Un selector explícito por pestaña queda para 4C.
 
 ## Recuperar los mismos agentes después de cerrar GPUI
 
+**Regla de arranque:** si JaviPi ya tiene uno o más agentes RPC vivos, GPUI
+debe **volver a conectarse a esos procesos y no crear ninguno nuevo**.
+Primero consulta Herdr y recién después abre automáticamente las sesiones:
+
+- **Hay agentes vivos:** recupera sus pestañas y direcciones `javipi/tN`.
+  No inicia el agente por defecto, ni las pestañas antiguas que carecen
+  de dirección Herdr. Los agentes siguen siendo los mismos procesos.
+- **No hay agentes vivos:** conserva el comportamiento habitual: crea una
+  pestaña predeterminada cuando el espacio de trabajo está vacío.
+- **Falla la consulta a Herdr:** no se supone que JaviPi está vacía;
+  no se inicia ningún agente automáticamente (fail-closed).
+- **El usuario elige «New agent tab»:** esa acción explícita sí permite
+  crear otro agente, independientemente de los que estén corriendo.
+- **Se cierra la última pestaña:** no se crea otro agente implícitamente
+  mientras la recuperación indica que había agentes existentes.
+
 El archivo existente de espacios de trabajo de GPUI
 (`workspaces.json`) ahora guarda también la dirección Herdr de cada
 **agente**, además de la dirección de las terminales normales. No guarda
