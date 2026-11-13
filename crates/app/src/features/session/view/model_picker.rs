@@ -118,6 +118,20 @@ impl SessionView {
 
     pub(super) fn render_model_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.entity().downgrade();
+        let remote = self.is_remote_herdr();
+        // Catalogs come from get_available_models on the selected agent.
+        // A restored 4B agent may have only a Herdr terminal address.
+        let model_machine = if remote {
+            match &self.agent_target {
+                Some(pi_rpc::AgentTarget::Remote { machine, .. }) => machine.clone(),
+                _ => self.herdr_terminal()
+                    .and_then(|address| address.split_once('/')
+                        .map(|(machine, _)| machine.to_owned()))
+                    .unwrap_or_else(|| "remote machine".into()),
+            }
+        } else {
+            "This computer".into()
+        };
         let busy = self.busy();
         let label = self
             .models
@@ -154,6 +168,7 @@ impl SessionView {
         let current = self.models.current.clone();
         let search = self.model_search.clone();
         let has_any = !self.models.available.is_empty();
+        let loading_models = !self.models.loaded && self.process().is_some();
         let content_weak = weak.clone();
         let scroll = self.live.model_scroll.clone();
 
@@ -251,14 +266,19 @@ impl SessionView {
                             .py_4()
                             .text_size(px(12.))
                             .text_color(ui::faint())
-                            .child(if has_any {
+                            .child(if loading_models {
+                                "Loading models from agent…"
+                            } else if has_any {
                                 "No models match."
+                            } else if remote {
+                                "No models returned by this remote agent."
                             } else {
                                 "No models yet. Sign in to a provider."
                             }),
                     );
                 }
                 let sign_in = weak.clone();
+                let refresh = weak.clone();
                 let content = v_flex()
                     .w_full()
                     .font_family(cx.theme().font_family.clone())
@@ -276,9 +296,19 @@ impl SessionView {
                                 .child(div().flex_1().child(Input::new(&search).appearance(false))),
                         ),
                     )
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .px_3()
+                            .py_1()
+                            .text_xs()
+                            .text_color(ui::muted())
+                            .child(Icon::new(IconName::Server).xsmall())
+                            .child(format!("Models from {model_machine}")),
+                    )
                     .child(list)
                     .child(
-                        div().p(px(6.)).child(
+                        div().p(px(6.)).when(!remote, |row| row.child(
                             Button::new("picker-sign-in")
                                 .ghost()
                                 .small()
@@ -297,7 +327,30 @@ impl SessionView {
                                         );
                                     });
                                 }),
-                        ),
+                        ))
+                        .when(remote, |row| row.child(
+                            v_flex()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(ui::muted())
+                                        .child("Provider sign-ins for this agent are configured on its remote machine, not in Windows."),
+                                )
+                                .child(
+                                    Button::new("picker-refresh-remote-models")
+                                        .ghost()
+                                        .small()
+                                        .w_full()
+                                        .icon(Icon::new(IconName::RefreshCw))
+                                        .label("Refresh models from remote agent")
+                                        .on_click(move |_, _, cx| {
+                                            let _ = refresh.update(cx, |this, cx| {
+                                                this.refresh_available_models(cx)
+                                            });
+                                        }),
+                                ),
+                        )),
                     );
                 ui::island(cx)
                     .w_full()
