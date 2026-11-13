@@ -39,6 +39,8 @@ It now supports a third private request:
 
 - Explicit action only: opening/browsing/previewing never writes.
 - `root` must resolve to that agent process's working directory.
+  Agents launched at filesystem root (`/`) remain read-only; launch the
+  agent inside a specific Linux project to enable editing.
 - Path must be an absolute Linux path within root both lexically and after
   resolving symlinks. Final symlinks, missing files, nonregular files and
   multiply hardlinked files cannot be written.
