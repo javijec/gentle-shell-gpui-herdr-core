@@ -239,8 +239,9 @@ impl Workspace {
                                     menu_row(icon, label, detail, keys)
                                 })
                             };
-                            let (agent, terminal) = (weak.clone(), weak.clone());
-                            menu.min_w(px(260.))
+                            let (agent, on_machine, terminal) =
+                                (weak.clone(), weak.clone(), weak.clone());
+                            let menu = menu.min_w(px(260.))
                                 .item(
                                     item(
                                         IconName::Bot,
@@ -260,6 +261,25 @@ impl Workspace {
                                         },
                                     ),
                                 )
+                                ;
+                            let menu = if crate::features::terminal::herdr_enabled() {
+                                menu.item(
+                                    item(
+                                        IconName::Bot,
+                                        "Agent on a machine...",
+                                        "Select this computer or a Herdr machine",
+                                        "",
+                                    )
+                                    .on_click(move |_, window, cx| {
+                                        let _ = on_machine.update(cx, |this, cx| {
+                                            this.open_machines(window, cx)
+                                        });
+                                    }),
+                                )
+                            } else {
+                                menu
+                            };
+                            menu
                                 .item(
                                     item(
                                         IconName::SquareTerminal,
