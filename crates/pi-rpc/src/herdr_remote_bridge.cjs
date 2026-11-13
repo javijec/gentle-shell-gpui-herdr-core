@@ -193,6 +193,11 @@ async function safeRemotePath(root, candidate) {
 // before rename. No API can promise an OS-level atomic CAS against unrelated
 // editors without a cooperative lock. A detected conflict always rejects.
 async function remoteWrite(req) {
+  // A remote agent launched at '/' can read/browse, but opting into writes
+  // requires choosing an actual project directory as the agent root.
+  if (await fs.realpath(process.cwd()) === "/") {
+    throw new Error("Remote editing requires an agent started inside a project directory, not /");
+  }
   const validated = await safeRemotePath(req.root, req.path);
   // Work only on the resolved, in-root location: aliases through allowed
   // parent symlinks cannot redirect or bypass the per-file write guard.
