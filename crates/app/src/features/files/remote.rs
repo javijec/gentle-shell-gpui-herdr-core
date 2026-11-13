@@ -54,8 +54,10 @@ fn remote_parent(root: &str, directory: &str) -> Option<String> {
     }
     let (parent, _) = directory.rsplit_once('/')?;
     Some(if parent.is_empty() { "/".into() } else { parent.into() })
-        .filter(|candidate| {
-            *candidate == root || candidate.starts_with(&(root.to_owned() + "/"))
+        .filter(|candidate: &String| {
+            candidate.as_str() == root || (root == "/"
+                && candidate.starts_with('/'))
+                || candidate.starts_with(&(root.to_owned() + "/"))
         })
 }
 
