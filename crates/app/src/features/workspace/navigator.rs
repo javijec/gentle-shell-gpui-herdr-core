@@ -278,6 +278,11 @@ impl Workspace {
                                                     let active = session.tab_index == self.space().active;
                                                     let tab_index = session.tab_index;
                                                     let close_index = tab_index;
+                                                    let renaming = self.renaming.as_ref().filter(|rename| {
+                                                        self.space().tabs.get(tab_index).is_some_and(|tab| {
+                                                            tab.tree.leaves().contains(&rename.pane)
+                                                        })
+                                                    });
                                                     let group_name = format!("nav-session-{}", session.tab_id);
                                                     let details = format!(
                                                         "{}{}{}",
@@ -311,8 +316,12 @@ impl Workspace {
                                                         .tooltip(move |window, cx| {
                                                             Tooltip::new(details.clone()).build(window, cx)
                                                         })
-                                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                                            this.activate(tab_index, window, cx)
+                                                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                                            if event.click_count() >= 2 {
+                                                                this.start_tab_rename(tab_index, window, cx);
+                                                            } else {
+                                                                this.activate(tab_index, window, cx);
+                                                            }
                                                         }))
                                                         .child(
                                                             Icon::new(session.icon)
@@ -323,8 +332,24 @@ impl Workspace {
                                                                     ui::muted()
                                                                 }),
                                                         )
-                                                        .child(
-                                                            div()
+                                                        .child(match renaming {
+                                                            Some(rename) => div()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .h(px(24.))
+                                                                .px_1()
+                                                                .flex()
+                                                                .items_center()
+                                                                .rounded(px(5.))
+                                                                .bg(ui::well())
+                                                                // Editing the name must not activate the row.
+                                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                })
+                                                                .on_action(cx.listener(Self::cancel_tab_rename))
+                                                                .child(Input::new(&rename.input).appearance(false).xsmall())
+                                                                .into_any_element(),
+                                                            None => div()
                                                                 .flex_1()
                                                                 .min_w_0()
                                                                 .overflow_hidden()
@@ -336,8 +361,9 @@ impl Workspace {
                                                                 } else {
                                                                     FontWeight::NORMAL
                                                                 })
-                                                                .child(session.title),
-                                                        )
+                                                                .child(session.title)
+                                                                .into_any_element(),
+                                                        })
                                                         .when(session.running, |row| {
                                                             row.child(
                                                                 div().size(px(6.)).rounded_full()
