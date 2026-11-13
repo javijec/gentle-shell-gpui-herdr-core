@@ -200,7 +200,12 @@ pub(super) const REOPEN_KEY: &str = if cfg!(target_os = "macos") {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Keep the built-in #[test] attribute: super::* pulls GPUI's macro
+    // imports into this module and can recursively expand #[test].
+    use super::snapshot_for_reopen;
+    use crate::features::workspaces::SavedPane;
+    use crate::shared::pane::PaneKind;
+    use std::path::PathBuf;
 
     fn remote_pane() -> SavedPane {
         SavedPane {
