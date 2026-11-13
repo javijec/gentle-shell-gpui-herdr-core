@@ -13,6 +13,9 @@ Checked 2026-11-13. **The upstream for this Rust GPUI application is**
 - Protected snapshot of stage 5A HEAD:
   `backup/herdr-stage5a-before-upstream-0.1.14`, commit
   `9fc4f1f68fda3476f98e7703b634eff5d17abfb2`.
+- Empty integration branch created from fork `main`:
+  `integration/upstream-v0.1.14`; upstream changes have **not**
+  been merged into it yet.
 
 ## Overlap audit
 
@@ -52,7 +55,7 @@ high-risk. Prefer a two-stage integration:
    git remote add upstream https://github.com/ismaelosuna7824/gentle-shell-gpui.git
    git fetch upstream --tags
 
-   git switch -c integration/upstream-v0.1.14 origin/main
+   git switch --track origin/integration/upstream-v0.1.14
    git merge --no-ff --no-commit v0.1.14
    ```
    If `upstream` already exists, omit `git remote add`.
