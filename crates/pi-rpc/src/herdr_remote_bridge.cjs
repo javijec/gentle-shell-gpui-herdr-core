@@ -193,7 +193,10 @@ async function safeRemotePath(root, candidate) {
 // before rename. No API can promise an OS-level atomic CAS against unrelated
 // editors without a cooperative lock. A detected conflict always rejects.
 async function remoteWrite(req) {
-  const selected = await safeRemotePath(req.root, req.path);
+  const validated = await safeRemotePath(req.root, req.path);
+  // Work only on the resolved, in-root location: aliases through allowed
+  // parent symlinks cannot redirect or bypass the per-file write guard.
+  const selected = await fs.realpath(validated);
   if (typeof req.content !== "string" || !validRevision(req.expectedRevision)) {
     throw new Error("Write requires text and a matching SHA-256 revision");
   }
@@ -237,12 +240,13 @@ async function remoteWrite(req) {
       fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, stat.mode & 0o777);
     try {
       await output.writeFile(nextBytes);
+      await output.chmod(stat.mode & 0o777);
       await output.sync();
     } finally {
       await output.close();
     }
     // Revalidate after staging: file identity, bytes and the original root.
-    await safeRemotePath(req.root, selected);
+    await safeRemotePath(req.root, validated);
     const latest = await fs.lstat(selected);
     if (!latest.isFile() || latest.isSymbolicLink() ||
         latest.dev !== stat.dev || latest.ino !== stat.ino ||
