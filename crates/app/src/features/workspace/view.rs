@@ -285,8 +285,7 @@ impl Workspace {
                                             });
                                         },
                                     ),
-                                )
-                                ;
+                                );
                             let menu = if crate::features::terminal::herdr_enabled() {
                                 menu.item(
                                     item(
