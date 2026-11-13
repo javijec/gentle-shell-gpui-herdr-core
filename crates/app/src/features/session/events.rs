@@ -55,6 +55,25 @@ impl SessionView {
         match incoming {
             Incoming::Event(event) => self.handle_event(&event, window, cx),
             Incoming::Ui(request) => self.handle_ui(request, window, cx),
+            Incoming::ConnectionLost(reason) => {
+                // The Herdr viewer failed, not the remote Pi process. Keep
+                // the transcript and running turn; never mark it Exited.
+                self.transcript.notice(
+                    NoticeLevel::Warning,
+                    format!("Conexión con Herdr interrumpida ({reason}). El agente sigue activo; no se reenviarán comandos automáticamente."),
+                );
+            }
+            Incoming::ConnectionRestored => {
+                self.transcript.notice(
+                    NoticeLevel::Info,
+                    "Conexión con Herdr recuperada. Sincronizando la conversación original.".into(),
+                );
+                // Reconstruct messages that advanced while the viewer was
+                // offline. If the turn was still running, get another full
+                // snapshot at agent_settled to restore missed stream deltas.
+                self.recovery_snapshot_pending = true;
+                self.refresh_state(cx);
+            }
             Incoming::Stderr(line) => {
                 if self.backend.stderr.len() == STDERR_LINES {
                     self.backend.stderr.pop_front();
@@ -152,6 +171,10 @@ impl SessionView {
             }
         }
         if effects.settled {
+            if self.recovery_snapshot_pending {
+                self.recovery_snapshot_pending = false;
+                self.refresh_state(cx);
+            }
             // Always once at turn end, whatever the tool calls scheduled.
             self.refresh_git(cx);
         } else if effects.files_touched {
