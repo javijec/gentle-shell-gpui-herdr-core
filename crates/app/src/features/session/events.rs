@@ -60,13 +60,13 @@ impl SessionView {
                 // the transcript and running turn; never mark it Exited.
                 self.transcript.notice(
                     NoticeLevel::Warning,
-                    format!("Conexión con Herdr interrumpida ({reason}). El agente sigue activo; no se reenviarán comandos automáticamente."),
+                    format!("Herdr connection interrupted ({reason}). The agent may still be running; commands will not be replayed automatically."),
                 );
             }
             Incoming::ConnectionRestored => {
                 self.transcript.notice(
                     NoticeLevel::Info,
-                    "Conexión con Herdr recuperada. Sincronizando la conversación original.".into(),
+                    "Herdr reconnected to the original agent. Synchronizing the conversation.".into(),
                 );
                 // Reconstruct messages that advanced while the viewer was
                 // offline. If the turn was still running, get another full
