@@ -198,12 +198,13 @@ impl RemoteFilesView {
         view
     }
 
-    pub fn file_title(&self) -> SharedString {
+    pub fn file_title(&self, cx: &App) -> SharedString {
         let Some(path) = self.pane_path.as_ref() else {
             return "Remote Files".into();
         };
         let filename = path.rsplit('/').next().unwrap_or(path);
-        format!("{filename} · {}", self.machine).into()
+        let dirty = if self.has_unsaved(cx) { " •" } else { "" };
+        format!("{filename}{dirty} · {}", self.machine).into()
     }
 
     pub fn has_unsaved(&self, cx: &App) -> bool {
@@ -714,7 +715,9 @@ impl Render for RemoteFilesView {
             .min_h_0()
             .child(
                 h_flex().h(px(40.)).px_2().gap_1().flex_none()
-                    .child(Icon::new(IconName::Layers).small().text_color(ui::petal()))
+                    .child(Icon::new(if central { IconName::FileCode }
+                        else { IconName::Layers })
+                        .small().text_color(ui::petal()))
                     .child(div().flex_1().min_w_0().truncate()
                         .text_sm().font_weight(FontWeight::SEMIBOLD)
                         .child(if let Some(path) = &self.pane_path {
