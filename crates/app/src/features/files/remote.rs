@@ -325,7 +325,7 @@ impl Render for RemoteFilesView {
             .min_h_0()
             .child(
                 h_flex().h(px(40.)).px_2().gap_1().flex_none()
-                    .child(Icon::new(IconName::Server).small().text_color(ui::petal()))
+                    .child(Icon::new(IconName::Layers).small().text_color(ui::petal()))
                     .child(div().flex_1().min_w_0().truncate()
                         .text_sm().font_weight(FontWeight::SEMIBOLD)
                         .child(format!("Remote Files · {}", self.machine)))
