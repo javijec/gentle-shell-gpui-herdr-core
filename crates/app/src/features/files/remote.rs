@@ -282,6 +282,11 @@ impl RemoteFilesView {
     fn start_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading || self.saving || self.editor.is_some() { return; }
         let Some(preview) = self.preview.as_ref() else { return; };
+        if self.root == "/" {
+            self.error = Some("Remote editing requires an agent started inside a project directory, not /.".into());
+            cx.notify();
+            return;
+        }
         if preview.revision.is_none() {
             self.error = Some("This agent's bridge supports preview but not editing. Create a new remote agent to edit.".into());
             cx.notify();
@@ -381,7 +386,7 @@ impl Render for RemoteFilesView {
             let copied = preview.path.clone();
             let rows: Vec<String> = preview.content.lines().take(600).map(str::to_owned).collect();
             let truncated = preview.content.lines().count() > rows.len();
-             let can_edit = preview.revision.is_some();
+             let can_edit = preview.revision.is_some() && self.root != "/";
             let dirty = self.editor.as_ref().is_some_and(|editor| {
                 editor.read(cx).value() != preview.content
             });
@@ -445,7 +450,7 @@ impl Render for RemoteFilesView {
                                     .tooltip(if can_edit {
                                         "Edit this existing remote text file"
                                     } else {
-                                        "Read-only: this agent needs a newer Herdr bridge"
+                                        "Read-only: use a 5B agent in a project directory"
                                     })
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.start_edit(window, cx)
