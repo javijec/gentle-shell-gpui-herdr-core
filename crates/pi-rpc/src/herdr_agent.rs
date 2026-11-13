@@ -340,6 +340,17 @@ fn can_finish_reconnect(
         && current_epoch.load(Ordering::Acquire) == epoch
 }
 
+/// A resumed 4B agent starts with a Herdr screen repaint containing old
+/// READY, UI and turn events. Only correlated get_state responses should be
+/// consumed until the initial reattach probe completes.
+fn accept_stream_events(initial_reattach: bool, startup_complete: bool, ready: bool) -> bool {
+    if initial_reattach {
+        startup_complete && ready
+    } else {
+        !startup_complete || ready
+    }
+}
+
 /// An agent terminal is ours to stop; never issue a global core shutdown.
 fn stop_owned_terminal(address: String) {
     let _ = std::thread::Builder::new().name("herdr-agent-stop".into()).spawn(move || {
@@ -629,8 +640,11 @@ impl HerdrAgentProcess {
                     }
                     let (started, exit, stderr_tail) = {
                         let mut state = incoming.lock().unwrap();
-                        let accept_events = !startup_complete.load(Ordering::Acquire)
-                            || ready.load(Ordering::Acquire);
+                        let accept_events = accept_stream_events(
+                            reattaching,
+                            startup_complete.load(Ordering::Acquire),
+                            ready.load(Ordering::Acquire),
+                        );
                         let (started, exit) = state.consume(
                             &bytes, &pending, &events, accept_events,
                         );
@@ -903,7 +917,7 @@ mod tests {
     use super::{
         Incoming, IncomingState, Pending, REMOTE_BRIDGE_JS, recoverable_addresses,
         token_for_terminal, validate_remote_target, select_legacy_remote_target,
-        can_finish_reconnect, AgentTarget, RemoteTarget,
+        accept_stream_events, can_finish_reconnect, AgentTarget, RemoteTarget,
     };
     use crate::herdr_wire::encode;
     use serde_json::json;
@@ -1101,6 +1115,21 @@ mod tests {
         assert!(reply_rx.try_recv().is_err());
         parser.consume(&frames, &pending, &events, true);
         assert!(reply_rx.try_recv().unwrap().success);
+    }
+
+    #[test]
+    fn original_saved_agent_reattach_suppresses_old_screen_events() {
+        // 4B-P loads an already-running bridge. The initial screen repaint
+        // may contain an old agent_start or extension dialog. Unlike a
+        // genuinely new bridge, it is not a valid stream until the probe.
+        assert!(!accept_stream_events(true, false, true));
+        assert!(!accept_stream_events(true, false, false));
+        assert!(!accept_stream_events(true, true, false));
+        assert!(accept_stream_events(true, true, true));
+        // Brand-new agents still accept startup events and live output.
+        assert!(accept_stream_events(false, false, false));
+        assert!(accept_stream_events(false, true, true));
+        assert!(!accept_stream_events(false, true, false));
     }
 
     #[test]
