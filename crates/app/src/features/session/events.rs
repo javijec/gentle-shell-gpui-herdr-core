@@ -378,7 +378,53 @@ impl SessionView {
 
     pub(super) fn refresh_git(&mut self, cx: &mut Context<Self>) {
         self.git.seq += 1;
+        let seq = self.git.seq;
         self.git.at = Some(Instant::now());
+        // Every remote agent has its own Linux working tree. Never ask the
+        // Windows git executable about a remote agent's local GPUI cwd.
+        if self.is_remote_herdr() {
+            self.git.snapshot = None;
+            self.git.remote_branch = None;
+            // A read-only Pi RPC bash call runs in the selected remote agent's
+            // original process and does not spawn or reattach any terminals.
+            if self.process().is_some() {
+                self.request(
+                    json!({
+                        "type": "bash",
+                        "command": "git symbolic-ref --quiet --short HEAD || git rev-parse --short HEAD",
+                        "excludeFromContext": true
+                    }),
+                    cx,
+                    move |this, result, cx| {
+                        // The selected session or network generation may have
+                        // changed while Git was responding.
+                        if this.git.seq != seq || !this.is_remote_herdr() {
+                            return;
+                        }
+                        this.git.remote_branch = result.ok().and_then(|data| {
+                            (data["exitCode"].as_i64() == Some(0)).then(|| {
+                                data["output"].as_str().unwrap_or("").trim().to_owned()
+                            })
+                        }).filter(|branch| !branch.is_empty());
+                        cx.notify();
+                    },
+                );
+            }
+            cx.notify();
+            return;
+        }
+
+        self.git.remote_branch = None;
+        self.git.snapshot = None;
+        // A restored 4B Herdr address may not be assigned yet. Waiting for
+        // attach is safer than briefly showing Windows Git as remote Git.
+        if crate::features::terminal::herdr_enabled()
+            && self.agent_target.is_none()
+            && self.herdr_terminal().is_none()
+        {
+            cx.notify();
+            return;
+        }
         let cwd = self.cwd.clone();
         cx.spawn(async move |this, cx| {
             let snapshot = cx
@@ -386,8 +432,10 @@ impl SessionView {
                 .spawn(async move { git::snapshot(&cwd) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.git.snapshot = snapshot;
-                cx.notify();
+                if this.git.seq == seq && !this.is_remote_herdr() {
+                    this.git.snapshot = snapshot;
+                    cx.notify();
+                }
             });
         })
         .detach();
