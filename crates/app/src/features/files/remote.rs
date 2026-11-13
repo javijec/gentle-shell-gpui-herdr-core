@@ -389,6 +389,9 @@ impl RemoteFilesView {
                 }
             }));
         self.editor = Some(editor);
+        if self.markdown.as_ref().is_some_and(|(mode, _)| *mode == MdMode::Preview) {
+            self.focus.focus(window, cx);
+        }
         self.error = None;
         cx.notify();
     }
@@ -528,14 +531,14 @@ impl Render for RemoteFilesView {
                     .px_2()
                     .py_2()
                     .gap_1()
-                    .child(
+                    .when(!central, |header| header.child(
                         Button::new("remote-files-back-preview")
                             .ghost().xsmall()
                             .icon(Icon::new(IconName::ChevronLeft))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.load_directory(this.current.clone(), cx)
                             })),
-                    )
+                    ))
                     .child(div().flex_1().min_w_0().truncate()
                         .text_xs().child(preview.path.clone()))
                     .child(
@@ -561,30 +564,57 @@ impl Render for RemoteFilesView {
                                 .disabled(!dirty || self.saving)
                                 .on_click(cx.listener(|this, _, _, cx| this.save_edit(cx))),
                         )
-                        .child(
+                        .when(!central, |row| row.child(
                             Button::new("remote-files-cancel-edit")
                                 .ghost().small().label("Cancel")
                                 .disabled(self.saving)
                                 .on_click(cx.listener(|this, _, _, cx| this.cancel_edit(cx))),
-                        )
+                        ))
                         .child(div().flex_1())
                         .child(div().text_xs().text_color(ui::muted())
                             .child(if dirty { "Unsaved changes" } else { "Unchanged" }))
-                ).child(
+                );
+                let editor_view = || {
+                    Editor::new(editor)
+                        .appearance(false)
+                        .disabled(self.saving)
+                        .font_family(ui::MONO)
+                        .text_size(px(12.5))
+                        .size_full()
+                };
+                let render_markdown = |preview: &Entity<TextViewState>| {
+                    div()
+                        .size_full().overflow_hidden()
+                        .text_size(px(14.))
+                        .child(
+                            TextView::new(preview)
+                                .scrollable(true)
+                                .selectable(true)
+                                .stream_fade(false)
+                                .px_6().py_4()
+                        )
+                };
+                let body: AnyElement = match &self.markdown {
+                    Some((MdMode::Preview, md)) if central =>
+                        render_markdown(md).into_any_element(),
+                    Some((MdMode::Split, md)) if central =>
+                        h_flex()
+                            .size_full().gap_2()
+                            .child(div().flex_1().min_w_0().h_full()
+                                .child(editor_view()))
+                            .child(div().flex_1().min_w_0().h_full()
+                                .child(render_markdown(md)))
+                            .into_any_element(),
+                    _ => editor_view().into_any_element(),
+                };
+                content = content.child(
                     div().px_2().py_2()
                         .h(px(if central {
                             (f32::from(window.viewport_size().height) - 162.).max(260.)
                         } else { 360. }))
                         .w_full().overflow_hidden()
                         .rounded_md().border_1().border_color(ui::border())
-                        .child(
-                            Editor::new(editor)
-                                .appearance(false)
-                                .disabled(self.saving)
-                                .font_family(ui::MONO)
-                                .text_size(px(12.5))
-                                .size_full()
-                        )
+                        .child(body)
                 );
             } else {
                 content = content
@@ -692,6 +722,21 @@ impl Render for RemoteFilesView {
                         } else {
                             format!("Remote Files · {}", self.machine)
                         }))
+                    .when_some(if central {
+                        self.markdown.as_ref().map(|(mode, _)| *mode)
+                    } else { None }, |bar, mode| {
+                        let weak = cx.entity().downgrade();
+                        bar.child(ui::segmented(
+                            "remote-file-mode", &MdMode::LABELS, Some(mode.index()),
+                            move |ix, window, cx| {
+                                if let Some(&selected) = MdMode::ALL.get(*ix) {
+                                    let _ = weak.update(cx, |this, cx| {
+                                        this.set_markdown_mode(selected, window, cx)
+                                    });
+                                }
+                            },
+                        ))
+                    })
                     .when(!central, |bar| bar.child(
                         Button::new("remote-files-refresh")
                             .ghost().xsmall()
