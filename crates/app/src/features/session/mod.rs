@@ -113,6 +113,8 @@ pub struct SessionView {
     commands: Vec<(String, String)>,
     session_name: Option<String>,
     session_file: Option<PathBuf>,
+    /// Exact Herdr address of a previously running agent, awaiting reattach.
+    restored_herdr: Option<String>,
     title: Option<String>,
     active_shell: Option<usize>,
     banner: crate::shared::banner::BannerConfig,
@@ -259,6 +261,7 @@ impl SessionView {
             commands: Vec::new(),
             session_name: None,
             session_file: None,
+            restored_herdr: None,
             title: None,
             active_shell: None,
             banner: crate::shared::banner::read_config(&pi_rpc::resolve_homes().config),
@@ -328,6 +331,21 @@ impl SessionView {
             .pending_session
             .clone()
             .or_else(|| self.session_file.clone())
+    }
+
+    /// Remote RPC processes have a persistent Herdr address independent of
+    /// the Pi session JSONL file (which lives on JaviPi, not Windows).
+    pub fn herdr_terminal(&self) -> Option<String> {
+        if let state::BackendStatus::Ready(pi_rpc::RpcProcess::Herdr(agent)) =
+            &self.backend.status
+        {
+            return agent.address().or_else(|| self.restored_herdr.clone());
+        }
+        self.restored_herdr.clone()
+    }
+
+    pub fn restore_herdr_terminal(&mut self, address: String) {
+        self.restored_herdr = Some(address);
     }
 
     pub fn model_choices(&self) -> Vec<(String, String, String, bool)> {
