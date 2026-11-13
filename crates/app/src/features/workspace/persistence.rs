@@ -13,7 +13,8 @@ impl Workspace {
     /// The agent the screens act on: the focused pane's, else the first agent
     /// in the tab, else any in the workspace.
     pub(super) fn active_session(&self) -> Option<Entity<SessionView>> {
-        let session = |id: &PaneId| self.panes.get(id).and_then(|p| p.session.clone());
+        let session = |id: &PaneId| self.panes.get(id)
+            .and_then(|p| p.session.clone().or_else(|| p.linked_session.clone()));
         let tab = self.tab()?;
         session(&tab.focused)
             .or_else(|| tab.tree.leaves().iter().find_map(session))
@@ -59,6 +60,12 @@ impl Workspace {
 
     pub(super) fn saved_pane(&self, id: PaneId, cx: &App) -> Option<SavedPane> {
         let pane = self.panes.get(&id)?;
+        // Remote Linux files cannot be re-opened via a Windows PathBuf.
+        // Do not serialize ephemeral remote editor panes as local files;
+        // the owning Herdr agent remains persisted independently.
+        if pane.item.kind == PaneKind::File && pane.path.is_none() {
+            return None;
+        }
         Some(SavedPane {
             kind: pane.item.kind,
             cwd: self.pane_cwd(pane, cx),
