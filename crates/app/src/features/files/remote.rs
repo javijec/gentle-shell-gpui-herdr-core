@@ -392,7 +392,9 @@ impl RemoteFilesView {
             return;
         }
         if text == preview.content {
-            self.cancel_edit(cx);
+            if self.pane_path.is_none() {
+                self.cancel_edit(cx);
+            }
             return;
         }
         let Some(process) = self.session.read(cx).remote_fs_process() else {
@@ -424,8 +426,10 @@ impl RemoteFilesView {
                             this.preview = Some(RemotePreview {
                                 path, content: text, revision: Some(new_revision.into()),
                             });
-                            this.editor = None;
-                            this._editor_events = None;
+                            if this.pane_path.is_none() {
+                                this.editor = None;
+                                this._editor_events = None;
+                            }
                             this.error = None;
                         } else {
                             this.error = Some("Save response had no revision; reload before editing again.".into());
@@ -441,6 +445,14 @@ impl RemoteFilesView {
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
         self.load_directory(self.current.clone(), cx);
+    }
+}
+
+impl Focusable for RemoteFilesView {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.editor.as_ref().map_or_else(
+            || self.focus.clone(), |editor| editor.focus_handle(cx)
+        )
     }
 }
 
@@ -642,8 +654,7 @@ impl Render for RemoteFilesView {
                                     cx.emit(RemoteFilesEvent::Close);
                                 }
                             })),
-                    ))
-                    ,
+                    )),
             )
             .when(!central, |panel| panel.child(
                 div().px_3().pb_2().text_xs().text_color(ui::muted())
