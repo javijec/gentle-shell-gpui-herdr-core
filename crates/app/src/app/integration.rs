@@ -121,16 +121,27 @@ pub fn attach_sidebar(
                     }
                     FileTreeEvent::OpenDiff(path) => workspace.open_diff(path.clone(), window, cx),
                     FileTreeEvent::InsertPath(text) => {
-                        if !workspace.insert_into_composer(text, window, cx) {
+                        if workspace.active_agent_is_remote(cx) {
+                            // Files/Changes/Branches are from Windows, even
+                            // while the selected conversation lives on JaviPi.
+                            // Inserting a Windows-relative path would silently
+                            // reference a different filesystem on Linux.
                             window.push_notification(
                                 Notification::info(
-                                    "Open an agent to insert paths into its prompt.",
+                                    "Files shows this computer's project. Local paths cannot be inserted into a remote agent. Use the remote agent's Linux path instead.",
+                                ),
+                                cx,
+                            );
+                        } else if !workspace.insert_into_composer(text, window, cx) {
+                            window.push_notification(
+                                Notification::info(
+                                    "Open a local agent to insert paths into its prompt.",
                                 ),
                                 cx,
                             );
                         }
                     }
-                    FileTreeEvent::Collapse => workspace.toggle_sidebar(cx),
+                    FileTreeEvent::Collapse => workspace.toggle_files_panel(cx),
                 });
             })
             .detach();
