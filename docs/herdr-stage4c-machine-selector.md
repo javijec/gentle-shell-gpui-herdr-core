@@ -29,6 +29,15 @@ compatibility: local Herdr unless a global 4B machine setting was explicitly
 provided. **Agent on a machine…** overrides that global default *only for that
 new tab*.
 
+**Ctrl+T when the global machine variable was removed:** if
+`GENTLE_SHELL_HERDR_AGENT_MACHINE` is absent, Ctrl+T starts a local Herdr
+agent, even if older 4B PowerShell sessions left
+`GENTLE_SHELL_HERDR_REMOTE_CWD` or `GENTLE_SHELL_HERDR_REMOTE_NODE`
+configured. These subordinate settings are ignored without a global machine
+selection; an explicitly chosen local/remote tab always takes precedence.
+If the global machine name *is* set, the target and its settings are still
+validated, so an invalid explicit remote launch fails closed.
+
 **Backend `local`** keeps native GPUI/Pi behavior: the Machines selector is
 hidden/disabled and no Herdr Core connection is attempted.
 
