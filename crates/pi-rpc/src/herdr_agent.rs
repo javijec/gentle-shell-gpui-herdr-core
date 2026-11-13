@@ -22,8 +22,7 @@ const MAX_JSONL: usize = 8 * 1024 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOTE_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const TRANSPORT_TIMEOUT: Duration = Duration::from_secs(12);
-const TRANSPORT_PROBE_ID: &str = "gs4a-transport-probe";
-type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
+ type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
 
 /// Inline Node.js bridge is injected as argv via Herdr Core on JaviPi.
 /// This contains no host secrets and does not create remote files.
@@ -177,14 +176,15 @@ fn verify_transport(
     token: &str,
     pending: &Pending,
     ready: &AtomicBool,
+    probe_id: &str,
 ) -> Result<()> {
     if !ready.load(Ordering::Acquire) {
         return Err(anyhow!("Herdr bridge disconnected before its transport check"));
     }
     let (tx, rx) = async_channel::bounded(1);
-    pending.lock().unwrap().insert(TRANSPORT_PROBE_ID.to_string(), tx);
+    pending.lock().unwrap().insert(probe_id.to_string(), tx);
     let check = (|| {
-        let command = json!({"type": "get_state", "id": TRANSPORT_PROBE_ID});
+        let command = json!({"type": "get_state", "id": probe_id});
         let mut bytes = serde_json::to_vec(&command)?;
         bytes.push(b'\n');
         for frame in encode_input(token, &bytes) {
@@ -214,7 +214,7 @@ fn verify_transport(
             std::thread::sleep(Duration::from_millis(30));
         }
     })();
-    pending.lock().unwrap().remove(TRANSPORT_PROBE_ID);
+    pending.lock().unwrap().remove(probe_id);
     check
 }
 
@@ -324,6 +324,7 @@ pub struct HerdrAgentProcess {
     token: String,
     pending: Pending,
     next_id: AtomicU64,
+    id_prefix: String,
     ready: Arc<AtomicBool>,
     last_failure: Arc<Mutex<Option<String>>>,
     stopping: AtomicBool,
@@ -342,6 +343,9 @@ impl HerdrAgentProcess {
         let remote = if existing.is_some() { None } else { RemoteTarget::from_env()? };
         let ticks = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let token = existing_token.unwrap_or_else(|| format!("p{}{:x}", std::process::id(), ticks));
+        // A reattached Pi may still answer old requests from a previous GPUI.
+        // Never reuse gs-1, gs-2, ... across viewer processes.
+        let id_prefix = format!("gs-{}-{:x}", std::process::id(), ticks);
         let (target_cwd, argv, on) = if existing.is_some() {
             (cwd.clone(), Vec::new(), None)
         } else if let Some(remote) = remote {
@@ -484,8 +488,9 @@ impl HerdrAgentProcess {
         };
         // Bridge READY is insufficient: test a real RPC command through
         // terminal input + decoded output before SessionView refreshes models.
+        let probe_id = format!("{id_prefix}-probe");
         let verified = started.and_then(|()| verify_transport(
-            &session, &token, &pending, &ready,
+            &session, &token, &pending, &ready, &probe_id,
         ));
         if let Err(error) = verified {
             // Never kill an *existing* agent just because this viewer failed
@@ -504,6 +509,7 @@ impl HerdrAgentProcess {
                 token,
                 pending,
                 next_id: AtomicU64::new(1),
+                id_prefix,
                 ready,
                 last_failure,
                 stopping: AtomicBool::new(false),
@@ -533,7 +539,7 @@ impl HerdrAgentProcess {
 
     pub fn request(&self, mut command: Value) -> impl Future<Output = Result<Response>> + use<> {
         let result = (|| {
-            let id = format!("gs-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+            let id = format!("{}-{}", self.id_prefix, self.next_id.fetch_add(1, Ordering::Relaxed));
             let object = command.as_object_mut()
                 .ok_or_else(|| anyhow!("RPC command must be a JSON object"))?;
             object.insert("id".into(), Value::String(id.clone()));
