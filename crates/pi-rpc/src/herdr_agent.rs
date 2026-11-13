@@ -120,16 +120,14 @@ impl RemoteTarget {
         match target {
             Some(AgentTarget::Local) => Ok(None),
             Some(AgentTarget::Remote { machine, cwd }) => {
-                let node = std::env::var("GENTLE_SHELL_HERDR_REMOTE_NODE")
-                    .map_err(|err| match err {
-                        std::env::VarError::NotPresent => anyhow!(""),
-                        _ => anyhow!("GENTLE_SHELL_HERDR_REMOTE_NODE must contain UTF-8"),
-                    });
-                // Absent env is normal. Invalid unicode remains an error.
-                let node = match node {
+                let node = match std::env::var("GENTLE_SHELL_HERDR_REMOTE_NODE") {
                     Ok(value) => Some(value),
-                    Err(error) if error.to_string().is_empty() => None,
-                    Err(error) => return Err(error),
+                    Err(std::env::VarError::NotPresent) => None,
+                    Err(_) => {
+                        return Err(anyhow!(
+                            "GENTLE_SHELL_HERDR_REMOTE_NODE must contain UTF-8"
+                        ));
+                    }
                 };
                 validate_remote_target(
                     Some(machine),
