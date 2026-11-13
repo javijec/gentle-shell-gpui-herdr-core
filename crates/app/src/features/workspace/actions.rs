@@ -144,10 +144,16 @@ impl Workspace {
         self.files_sidebar_open
     }
 
-    pub(super) fn toggle_sidebar_mode(&mut self, cx: &mut Context<Self>) {
+    /// Files / Changes / Branches live on the right. This action never
+    /// collapses the machine tree on the opposite side.
+    pub fn toggle_files_panel(&mut self, cx: &mut Context<Self>) {
         self.files_sidebar_open = !self.files_sidebar_open;
         cx.emit(WorkspaceEvent::SidebarToggled(self.files_sidebar_open));
         cx.notify();
+    }
+
+    pub(super) fn toggle_sidebar_mode(&mut self, cx: &mut Context<Self>) {
+        self.toggle_files_panel(cx);
     }
 
     pub(super) fn on_open_providers(
