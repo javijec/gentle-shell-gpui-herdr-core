@@ -149,6 +149,13 @@ impl RemoteFilesView {
         &self.session
     }
 
+    /// Preserve the editor when the user switches machines or agents.
+    /// A draft is private to this view and can only save through its own
+    /// original SessionView. Unchanged editor mode is retained as well.
+    pub fn has_draft(&self) -> bool {
+        self.editor.is_some() || self.saving
+    }
+
     /// Navigation must not silently discard a typed edit.
     fn can_leave_preview(&mut self, cx: &mut Context<Self>) -> bool {
         if self.saving {
@@ -369,8 +376,7 @@ impl Render for RemoteFilesView {
             let copied = preview.path.clone();
             let rows: Vec<String> = preview.content.lines().take(600).map(str::to_owned).collect();
             let truncated = preview.content.lines().count() > rows.len();
-            let editing = self.editor.is_some();
-            let can_edit = preview.revision.is_some();
+             let can_edit = preview.revision.is_some();
             let dirty = self.editor.as_ref().is_some_and(|editor| {
                 editor.read(cx).value() != preview.content
             });
