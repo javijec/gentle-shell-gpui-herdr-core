@@ -365,50 +365,100 @@ impl Render for RemoteFilesView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let parent = remote_parent(&self.root, &self.current);
         let mut content = v_flex().gap(px(1.));
-        if let Some((path, text)) = &self.preview {
-            let copied = path.clone();
-            let rows: Vec<String> = text.lines().take(600).map(str::to_owned).collect();
-            let truncated = text.lines().count() > rows.len();
-            content = content
-                .child(
-                    h_flex()
-                        .px_2()
-                        .py_2()
-                        .gap_1()
+        if let Some(preview) = &self.preview {
+            let copied = preview.path.clone();
+            let rows: Vec<String> = preview.content.lines().take(600).map(str::to_owned).collect();
+            let truncated = preview.content.lines().count() > rows.len();
+            let editing = self.editor.is_some();
+            let can_edit = preview.revision.is_some();
+            let dirty = self.editor.as_ref().is_some_and(|editor| {
+                editor.read(cx).value() != preview.content
+            });
+            content = content.child(
+                h_flex()
+                    .px_2()
+                    .py_2()
+                    .gap_1()
+                    .child(
+                        Button::new("remote-files-back-preview")
+                            .ghost().xsmall()
+                            .icon(Icon::new(IconName::ChevronLeft))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.load_directory(this.current.clone(), cx)
+                            })),
+                    )
+                    .child(div().flex_1().min_w_0().truncate()
+                        .text_xs().child(preview.path.clone()))
+                    .child(
+                        Button::new("remote-files-insert-preview")
+                            .ghost().xsmall()
+                            .icon(Icon::new(IconName::Copy))
+                            .tooltip("Insert remote Linux path in prompt")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(RemoteFilesEvent::InsertPath(copied.clone()));
+                            })),
+                    )
+            );
+            if let Some(editor) = &self.editor {
+                content = content.child(
+                    h_flex().px_2().gap_2().items_center()
                         .child(
-                            Button::new("remote-files-back-preview")
-                                .ghost().xsmall()
-                                .icon(Icon::new(IconName::ChevronLeft))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.load_directory(this.current.clone(), cx)
-                                })),
+                            Button::new("remote-files-save")
+                                .primary().small().label(if self.saving { "Saving…" } else { "Save" })
+                                .disabled(!dirty || self.saving)
+                                .on_click(cx.listener(|this, _, _, cx| this.save_edit(cx))),
                         )
-                        .child(div().flex_1().min_w_0().truncate()
-                            .text_xs().child(path.clone()))
                         .child(
-                            Button::new("remote-files-insert-preview")
-                                .ghost().xsmall()
-                                .icon(Icon::new(IconName::Copy))
-                                .tooltip("Insert remote Linux path in prompt")
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.emit(RemoteFilesEvent::InsertPath(copied.clone()));
-                                })),
-                        ),
-                )
-                .children(rows.into_iter().enumerate().map(|(i, text)| {
-                    h_flex()
-                        .id(("remote-preview-line", i))
-                        .gap_2().px_2()
-                        .font_family(ui::MONO)
-                        .text_size(px(11.))
-                        .child(div().w(px(30.)).text_color(ui::faint())
-                            .child((i + 1).to_string()))
-                        .child(div().flex_1().min_w_0().text_color(ui::fg()).child(text))
-                }))
-                .when(truncated, |section| section.child(
-                    div().px_2().py_2().text_xs().text_color(ui::warning())
-                        .child("Preview limited to the first 600 lines"),
-                ));
+                            Button::new("remote-files-cancel-edit")
+                                .ghost().small().label("Cancel")
+                                .disabled(self.saving)
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_edit(cx))),
+                        )
+                        .child(div().flex_1())
+                        .child(div().text_xs().text_color(ui::muted())
+                            .child(if dirty { "Unsaved changes" } else { "Unchanged" }))
+                ).child(
+                    div().px_2().py_2().min_h(px(220.))
+                        .rounded_md().border_1().border_color(ui::border())
+                        .font_family(ui::MONO).text_size(px(12.))
+                        .child(Textarea::new(editor).appearance(false).disabled(self.saving))
+                );
+            } else {
+                content = content
+                    .child(
+                        h_flex().px_2().py_1().items_center()
+                            .child(
+                                Button::new("remote-files-edit")
+                                    .ghost().small().label("Edit")
+                                    .disabled(!can_edit || self.loading)
+                                    .tooltip(if can_edit {
+                                        "Edit this existing remote text file"
+                                    } else {
+                                        "Read-only: this agent needs a newer Herdr bridge"
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.start_edit(window, cx)
+                                    })),
+                            )
+                            .child(div().flex_1())
+                            .child(div().text_xs().text_color(ui::muted())
+                                .child("128 KiB maximum")),
+                    )
+                    .children(rows.into_iter().enumerate().map(|(i, text)| {
+                        h_flex()
+                            .id(("remote-preview-line", i))
+                            .gap_2().px_2()
+                            .font_family(ui::MONO)
+                            .text_size(px(11.))
+                            .child(div().w(px(30.)).text_color(ui::faint())
+                                .child((i + 1).to_string()))
+                            .child(div().flex_1().min_w_0().text_color(ui::fg()).child(text))
+                    }))
+                    .when(truncated, |section| section.child(
+                        div().px_2().py_2().text_xs().text_color(ui::warning())
+                            .child("Preview limited to the first 600 lines"),
+                    ));
+            }
         } else {
             if let Some(parent) = parent {
                 content = content.child(
@@ -481,7 +531,11 @@ impl Render for RemoteFilesView {
                         Button::new("remote-files-close")
                             .ghost().xsmall()
                             .icon(Icon::new(IconName::X))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(RemoteFilesEvent::Close))),
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.can_leave_preview(cx) {
+                                    cx.emit(RemoteFilesEvent::Close);
+                                }
+                            })),
                     ),
             )
             .child(
@@ -511,7 +565,11 @@ impl Render for RemoteFilesView {
                     .border_t_1().border_color(ui::border())
                     .px_3().text_size(px(10.))
                     .text_color(ui::muted())
-                    .child("Read-only · Files only · 128 KiB preview limit"),
+                    .child(if self.editor.is_some() {
+                        "Editing · SHA-256 conflict protection · 128 KiB"
+                    } else {
+                        "Preview first · Edit to modify · 128 KiB maximum"
+                    }),
             )
     }
 }
