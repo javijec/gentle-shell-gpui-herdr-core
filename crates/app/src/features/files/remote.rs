@@ -1109,7 +1109,7 @@ impl Render for RemoteFilesView {
 
 #[cfg(test)]
 mod tests {
-    use super::{remote_child, remote_parent};
+    use super::{parse_git_snapshot, remote_child, remote_parent};
     #[test]
     fn remote_paths_remain_under_root() {
         assert_eq!(remote_child("/srv/workspaces/demo", "Cargo.toml"),
@@ -1119,4 +1119,47 @@ mod tests {
             Some("/srv/workspaces/demo".to_owned()));
         assert_eq!(remote_parent("/srv/workspaces/demo", "/srv/workspaces/demo"), None);
     }
+    #[test]
+    fn git_snapshot_accepts_status_and_branches_from_selected_machine() {
+        let data = serde_json::json!({
+            "toplevel": "/srv/workspaces/JaviPi",
+            "readOnly": true,
+            "files": [
+                { "path": "src/main.rs", "index": "M", "worktree": " " },
+                { "path": "README.md", "index": " ", "worktree": "M" }
+            ],
+            "branches": [
+                { "name": "main", "current": true },
+                { "name": "feature/rust", "current": false }
+            ],
+            "filesTruncated": false,
+            "branchesTruncated": false
+        });
+        let snapshot = parse_git_snapshot(&data).unwrap();
+        assert_eq!(snapshot.files.len(), 2);
+        assert_eq!(snapshot.files[0].index, 'M');
+        assert_eq!(snapshot.files[1].worktree, 'M');
+        assert!(snapshot.branches[0].current);
+    }
+
+    #[test]
+    fn git_snapshot_rejects_local_and_parent_paths() {
+        let base = serde_json::json!({
+            "toplevel": "/srv/workspaces/JaviPi",
+            "readOnly": true,
+            "files": [{"path": "../secret", "index": "?", "worktree": "?"}],
+            "branches": []
+        });
+        assert!(parse_git_snapshot(&base).is_err());
+        for bad in ["C:/Users/demo", "/tmp/x"] {
+            let mut data = base.clone();
+            data["files"][0]["path"] = serde_json::json!(bad);
+            assert!(parse_git_snapshot(&data).is_err());
+        }
+        let mut writable = base;
+        writable["files"] = serde_json::json!([]);
+        writable["readOnly"] = serde_json::json!(false);
+        assert!(parse_git_snapshot(&writable).is_err());
+    }
+
 }
