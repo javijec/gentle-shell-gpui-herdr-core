@@ -19,7 +19,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::features::files::FileTreeView;
-use crate::features::machines::{MachinesEvent, MachinesView};
+use crate::features::machines::{model as machine_model, MachinesEvent, MachinesView};
 use crate::features::memory::{MemoryEvent, MemoryView};
 use crate::features::notices::{self, Notices};
 use crate::features::onboarding::{OnboardingEvent, OnboardingView, Probe};
@@ -40,6 +40,7 @@ use gentle_core::commands::Screen;
 
 mod actions;
 mod layout;
+mod navigator;
 mod overlays;
 mod panes;
 mod persistence;
@@ -345,6 +346,13 @@ pub struct Workspace {
     overlay: Option<(Overlay, Subscription)>,
     sidebar: Option<AnyView>,
     sidebar_visible: bool,
+    /// Files is an alternate sidebar mode, not an additional tab strip.
+    files_sidebar_open: bool,
+    /// Registered remote machines; discovered off the GPUI render thread.
+    machine_snapshot: Option<machine_model::Snapshot>,
+    machine_error: Option<String>,
+    collapsed_machines: std::collections::HashSet<String>,
+    _machine_poll: Task<()>,
     save_task: Option<Task<()>>,
     /// Re-reads every pane's title and busy state once a second (non-agent
     /// views can't be observed through `AnyView`), redrawing only on change.
@@ -468,7 +476,14 @@ impl Workspace {
             },
             overlay: None,
             sidebar: None,
-            sidebar_visible: saved.sidebar,
+            // The new machine navigator replaces tabs, and must be visible
+            // on first launch regardless of the former Files sidebar state.
+            sidebar_visible: true,
+            files_sidebar_open: false,
+            machine_snapshot: None,
+            machine_error: None,
+            collapsed_machines: std::collections::HashSet::new(),
+            _machine_poll: Task::ready(()),
             save_task: None,
             notices: cx.new(|_| Notices::default()),
             renaming: None,
@@ -556,6 +571,30 @@ impl Workspace {
             }).detach();
         } else {
             this.start_shown(window, cx);
+        }
+        if discover_remote {
+            this._machine_poll = cx.spawn(async move |this, cx| {
+                loop {
+                    // Herdr discovery is blocking; always run it outside the
+                    // foreground thread and never connect from native mode.
+                    let result = cx.background_executor().spawn(async {
+                        machine_model::discover()
+                    }).await;
+                    if this.update(cx, |this, cx| {
+                        match result {
+                            Ok(snapshot) => {
+                                this.machine_snapshot = Some(snapshot);
+                                this.machine_error = None;
+                            }
+                            Err(error) => this.machine_error = Some(error),
+                        }
+                        cx.notify();
+                    }).is_err() {
+                        break;
+                    }
+                    cx.background_executor().timer(Duration::from_secs(12)).await;
+                }
+            });
         }
         this.schedule_save(cx);
         // First run: the welcome screen, from the very first frame (it looks
