@@ -32,6 +32,9 @@ pub const CONTEXT: &str = "GentleSession";
 /// Requests a tab makes of its window.
 pub enum SessionEvent {
     OpenProviders,
+    /// The footer folder button of a remote agent: select a Linux project
+    /// for a new agent without migrating or killing this running process.
+    OpenRemoteDirectory(String),
     /// An extension's `notify`, for the window's notification center.
     /// Warnings and errors are also toasted by the tab itself.
     Notice {
