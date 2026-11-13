@@ -16,7 +16,8 @@ const STARTUP_ID = "gs4a-startup";
 const MAX_FRAME = 96;
 const MAX_LINE = 4096;
 const MAX_JSONL = 8 * 1024 * 1024;
-const STARTUP_MS = 15000;
+// Pi4 needs time to initialize installed extensions and optional memory hooks.
+const STARTUP_MS = 60000;
 
 function emit(kind, data) {
   const bytes = Buffer.isBuffer(data) ? data : Buffer.from(String(data), "utf8");
@@ -33,6 +34,9 @@ function emit(kind, data) {
 let stopped = false;
 let ready = false;
 let stderrTail = "";
+let startupRecords = 0;
+let startupNonJson = 0;
+let lastStartupType = "none";
 const agentBin = process.env.GENTLE_SHELL_BIN || "gentle-shell";
 const agent = spawn(agentBin, ["--mode", "rpc"], {
   cwd: process.cwd(),
@@ -50,7 +54,12 @@ function fail(reason) {
 }
 
 const startupTimer = setTimeout(() => {
-  if (!ready) fail("Pi did not answer get_state within 15 seconds");
+  if (!ready) fail(
+    "Pi did not answer get_state within 60 seconds" +
+    " (stdout_records=" + startupRecords +
+    ", invalid_json=" + startupNonJson +
+    ", last_type=" + lastStartupType + ")"
+  );
 }, STARTUP_MS);
 
 agent.on("error", (error) => {
@@ -79,8 +88,14 @@ agent.stdout.on("data", (chunk) => {
       return;
     }
     if (!ready) {
+      startupRecords++;
       let response;
-      try { response = JSON.parse(line.toString("utf8")); } catch {}
+      try { response = JSON.parse(line.toString("utf8")); } catch {
+        startupNonJson++;
+      }
+      if (response && typeof response.type === "string") {
+        lastStartupType = response.type;
+      }
       if (response && response.type === "response" &&
           response.id === STARTUP_ID) {
         if (response.success === true) {
