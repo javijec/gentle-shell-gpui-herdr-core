@@ -45,6 +45,8 @@ It now supports a third private request:
   resolving symlinks. Final symlinks, missing files, nonregular files and
   multiply hardlinked files cannot be written.
 - Only valid UTF-8 text of at most 128 KiB, with no NULs.
+  On Linux the file must be owned by the agent's user; the bridge will
+  not replace another user's file or a hardlinked inode.
 - The old revision is mandatory. Different bytes mean a **conflict**, not an
   overwrite. The editor keeps the draft on rejection. Writes from the same
   bridge are serialized by canonical file path.
