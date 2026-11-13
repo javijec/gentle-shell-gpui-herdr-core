@@ -2,6 +2,18 @@
 
 use super::*;
 
+/// Construction-only settings for an agent pane. Grouping them avoids a
+/// fragile positional argument list and keeps old/restored/local targets
+/// explicit without changing any runtime behavior.
+#[derive(Default)]
+struct AgentPaneInit {
+    prompt: Option<String>,
+    resume: Option<PathBuf>,
+    restored_herdr: Option<String>,
+    agent_target: Option<pi_rpc::AgentTarget>,
+    start_now: bool,
+}
+
 impl Workspace {
     /// Puts a freshly built file/diff pane in the current tab: it replaces the
     /// tab's existing preview pane, else splits the largest pane along its
@@ -101,17 +113,20 @@ impl Workspace {
 
     /// An agent pane; its backend starts now with `start_now` (the pane is in
     /// the tab being shown), else the first time its tab is shown.
-    pub(super) fn new_agent_pane(
+    fn new_agent_pane(
         &mut self,
         cwd: PathBuf,
-        prompt: Option<String>,
-        resume: Option<PathBuf>,
-        restored_herdr: Option<String>,
-        agent_target: Option<pi_rpc::AgentTarget>,
-        start_now: bool,
+        options: AgentPaneInit,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PaneId {
+        let AgentPaneInit {
+            prompt,
+            resume,
+            restored_herdr,
+            agent_target,
+            start_now,
+        } = options;
         let session = cx.new(|cx| {
             let mut session = SessionView::new(cwd.clone(), prompt, window, cx, false);
             if let Some(address) = restored_herdr.clone() {
@@ -306,7 +321,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<PaneId> {
         match kind {
-            PaneKind::Agent => Some(self.new_agent_pane(target, prompt, resume, None, None, true, window, cx)),
+            PaneKind::Agent => Some(self.new_agent_pane(
+                target,
+                AgentPaneInit { prompt, resume, start_now: true, ..Default::default() },
+                window,
+                cx,
+            )),
             PaneKind::Terminal | PaneKind::File => self.new_factory_pane(kind, target, window, cx),
         }
     }
@@ -329,8 +349,15 @@ impl Workspace {
                 let resume = saved.session.clone().filter(|p| p.exists());
                 // Started once its tab is shown (see `start_shown`).
                 Some(self.new_agent_pane(
-                    cwd, None, resume, saved.herdr_terminal.clone(),
-                    saved.agent_target.clone(), false, window, cx,
+                    cwd,
+                    AgentPaneInit {
+                        resume,
+                        restored_herdr: saved.herdr_terminal.clone(),
+                        agent_target: saved.agent_target.clone(),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
                 ))
             }
             PaneKind::Terminal => {
@@ -404,7 +431,10 @@ impl Workspace {
             }
             let cwd = self.space().root.clone();
             let pane = self.new_agent_pane(
-                cwd, None, None, Some(address), None, false, window, cx,
+                cwd,
+                AgentPaneInit { restored_herdr: Some(address), ..Default::default() },
+                window,
+                cx,
             );
             let id = self.alloc_id();
             let space = self.space_mut();
@@ -469,7 +499,10 @@ impl Workspace {
         }
         let cwd = self.active_cwd(cx);
         let pane = self.new_agent_pane(
-            cwd, None, None, None, Some(target), true, window, cx,
+            cwd,
+            AgentPaneInit { agent_target: Some(target), start_now: true, ..Default::default() },
+            window,
+            cx,
         );
         self.push_pane_tab(pane, window, cx);
     }

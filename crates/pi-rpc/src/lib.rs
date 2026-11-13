@@ -40,6 +40,10 @@ pub enum Incoming {
     Event(Value),
     /// An extension UI request (dialogs and fire-and-forget updates).
     Ui(UiRequest),
+    /// A Herdr viewer lost its connection; the remote agent remains alive.
+    ConnectionLost(String),
+    /// The original Herdr agent was reattached and passed an RPC round trip.
+    ConnectionRestored,
     /// One diagnostic line from stderr. Never protocol data.
     Stderr(String),
     /// The child exited; `None` when it was killed by a signal.
