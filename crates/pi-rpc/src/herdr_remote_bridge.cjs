@@ -227,6 +227,9 @@ async function remoteWrite(req) {
       if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_REMOTE_FILE) {
         throw new Error("Only existing regular, non-linked text files up to 128 KiB can be saved");
       }
+      if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+        throw new Error("Only files owned by the remote agent can be edited");
+      }
       original = await handle.readFile();
     } finally {
       await handle.close();
