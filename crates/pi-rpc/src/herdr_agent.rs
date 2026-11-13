@@ -327,6 +327,19 @@ fn verify_transport(
     check
 }
 
+/// Ignore responses from a superseded viewer generation, and never revive
+/// an agent after a tab was explicitly closed or GPUI was shut down.
+fn can_finish_reconnect(
+    allow: &AtomicBool,
+    online: &AtomicBool,
+    current_epoch: &AtomicU64,
+    epoch: u64,
+) -> bool {
+    allow.load(Ordering::Acquire)
+        && online.load(Ordering::Acquire)
+        && current_epoch.load(Ordering::Acquire) == epoch
+}
+
 /// An agent terminal is ours to stop; never issue a global core shutdown.
 fn stop_owned_terminal(address: String) {
     let _ = std::thread::Builder::new().name("herdr-agent-stop".into()).spawn(move || {
@@ -585,10 +598,9 @@ impl HerdrAgentProcess {
                                         &session, &token, &pending, &transport_up,
                                         &probe_id, true,
                                     );
-                                    if !allow_reconnect.load(Ordering::Acquire)
-                                        || !transport_up.load(Ordering::Acquire)
-                                        || epoch_counter.load(Ordering::Acquire) != epoch
-                                    {
+                                    if !can_finish_reconnect(
+                                        &allow_reconnect, &transport_up, &epoch_counter, epoch,
+                                    ) {
                                         return;
                                     }
                                     match result {
@@ -885,11 +897,12 @@ impl Drop for HerdrAgentProcess {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use super::{
         Incoming, IncomingState, Pending, REMOTE_BRIDGE_JS, recoverable_addresses,
         token_for_terminal, validate_remote_target, select_legacy_remote_target,
-        AgentTarget, RemoteTarget,
+        can_finish_reconnect, AgentTarget, RemoteTarget,
     };
     use crate::herdr_wire::encode;
     use serde_json::json;
@@ -1087,6 +1100,53 @@ mod tests {
         assert!(reply_rx.try_recv().is_err());
         parser.consume(&frames, &pending, &events, true);
         assert!(reply_rx.try_recv().unwrap().success);
+    }
+
+    #[test]
+    fn reconnect_never_replays_screen_events_before_probe() {
+        let pending: Pending = Arc::new(Mutex::new(Default::default()));
+        let (probe_tx, probe_rx) = async_channel::bounded(1);
+        pending.lock().unwrap().insert("reconnect-probe".into(), probe_tx);
+        let (events, rx) = async_channel::unbounded();
+        let mut parser = IncomingState::new("test".into());
+
+        parser.consume(
+            &encode("test", 'O', b"partial-old-json").concat(),
+            &pending, &events, true,
+        );
+        parser.reset_stream("test");
+        let replay = b"{\"type\":\"message_update\",\"value\":\"OLD\"}\\n";
+        // The 4D viewer reattach starts with a screen repaint. Its old
+        // events must not be emitted twice to the transcript.
+        parser.consume(&encode("test", 'O', replay).concat(), &pending, &events, false);
+        assert!(rx.try_recv().is_err());
+
+        let response = b"{\"type\":\"response\",\"id\":\"reconnect-probe\",\"command\":\"get_state\",\"success\":true,\"data\":{}}\\n";
+        parser.consume(&encode("test", 'O', response).concat(), &pending, &events, false);
+        assert!(probe_rx.try_recv().unwrap().success);
+        assert!(rx.try_recv().is_err());
+
+        let live = b"{\"type\":\"message_update\",\"value\":\"LIVE\"}\\n";
+        parser.consume(&encode("test", 'O', live).concat(), &pending, &events, true);
+        match rx.try_recv().unwrap() {
+            Incoming::Event(event) => assert_eq!(event["value"], "LIVE"),
+            _ => panic!("expected one live event"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn stale_or_closed_viewers_cannot_complete_reconnect() {
+        let allowed = AtomicBool::new(true);
+        let online = AtomicBool::new(true);
+        let current_epoch = AtomicU64::new(5);
+        assert!(can_finish_reconnect(&allowed, &online, &current_epoch, 5));
+        assert!(!can_finish_reconnect(&allowed, &online, &current_epoch, 4));
+        online.store(false, Ordering::Release);
+        assert!(!can_finish_reconnect(&allowed, &online, &current_epoch, 5));
+        online.store(true, Ordering::Release);
+        allowed.store(false, Ordering::Release);
+        assert!(!can_finish_reconnect(&allowed, &online, &current_epoch, 5));
     }
 
     #[test]
