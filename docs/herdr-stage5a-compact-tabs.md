@@ -36,6 +36,52 @@ tab treatment.
 - Closing the final session leaves an empty workspace; it does not
   automatically launch another agent. Use + to explicitly create one.
 
+## Directories: local workspace vs remote agent
+
+The workspace root is a **Windows local path**, used by GPUI to manage
+project files and tab persistence. It is **not** passed as the launch CWD of
+a remote agent.
+
+The current per-agent Herdr defaults are:
+
+- New `This computer` agent: active Windows workspace directory.
+- New `javipi` agent: `/srv/workspaces/JaviPi`.
+- New agent on another registered Linux machine: `/`.
+
+`AgentTarget::Remote { machine, cwd }` is stored per agent, and
+`terminal.run` receives its Linux `cwd`. This is the initial working
+directory, not necessarily the current directory after a later `cd` or
+session change. Existing remote jobs reattach to their original terminal
+and **must not be recreated just to update the displayed folder**.
+
+The navigator now shows the launch/runtime-directory metadata beneath each
+agent name. When a Herdr `terminal.list` snapshot reports the terminal's
+CWD, that directory takes precedence; otherwise a new agent's persisted
+target CWD is shown. For legacy restored remote addresses without a stored
+target or a terminal metadata result, the UI shows `Remote cwd unavailable`
+rather than a misleading Windows path. The title bar shows
+`machine · directory`. In native `local` mode, both titles and paths
+correctly refer to the Windows process even if a prior saved pane has a
+remote target.
+
+To independently check a remote agent's *current* directory, ask that
+specific agent to run `pwd` in its own shell. A new SSH session's `pwd`
+is not evidence of the agent's CWD.
+
+This phase **does not** add a UI picker for a custom remote CWD yet. That
+would need an explicit per-machine/per-agent creation flow.
+
+### Runtime-directory regressions
+
+- Check new JaviPi agents show `/srv/workspaces/JaviPi`, **not**
+  `D:\\Programacion\\gentle-shell-gpui-herdr-core`.
+- Check local agents show their Windows workspace path.
+- Restore a legacy JaviPi terminal: it should show metadata CWD if known,
+  otherwise `Remote cwd unavailable`, never a fabricated local CWD.
+- Switch to native `local` backend with a saved remote target: the running
+  local session and its labels must show Windows, not JaviPi.
+- Check the title bar label changes when selecting local vs JaviPi agents.
+
 ## Scope
 
 This is a presentation/navigation change. The internal `Tab` / `Pane`
