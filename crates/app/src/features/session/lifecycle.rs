@@ -274,6 +274,7 @@ impl SessionView {
         let resume = self.backend.pending_session.take();
         let launched = resume.clone();
         let restore_herdr = self.restored_herdr.clone();
+        let agent_target = self.agent_target.clone();
         self._io = cx.spawn_in(window, async move |this, cx| {
             let spawned = cx
                 .background_executor()
@@ -284,6 +285,7 @@ impl SessionView {
                         // its Herdr-managed terminal, never in this GUI.
                         let (backend, rx) = HerdrAgentProcess::spawn(
                             cwd, resume.as_deref(), restore_herdr.as_deref(),
+                            agent_target.as_ref(),
                         )?;
                         anyhow::Ok((Arc::new(RpcProcess::Herdr(backend)), rx, None))
                     } else {

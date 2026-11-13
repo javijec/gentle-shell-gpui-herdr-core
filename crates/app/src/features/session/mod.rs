@@ -115,6 +115,8 @@ pub struct SessionView {
     session_file: Option<PathBuf>,
     /// Exact Herdr address of a previously running agent, awaiting reattach.
     restored_herdr: Option<String>,
+    /// Machine chosen for this agent. Existing addresses always win.
+    agent_target: Option<pi_rpc::AgentTarget>,
     title: Option<String>,
     active_shell: Option<usize>,
     banner: crate::shared::banner::BannerConfig,
@@ -262,6 +264,7 @@ impl SessionView {
             session_name: None,
             session_file: None,
             restored_herdr: None,
+            agent_target: None,
             title: None,
             active_shell: None,
             banner: crate::shared::banner::read_config(&pi_rpc::resolve_homes().config),
@@ -346,6 +349,10 @@ impl SessionView {
 
     pub fn restore_herdr_terminal(&mut self, address: String) {
         self.restored_herdr = Some(address);
+    }
+
+    pub fn set_agent_target(&mut self, target: Option<pi_rpc::AgentTarget>) {
+        self.agent_target = target;
     }
 
     pub fn model_choices(&self) -> Vec<(String, String, String, bool)> {

@@ -9,7 +9,7 @@ pub mod file_cache;
 pub mod herdr_wire;
 pub mod herdr_bridge;
 mod herdr_agent;
-pub use herdr_agent::HerdrAgentProcess;
+pub use herdr_agent::{AgentTarget, HerdrAgentProcess};
 mod home;
 mod launch;
 mod login;

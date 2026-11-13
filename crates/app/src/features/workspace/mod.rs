@@ -117,6 +117,8 @@ struct Pane {
     session_file: Option<PathBuf>,
     /// Last observed Herdr address, so it gets persisted when first assigned.
     herdr_address: Option<String>,
+    /// Per-agent machine choice, never applied to another agent tab.
+    agent_target: Option<pi_rpc::AgentTarget>,
     /// What the tab bar shows for this pane, kept here so drawing the chrome
     /// never reads the views of tabs that aren't shown (reading an entity
     /// while drawing makes its every notify redraw the window). Agents
@@ -398,9 +400,10 @@ impl Workspace {
                 saved: Some((w.tabs, w.active_tab)),
             })
             .collect();
-        let discover_remote = crate::features::terminal::herdr_enabled()
-            && std::env::var("GENTLE_SHELL_HERDR_AGENT_MACHINE")
-                .is_ok_and(|machine| !machine.trim().is_empty());
+        // Herdr may have persistent agents on several remote machines.
+        // Discover them before any automatic new-agent launch, even when
+        // the legacy global machine env var is absent (normal 4C usage).
+        let discover_remote = crate::features::terminal::herdr_enabled();
         let music = cx.new(|cx| Music::new(window, cx));
         let devices = cx.new(DevicePanel::new);
         let lifecycle = vec![
@@ -669,6 +672,7 @@ impl Workspace {
             path: Some(path),
             session_file: None,
             herdr_address: None,
+            agent_target: None,
             title: SharedString::default(),
             running: false,
             _subscriptions: Vec::new(),

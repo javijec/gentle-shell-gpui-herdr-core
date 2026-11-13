@@ -65,6 +65,7 @@ impl Workspace {
                 pane.herdr_address.clone(),
                 crate::features::terminal::herdr_enabled(),
             ),
+            agent_target: pane.agent_target.clone(),
         })
     }
 

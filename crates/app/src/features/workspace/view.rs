@@ -98,6 +98,15 @@ impl Workspace {
                     .map(|p| p.item.kind)
                     .unwrap_or(PaneKind::Agent);
                 let count = tab.tree.len();
+                let agent_machine = self.panes.get(&tab.focused)
+                    .filter(|pane| pane.item.kind == PaneKind::Agent)
+                    .and_then(|pane| {
+                        pane.agent_target.as_ref()
+                            .map(|target| target.machine_label().to_string())
+                            .or_else(|| pane.herdr_address.as_deref()
+                                .and_then(|address| address.split_once('/'))
+                                .map(|(name, _)| name.to_owned()))
+                    });
                 let icon_color = if active { ui::petal() } else { ui::faint() };
                 let item = h_flex()
                     .min_w_0()
@@ -184,6 +193,22 @@ impl Workspace {
                                 .into_any_element(),
                         },
                     )
+                    .when_some(agent_machine, |d, machine| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .max_w(px(105.))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .rounded(px(5.))
+                                .px(px(5.))
+                                .bg(ui::surface_hover().opacity(0.8))
+                                .text_size(px(10.))
+                                .text_color(ui::muted())
+                                .child(machine),
+                        )
+                    })
                     .when(count > 1, |d| {
                         d.child(
                             div()
@@ -239,8 +264,9 @@ impl Workspace {
                                     menu_row(icon, label, detail, keys)
                                 })
                             };
-                            let (agent, terminal) = (weak.clone(), weak.clone());
-                            menu.min_w(px(260.))
+                            let (agent, on_machine, terminal) =
+                                (weak.clone(), weak.clone(), weak.clone());
+                            let menu = menu.min_w(px(260.))
                                 .item(
                                     item(
                                         IconName::Bot,
@@ -259,7 +285,25 @@ impl Workspace {
                                             });
                                         },
                                     ),
+                                );
+                            let menu = if crate::features::terminal::herdr_enabled() {
+                                menu.item(
+                                    item(
+                                        IconName::Bot,
+                                        "Agent on a machine...",
+                                        "Select this computer or a Herdr machine",
+                                        "",
+                                    )
+                                    .on_click(move |_, window, cx| {
+                                        let _ = on_machine.update(cx, |this, cx| {
+                                            this.open_machines(window, cx)
+                                        });
+                                    }),
                                 )
+                            } else {
+                                menu
+                            };
+                            menu
                                 .item(
                                     item(
                                         IconName::SquareTerminal,

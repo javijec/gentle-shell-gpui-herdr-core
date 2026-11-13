@@ -30,7 +30,39 @@ type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
 /// This contains no host secrets and does not create remote files.
 const REMOTE_BRIDGE_JS: &str = include_str!("herdr_remote_bridge.cjs");
 
-/// Stage 4B opt-in machine selection until the per-tab UI is added in 4C.
+/// Per-agent execution location. This is stored in GPUI's workspace JSON,
+/// not as a process-global environment variable. Reattached addresses take
+/// precedence, so selecting a machine cannot migrate a running agent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentTarget {
+    /// An agent managed by Herdr Core on the same Windows computer.
+    Local,
+    /// An agent managed by Herdr on a named Linux computer.
+    Remote { machine: String, cwd: String },
+}
+
+impl AgentTarget {
+    pub fn machine_label(&self) -> &str {
+        match self {
+            Self::Local => "This computer",
+            Self::Remote { machine, .. } => machine,
+        }
+    }
+
+    pub fn remote_for_machine(machine: String) -> Self {
+        // 4B's established workspace on JaviPi is retained. Unknown remote
+        // machines start at / rather than inheriting a Windows cwd.
+        let cwd = if machine.eq_ignore_ascii_case("javipi") {
+            "/srv/workspaces/JaviPi"
+        } else {
+            "/"
+        };
+        Self::Remote { machine, cwd: cwd.to_owned() }
+    }
+}
+
+/// Legacy 4B global selection is supported for already-existing workflows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoteTarget {
     machine: String,
@@ -44,6 +76,20 @@ fn remote_absolute_path(value: &str) -> bool {
         && !value.contains('\\')
         && !value.chars().any(char::is_control)
         && !value.split('/').any(|part| part == ".." || part == ".")
+}
+
+/// Only the machine selector activates legacy 4B remote-agent mode.
+/// CWD and NODE are subordinate options left over from prior PowerShell
+/// sessions; without a selected machine, Ctrl+T means local Herdr.
+fn select_legacy_remote_target(
+    machine: Option<&str>,
+    cwd: Option<&str>,
+    node: Option<&str>,
+) -> Result<Option<RemoteTarget>> {
+    match machine {
+        Some(machine) => validate_remote_target(Some(machine), cwd, node),
+        None => Ok(None),
+    }
 }
 
 fn validate_remote_target(
@@ -84,6 +130,29 @@ fn validate_remote_target(
 }
 
 impl RemoteTarget {
+    fn from_agent_target(target: Option<&AgentTarget>) -> Result<Option<Self>> {
+        match target {
+            Some(AgentTarget::Local) => Ok(None),
+            Some(AgentTarget::Remote { machine, cwd }) => {
+                let node = match std::env::var("GENTLE_SHELL_HERDR_REMOTE_NODE") {
+                    Ok(value) => Some(value),
+                    Err(std::env::VarError::NotPresent) => None,
+                    Err(_) => {
+                        return Err(anyhow!(
+                            "GENTLE_SHELL_HERDR_REMOTE_NODE must contain UTF-8"
+                        ));
+                    }
+                };
+                validate_remote_target(
+                    Some(machine),
+                    Some(cwd),
+                    node.as_deref(),
+                )
+            }
+            None => Self::from_env(),
+        }
+    }
+
     fn from_env() -> Result<Option<Self>> {
         let read = |key: &str| -> Result<Option<String>> {
             match std::env::var(key) {
@@ -93,9 +162,16 @@ impl RemoteTarget {
             }
         };
         let machine = read("GENTLE_SHELL_HERDR_AGENT_MACHINE")?;
+        // In 4C a missing machine means a local Ctrl+T agent regardless
+        // of stale 4B Linux CWD/Node overrides in the parent PowerShell.
+        // Do not even read those optional variables unless remote mode is
+        // explicitly selected.
+        let Some(machine) = machine else {
+            return Ok(None);
+        };
         let cwd = read("GENTLE_SHELL_HERDR_REMOTE_CWD")?;
         let node = read("GENTLE_SHELL_HERDR_REMOTE_NODE")?;
-        validate_remote_target(machine.as_deref(), cwd.as_deref(), node.as_deref())
+        select_legacy_remote_target(Some(&machine), cwd.as_deref(), node.as_deref())
     }
 }
 
@@ -146,21 +222,23 @@ impl HerdrAgentProcess {
     /// stored in workspaces.json. No terminal is started, attached or killed.
     /// The GUI can offer each untracked agent as a recovered tab.
     pub fn discover_live_remote_agents() -> Result<Vec<String>> {
-        let Some(target) = RemoteTarget::from_env()? else {
-            return Ok(Vec::new());
-        };
         let mut client = core_client()?;
         let list = client.list_terminals()?;
-        Ok(recoverable_addresses(&list.terminals, &target.machine))
+        // 4C recovers *all* registered remote machines, not only the legacy
+        // GENTLE_SHELL_HERDR_AGENT_MACHINE environment selection.
+        Ok(recoverable_addresses(&list.terminals, None))
     }
 }
 
 /// Pure discovery filter: never recover foreign terminals, dead processes or
 /// agents owned by a different machine. Stable order is their creation time.
-fn recoverable_addresses(records: &[Value], machine: &str) -> Vec<String> {
+fn recoverable_addresses(records: &[Value], machine: Option<&str>) -> Vec<String> {
     let mut agents: Vec<(u64, String)> = records.iter().filter_map(|record| {
         let address = record["address"].as_str()?;
-        if address.split_once('/').map(|(prefix, _)| prefix) != Some(machine) {
+        // A remote terminal has a qualified address; local terminals must
+        // never be treated as remote RPC agents.
+        let (prefix, _) = address.split_once('/')?;
+        if machine.is_some_and(|requested| prefix != requested) {
             return None;
         }
         token_for_terminal(record, address).ok()?;
@@ -367,11 +445,16 @@ impl HerdrAgentProcess {
         cwd: PathBuf,
         resume: Option<&Path>,
         existing: Option<&str>,
+        target: Option<&AgentTarget>,
     ) -> Result<(Arc<Self>, async_channel::Receiver<Incoming>)> {
         // Inspect the existing terminal before attaching: a stale or foreign
         // address must fail closed instead of launching another Pi agent.
         let existing_token = existing.map(inspect_existing).transpose()?;
-        let remote = if existing.is_some() { None } else { RemoteTarget::from_env()? };
+        let remote = if existing.is_some() {
+            None
+        } else {
+            RemoteTarget::from_agent_target(target)?
+        };
         let ticks = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let token = existing_token.unwrap_or_else(|| format!("p{}{:x}", std::process::id(), ticks));
         // A reattached Pi may still answer old requests from a previous GPUI.
@@ -670,10 +753,76 @@ mod tests {
 
     use super::{
         Incoming, IncomingState, Pending, REMOTE_BRIDGE_JS, recoverable_addresses,
-        token_for_terminal, validate_remote_target,
+        token_for_terminal, validate_remote_target, select_legacy_remote_target,
+        AgentTarget, RemoteTarget,
     };
     use crate::herdr_wire::encode;
     use serde_json::json;
+
+    #[test]
+    fn ctrl_t_defaults_to_local_when_only_stale_4b_remote_options_remain() {
+        // Previous Windows 4B sessions may leave REMOTE_CWD and REMOTE_NODE
+        // defined after AGENT_MACHINE was removed. Neither creates a remote
+        // intent or blocks the ordinary new-agent shortcut in 4C.
+        assert_eq!(
+            select_legacy_remote_target(
+                None,
+                Some("/srv/workspaces/JaviPi"),
+                Some("/usr/bin/node"),
+            ).unwrap(),
+            None
+        );
+        assert_eq!(
+            select_legacy_remote_target(None, Some(r"D:\\old"), Some("invalid shell")).unwrap(),
+            None
+        );
+        assert_eq!(select_legacy_remote_target(None, None, None).unwrap(), None);
+        let selected = select_legacy_remote_target(
+            Some("javipi"), Some("/srv/workspaces/JaviPi"), Some("node"),
+        ).unwrap().unwrap();
+        assert_eq!(selected.machine, "javipi");
+        assert_eq!(selected.cwd.to_str(), Some("/srv/workspaces/JaviPi"));
+        // Once a machine is set, malformed settings still fail closed.
+        assert!(select_legacy_remote_target(Some("javipi"), Some(r"C:\\bad"), None).is_err());
+        assert!(select_legacy_remote_target(Some(""), None, None).is_err());
+    }
+
+    #[test]
+    fn per_agent_target_overrides_legacy_global_selection() {
+        assert_eq!(
+            RemoteTarget::from_agent_target(Some(&AgentTarget::Local)).unwrap(),
+            None
+        );
+        let target = AgentTarget::remote_for_machine("javipi".into());
+        assert_eq!(target.machine_label(), "javipi");
+        let remote = RemoteTarget::from_agent_target(Some(&target))
+            .unwrap().unwrap();
+        assert_eq!(remote.cwd.to_str(), Some("/srv/workspaces/JaviPi"));
+        assert_eq!(remote.machine, "javipi");
+        let other = AgentTarget::remote_for_machine("buildbox".into());
+        let remote = RemoteTarget::from_agent_target(Some(&other))
+            .unwrap().unwrap();
+        assert_eq!(remote.cwd.to_str(), Some("/"));
+        let invalid = AgentTarget::Remote {
+            machine: "bad/machine".into(),
+            cwd: "/srv/workspaces".into(),
+        };
+        assert!(RemoteTarget::from_agent_target(Some(&invalid)).is_err());
+    }
+
+    #[test]
+    fn serialized_targets_keep_local_and_remote_selection_independent() {
+        let remote = AgentTarget::Remote {
+            machine: "javipi".into(),
+            cwd: "/srv/workspaces/JaviPi".into(),
+        };
+        let local = AgentTarget::Local;
+        let encoded_remote = serde_json::to_string(&remote).unwrap();
+        let encoded_local = serde_json::to_string(&local).unwrap();
+        assert_eq!(serde_json::from_str::<AgentTarget>(&encoded_remote).unwrap(), remote);
+        assert_eq!(serde_json::from_str::<AgentTarget>(&encoded_local).unwrap(), local);
+        assert_ne!(encoded_remote, encoded_local);
+    }
 
     #[test]
     fn remote_target_needs_no_bridge_install_or_rust_compilation() {
@@ -741,8 +890,14 @@ mod tests {
             json!({"address":"javipi/t2","state":"live","labels":{"gentle-shell":"other"}}),
         ];
         assert_eq!(
-            recoverable_addresses(&candidates, "javipi"),
+            recoverable_addresses(&candidates, Some("javipi")),
             vec!["javipi/t1", "javipi/t5", "javipi/t33"]
+        );
+        assert_eq!(
+            recoverable_addresses(&candidates, None),
+            // Discovery preserves creation order across different machines.
+            // created_ms: javipi/t1=1, other/t4=10, javipi/t5=50, javipi/t33=60.
+            vec!["javipi/t1", "other/t4", "javipi/t5", "javipi/t33"]
         );
     }
 
