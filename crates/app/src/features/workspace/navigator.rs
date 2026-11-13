@@ -138,7 +138,7 @@ impl Workspace {
                     .border_b_1()
                     .border_color(ui::border())
                     .child(
-                        Icon::new(IconName::Server)
+                        Icon::new(IconName::Layers)
                             .small()
                             .text_color(ui::petal()),
                     )
@@ -214,9 +214,9 @@ impl Workspace {
                                             )
                                             .child(
                                                 Icon::new(if local {
-                                                    IconName::Monitor
+                                                    IconName::SquareTerminal
                                                 } else {
-                                                    IconName::Server
+                                                    IconName::Layers
                                                 })
                                                     .small()
                                                     .text_color(ui::muted()),
