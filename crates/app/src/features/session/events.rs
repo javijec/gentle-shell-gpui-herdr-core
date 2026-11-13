@@ -98,6 +98,10 @@ impl SessionView {
                 // the transcript and running turn; never mark it Exited.
                 self.recovery_snapshot_pending = false;
                 self.recovery_generation = self.recovery_generation.wrapping_add(1);
+                if self.is_remote_herdr() {
+                    self.git.seq = self.git.seq.wrapping_add(1);
+                    self.git.remote_branch = None;
+                }
                 self.transcript.notice(
                     NoticeLevel::Warning,
                     format!("Herdr connection interrupted ({reason}). The agent may still be running; commands will not be replayed automatically."),
@@ -114,6 +118,7 @@ impl SessionView {
                 // snapshot at agent_settled to restore missed stream deltas.
                 self.recovery_snapshot_pending = true;
                 self.refresh_state(cx);
+                self.refresh_git(cx);
                 self.monitor_recovered_turn(cx);
             }
             Incoming::Stderr(line) => {
