@@ -363,7 +363,15 @@ impl Workspace {
                     }
                 }
             }),
-            cx.on_release(|this, cx| this.save_now(cx)),
+            cx.on_release(|this, cx| {
+                // The window can be released without a full app-quit event.
+                // Save the exact identity and detach remote viewers in either
+                // shutdown path; never kill long-running JaviPi agents here.
+                this.save_now(cx);
+                for session in this.sessions() {
+                    session.read(cx).shutdown_for_app_quit();
+                }
+            }),
             // The title-bar update pill follows this app's own update state.
             cx.observe_global::<crate::features::app_update::AppUpdate>(|_, cx| cx.notify()),
             // Keep a multi-stage grid filling the window as it resizes. A
