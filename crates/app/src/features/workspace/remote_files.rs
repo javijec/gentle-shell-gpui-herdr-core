@@ -46,7 +46,7 @@ impl Workspace {
             kind: PaneKind::File,
             view: file.clone().into(),
             focus: file.focus_handle(cx),
-            title: Rc::new(move |cx: &App| title_view.read(cx).file_title()),
+            title: Rc::new(move |cx: &App| title_view.read(cx).file_title(cx)),
             unsaved: Some(Rc::new(move |cx: &App| {
                 unsaved_view.read(cx).has_unsaved(cx)
             })),
