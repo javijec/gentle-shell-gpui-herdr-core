@@ -102,12 +102,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let selected = self.selected_remote_files(cx);
-        if let Some((session, _, root)) = &selected {
-            if self.remote_files.as_ref().is_some_and(|view| {
+        if let Some((session, _, root)) = &selected
+            && self.remote_files.as_ref().is_some_and(|view| {
                 view.read(cx).matches(session, root)
-            }) {
-                return;
-            }
+            })
+        {
+            return;
         }
         // Retain unsaved editors, including an in-flight save. Dropping an
         // Entity on machine switch would otherwise lose the user's draft.
