@@ -128,7 +128,7 @@ impl RemoteDirectoryPicker {
 impl Render for RemoteDirectoryPicker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let paths: Vec<AnyElement> = self.suggestions.iter().enumerate().map(|(i, path)| {
-            let selected = self.input.read(cx).value() == path;
+            let selected = self.input.read(cx).value() == path.as_str();
             let choice = path.clone();
             h_flex()
                 .id(("remote-cwd-choice", i))
