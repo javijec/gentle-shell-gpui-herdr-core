@@ -16,10 +16,31 @@ pub use viewer::FileView;
 
 use std::path::Path;
 
-use gpui_kit::Hsla;
+use gpui_kit::component::input::EditorState;
+use gpui_kit::{App, Hsla, Window};
 use gpui_kit::assets::IconName;
 
 use crate::shared::ui;
+
+/// The same syntax-aware editing engine for native Windows files and
+/// remote Linux files. Storage and save semantics stay with each backend.
+/// `EditorState` gives both file sources line numbers, syntax highlighting,
+/// cursor/selection/undo and the same wrapping behavior.
+fn source_editor(
+    path: &Path,
+    text: String,
+    window: &mut Window,
+    cx: &mut App,
+) -> EditorState {
+    let state = EditorState::new(window, cx)
+        .line_number(true)
+        .soft_wrap(false);
+    match language(path).0 {
+        Some(lang) => state.language(lang),
+        None => state,
+    }
+    .default_value(text)
+}
 
 /// The icon and tint for a file name in the tree.
 fn file_icon(name: &str) -> (IconName, Hsla) {
