@@ -451,6 +451,7 @@ pub struct HerdrAgentProcess {
     id_prefix: String,
     ready: Arc<AtomicBool>,
     last_failure: Arc<Mutex<Option<String>>>,
+    allow_reconnect: Arc<AtomicBool>,
     stopping: AtomicBool,
 }
 
@@ -514,6 +515,11 @@ impl HerdrAgentProcess {
         let address = Arc::new(Mutex::new(None));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let ready = Arc::new(AtomicBool::new(false));
+        let transport_up = Arc::new(AtomicBool::new(false));
+        let startup_complete = Arc::new(AtomicBool::new(false));
+        let reconnect_epoch = Arc::new(AtomicU64::new(0));
+        let lost_notice = Arc::new(AtomicBool::new(false));
+        let allow_reconnect = Arc::new(AtomicBool::new(true));
         let last_failure = Arc::new(Mutex::new(None));
         let incoming = Arc::new(Mutex::new(IncomingState::new(token.clone())));
         let session_ref: SessionReference = Arc::new(Mutex::new(None));
@@ -523,20 +529,85 @@ impl HerdrAgentProcess {
             let address = address.clone();
             let pending = pending.clone();
             let ready = ready.clone();
+            let transport_up = transport_up.clone();
+            let startup_complete = startup_complete.clone();
+            let reconnect_epoch = reconnect_epoch.clone();
+            let lost_notice = lost_notice.clone();
+            let allow_reconnect = allow_reconnect.clone();
             let last_failure = last_failure.clone();
             let session_ref = session_ref.clone();
+            let incoming = incoming.clone();
+            let events = events.clone();
+            let token = token.clone();
+            let id_prefix = id_prefix.clone();
             move |event| match event {
                 TerminalEvent::Assigned(value) => {
                     *address.lock().unwrap() = Some(value);
                 }
-                TerminalEvent::Attached { .. } => {
-                    // A running bridge emitted READY before GPUI was closed.
-                    // After reattaching, validate by get_state round trip;
-                    // expecting another READY would hang forever.
-                    if reattaching {
-                        ready.store(true, Ordering::Release);
-                        if let Some(tx) = started_tx.lock().unwrap().take() {
-                            let _ = tx.send(Ok(()));
+                TerminalEvent::Attached { recovered, .. } => {
+                    transport_up.store(true, Ordering::Release);
+                    let epoch = reconnect_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+                    if recovered {
+                        // Herdr paints a VT screen snapshot first. Its old
+                        // partial GS4A1 frames cannot continue our decoder.
+                        incoming.lock().unwrap().reset_stream(&token);
+                    }
+                    if !startup_complete.load(Ordering::Acquire) {
+                        // An existing bridge emitted READY before this GUI.
+                        // A fresh bridge instead reports READY in live output.
+                        if reattaching || recovered {
+                            ready.store(true, Ordering::Release);
+                            if let Some(tx) = started_tx.lock().unwrap().take() {
+                                let _ = tx.send(Ok(()));
+                            }
+                        }
+                    } else if recovered {
+                        // Do not block the terminal output worker while
+                        // waiting for a probe response: it must consume that
+                        // response itself. No new terminal.run occurs.
+                        let session = session_ref.lock().unwrap().as_ref()
+                            .and_then(Weak::upgrade);
+                        if let Some(session) = session {
+                            let token = token.clone();
+                            let pending = pending.clone();
+                            let transport_up = transport_up.clone();
+                            let ready = ready.clone();
+                            let epoch_counter = reconnect_epoch.clone();
+                            let lost_notice = lost_notice.clone();
+                            let allow_reconnect = allow_reconnect.clone();
+                            let last_failure = last_failure.clone();
+                            let events = events.clone();
+                            let probe_id = format!("{id_prefix}-recover-{epoch}");
+                            let _ = std::thread::Builder::new()
+                                .name("herdr-rpc-recover".into())
+                                .spawn(move || {
+                                    let result = verify_transport(
+                                        &session, &token, &pending, &transport_up,
+                                        &probe_id, true,
+                                    );
+                                    if !allow_reconnect.load(Ordering::Acquire)
+                                        || !transport_up.load(Ordering::Acquire)
+                                        || epoch_counter.load(Ordering::Acquire) != epoch
+                                    {
+                                        return;
+                                    }
+                                    match result {
+                                        Ok(()) => {
+                                            *last_failure.lock().unwrap() = None;
+                                            ready.store(true, Ordering::Release);
+                                            lost_notice.store(false, Ordering::Release);
+                                            let _ = events.try_send(Incoming::ConnectionRestored);
+                                        }
+                                        Err(error) => {
+                                            *last_failure.lock().unwrap() = Some(format!(
+                                                "Herdr RPC reattach probe failed: {error:#}"
+                                            ));
+                                            // Existing agent keeps running.
+                                            // Reopen only the viewer and retry.
+                                            session.reconnect();
+                                        }
+                                    }
+                                });
                         }
                     }
                 }
@@ -546,10 +617,14 @@ impl HerdrAgentProcess {
                     }
                     let (started, exit, stderr_tail) = {
                         let mut state = incoming.lock().unwrap();
-                        let (started, exit) = state.consume(&bytes, &pending, &events);
+                        let accept_events = !startup_complete.load(Ordering::Acquire)
+                            || ready.load(Ordering::Acquire);
+                        let (started, exit) = state.consume(
+                            &bytes, &pending, &events, accept_events,
+                        );
                         (started, exit, state.stderr_tail.clone())
                     };
-                    if started {
+                    if started && !startup_complete.load(Ordering::Acquire) {
                         *last_failure.lock().unwrap() = None;
                         ready.store(true, Ordering::Release);
                         if let Some(tx) = started_tx.lock().unwrap().take() {
@@ -570,21 +645,56 @@ impl HerdrAgentProcess {
                         let _ = events.try_send(Incoming::Exited(code));
                     }
                 }
-                TerminalEvent::Retrying(error)
-                | TerminalEvent::NeedsReconnect(error)
-                | TerminalEvent::Failed(error) => {
+                TerminalEvent::Retrying(error) | TerminalEvent::NeedsReconnect(error) => {
+                    transport_up.store(false, Ordering::Release);
+                    reconnect_epoch.fetch_add(1, Ordering::AcqRel);
+                    *last_failure.lock().unwrap() = Some(error.clone());
+                    ready.store(false, Ordering::Release);
+                    // A command may have reached Pi before disconnect.
+                    // Fail its caller; never replay a possibly mutating RPC.
+                    pending.lock().unwrap().clear();
+                    if let Some(tx) = started_tx.lock().unwrap().take() {
+                        let _ = tx.send(Err(anyhow!(error)));
+                    } else if !lost_notice.swap(true, Ordering::AcqRel) {
+                        let _ = events.try_send(Incoming::ConnectionLost(error.clone()));
+                    }
+                    if matches!(event, TerminalEvent::NeedsReconnect(_)) {
+                        // TerminalSession pauses after bounded retries. Drive
+                        // its manual-retry entry point in the background, so
+                        // agents eventually recover after longer outages too.
+                        if let Some(session) = session_ref.lock().unwrap().as_ref()
+                            .and_then(Weak::upgrade)
+                        {
+                            let ready = ready.clone();
+                            let allow_reconnect = allow_reconnect.clone();
+                            let _ = std::thread::Builder::new()
+                                .name("herdr-rpc-retry".into())
+                                .spawn(move || {
+                                    std::thread::sleep(Duration::from_secs(15));
+                                    if allow_reconnect.load(Ordering::Acquire)
+                                        && !ready.load(Ordering::Acquire)
+                                    {
+                                        session.reconnect();
+                                    }
+                                });
+                        }
+                    }
+                }
+                TerminalEvent::Failed(error) => {
+                    transport_up.store(false, Ordering::Release);
                     *last_failure.lock().unwrap() = Some(error.clone());
                     ready.store(false, Ordering::Release);
                     pending.lock().unwrap().clear();
-                    let _ = events.try_send(Incoming::Stderr(error.clone()));
                     if let Some(tx) = started_tx.lock().unwrap().take() {
                         let _ = tx.send(Err(anyhow!(error)));
                     } else {
-                        // 4A fails closed. Automatic Pi RPC recovery is 4D.
+                        let _ = events.try_send(Incoming::Stderr(error));
                         let _ = events.try_send(Incoming::Exited(None));
                     }
                 }
                 TerminalEvent::Closed => {
+                    transport_up.store(false, Ordering::Release);
+                    allow_reconnect.store(false, Ordering::Release);
                     let details = incoming.lock().unwrap().stderr_tail.clone();
                     *last_failure.lock().unwrap() = Some(format!(
                         "Herdr agent terminal closed: {details}"
@@ -622,6 +732,7 @@ impl HerdrAgentProcess {
             &session, &token, &pending, &ready, &probe_id, reattaching,
         ));
         if let Err(error) = verified {
+            allow_reconnect.store(false, Ordering::Release);
             // Never kill an *existing* agent just because this viewer failed
             // to reconnect; the owner can retry later.
             if !reattaching
@@ -631,6 +742,7 @@ impl HerdrAgentProcess {
             }
             return Err(error);
         }
+        startup_complete.store(true, Ordering::Release);
         Ok((
             Arc::new(Self {
                 session,
@@ -641,6 +753,7 @@ impl HerdrAgentProcess {
                 id_prefix,
                 ready,
                 last_failure,
+                allow_reconnect,
                 stopping: AtomicBool::new(false),
             }),
             rx,
@@ -734,6 +847,7 @@ impl HerdrAgentProcess {
     /// Explicit tab close still uses shutdown and kills its owned terminal.
     pub fn park_for_app_quit(&self) -> bool {
         if self.address().as_deref().is_some_and(|address| address.contains('/')) {
+            self.allow_reconnect.store(false, Ordering::Release);
             self.stopping.store(true, Ordering::Release);
             self.ready.store(false, Ordering::Release);
             self.pending.lock().unwrap().clear();
@@ -745,6 +859,7 @@ impl HerdrAgentProcess {
 
     /// Explicit close/restart terminates the managed agent, never Herdr Core.
     pub fn shutdown(&self, _grace: Duration) {
+        self.allow_reconnect.store(false, Ordering::Release);
         if self.stopping.swap(true, Ordering::AcqRel) {
             return;
         }
