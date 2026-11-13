@@ -18,7 +18,7 @@ use gpui_kit::component::{Icon, Sizable as _, TitleBar, WindowExt as _, h_flex, 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::features::files::FileTreeView;
+use crate::features::files::{FileTreeView, RemoteFilesEvent, RemoteFilesView};
 use crate::features::machines::{
     model as machine_model, MachinesEvent, MachinesView,
     RemoteDirectoryEvent, RemoteDirectoryPicker,
@@ -44,6 +44,7 @@ use gentle_core::commands::Screen;
 mod actions;
 mod layout;
 mod navigator;
+mod remote_files;
 mod overlays;
 mod panes;
 mod persistence;
@@ -350,6 +351,8 @@ pub struct Workspace {
     remote_agent_recovery: RemoteAgentRecovery,
     overlay: Option<(Overlay, Subscription)>,
     sidebar: Option<AnyView>,
+    remote_files: Option<Entity<RemoteFilesView>>,
+    _remote_files_events: Option<Subscription>,
     sidebar_visible: bool,
     /// Independent right-side Windows Files / Changes / Branches dock.
     files_sidebar_open: bool,
@@ -481,6 +484,8 @@ impl Workspace {
             },
             overlay: None,
             sidebar: None,
+            remote_files: None,
+            _remote_files_events: None,
             // Machines and local Files have separate dock positions.
             // Default to showing both without restoring the old tab strip.
             sidebar_visible: true,
