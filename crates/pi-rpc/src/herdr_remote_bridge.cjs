@@ -365,7 +365,7 @@ function runGit(directory, args, allowedDiffExit = false) {
       if (error && !(allowedDiffExit && error.code === 1 &&
             !error.killed && !error.signal)) {
         reject(new Error("Remote Git query failed: " +
-          strictUtf8(Buffer.from(stderr || "")).slice(0, 300)));
+          Buffer.from(stderr || "").toString("utf8").slice(0, 300)));
       } else {
         resolve(Buffer.from(stdout));
       }
@@ -434,7 +434,7 @@ async function remoteGit(req) {
     const [status, branches] = await Promise.all([
       runGit(toplevel, ["status", "--porcelain=v1", "-z",
         "--no-renames", "--untracked-files=all", "--ignore-submodules=all"]),
-      runGit(toplevel, ["branch", "--list",
+      runGit(toplevel, ["branch", "--all", "--list",
         "--format=%(refname:short)%00%(HEAD)"]),
     ]);
     const files = parseGitEntries(status);
