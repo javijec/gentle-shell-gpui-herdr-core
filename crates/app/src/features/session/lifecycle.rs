@@ -218,6 +218,16 @@ impl SessionView {
         true
     }
 
+    /// On GPUI quit, detach live remote Herdr agents without killing them.
+    /// Local/native agent shutdown remains unchanged; closing an individual
+    /// tab still explicitly ends its agent via the normal Drop path.
+    pub fn shutdown_for_app_quit(&self) -> bool {
+        match &self.backend.status {
+            BackendStatus::Ready(RpcProcess::Herdr(agent)) if agent.park_for_app_quit() => false,
+            _ => self.shutdown_backend(),
+        }
+    }
+
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.shutdown_backend();
         self.backend.started = true;
@@ -248,6 +258,7 @@ impl SessionView {
         // one starts in Normal.
         let resume = self.backend.pending_session.take();
         let launched = resume.clone();
+        let restore_herdr = self.restored_herdr.clone();
         self._io = cx.spawn_in(window, async move |this, cx| {
             let spawned = cx
                 .background_executor()
@@ -256,7 +267,9 @@ impl SessionView {
                         // Herdr mode must not launch even a version-probe Pi
                         // process outside Core. The bridge resolves Pi inside
                         // its Herdr-managed terminal, never in this GUI.
-                        let (backend, rx) = HerdrAgentProcess::spawn(cwd, resume.as_deref())?;
+                        let (backend, rx) = HerdrAgentProcess::spawn(
+                            cwd, resume.as_deref(), restore_herdr.as_deref(),
+                        )?;
                         anyhow::Ok((Arc::new(RpcProcess::Herdr(backend)), rx, None))
                     } else {
                         let mut spec = pi_rpc::resolve_backend(&cwd)?;
@@ -275,6 +288,9 @@ impl SessionView {
                     let ok = this.update(cx, |this, cx| {
                         this.backend.status = BackendStatus::Ready(process);
                         this.backend.version = version;
+                        // From now on the live Herdr address is authoritative;
+                        // a later explicit restart must not reattach a killed one.
+                        this.restored_herdr = None;
                         if let Some(path) = launched {
                             this.session_file = Some(path);
                         }
