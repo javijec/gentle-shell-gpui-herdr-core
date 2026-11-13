@@ -347,12 +347,13 @@ impl Workspace {
             cx.on_app_quit(|this, cx| {
                 this.music.read(cx).shutdown();
                 this.save_now(cx);
-                // The app exits before any tab is released: ask every backend
-                // to stop now. A moment's wait lets the launchers pass SIGTERM
-                // on to Pi before the exit closes its stdin (GPUI caps it).
+                // Preserve Herdr remote agents across GPUI restarts. The
+                // bridge/terminal addresses were saved above; on release the
+                // viewer detaches without terminal.kill. Native and Herdr-local
+                // backends still shut down. Explicit tab close remains final.
                 let mut signalled = false;
                 for session in this.sessions() {
-                    signalled |= session.read(cx).shutdown_backend();
+                    signalled |= session.read(cx).shutdown_for_app_quit();
                 }
                 let settle =
                     signalled.then(|| cx.background_executor().timer(Duration::from_millis(100)));
