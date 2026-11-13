@@ -373,6 +373,24 @@ impl Render for Workspace {
                                     })
                                     .when(has_sidebar, |d| {
                                         d.child(
+                                            Button::new("switch-sidebar-mode")
+                                                .ghost()
+                                                .xsmall()
+                                                .icon(Icon::new(if self.files_sidebar_open {
+                                                    IconName::Server
+                                                } else {
+                                                    IconName::Folder
+                                                }))
+                                                .tooltip(if self.files_sidebar_open {
+                                                    "Show machines and agents"
+                                                } else {
+                                                    "Show project files"
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.toggle_sidebar_mode(cx)
+                                                })),
+                                        )
+                                        .child(
                                             Button::new("toggle-sidebar")
                                                 .ghost()
                                                 .xsmall()
