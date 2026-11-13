@@ -78,6 +78,20 @@ fn remote_absolute_path(value: &str) -> bool {
         && !value.split('/').any(|part| part == ".." || part == ".")
 }
 
+/// Only the machine selector activates legacy 4B remote-agent mode.
+/// CWD and NODE are subordinate options left over from prior PowerShell
+/// sessions; without a selected machine, Ctrl+T means local Herdr.
+fn select_legacy_remote_target(
+    machine: Option<&str>,
+    cwd: Option<&str>,
+    node: Option<&str>,
+) -> Result<Option<RemoteTarget>> {
+    match machine {
+        Some(machine) => validate_remote_target(Some(machine), cwd, node),
+        None => Ok(None),
+    }
+}
+
 fn validate_remote_target(
     machine: Option<&str>,
     cwd: Option<&str>,
@@ -148,9 +162,16 @@ impl RemoteTarget {
             }
         };
         let machine = read("GENTLE_SHELL_HERDR_AGENT_MACHINE")?;
+        // In 4C a missing machine means a local Ctrl+T agent regardless
+        // of stale 4B Linux CWD/Node overrides in the parent PowerShell.
+        // Do not even read those optional variables unless remote mode is
+        // explicitly selected.
+        let Some(machine) = machine else {
+            return Ok(None);
+        };
         let cwd = read("GENTLE_SHELL_HERDR_REMOTE_CWD")?;
         let node = read("GENTLE_SHELL_HERDR_REMOTE_NODE")?;
-        validate_remote_target(machine.as_deref(), cwd.as_deref(), node.as_deref())
+        select_legacy_remote_target(Some(&machine), cwd.as_deref(), node.as_deref())
     }
 }
 
@@ -732,10 +753,39 @@ mod tests {
 
     use super::{
         Incoming, IncomingState, Pending, REMOTE_BRIDGE_JS, recoverable_addresses,
-        token_for_terminal, validate_remote_target, AgentTarget, RemoteTarget,
+        token_for_terminal, validate_remote_target, select_legacy_remote_target,
+        AgentTarget, RemoteTarget,
     };
     use crate::herdr_wire::encode;
     use serde_json::json;
+
+    #[test]
+    fn ctrl_t_defaults_to_local_when_only_stale_4b_remote_options_remain() {
+        // Previous Windows 4B sessions may leave REMOTE_CWD and REMOTE_NODE
+        // defined after AGENT_MACHINE was removed. Neither creates a remote
+        // intent or blocks the ordinary new-agent shortcut in 4C.
+        assert_eq!(
+            select_legacy_remote_target(
+                None,
+                Some("/srv/workspaces/JaviPi"),
+                Some("/usr/bin/node"),
+            ).unwrap(),
+            None
+        );
+        assert_eq!(
+            select_legacy_remote_target(None, Some(r"D:\\old"), Some("invalid shell")).unwrap(),
+            None
+        );
+        assert_eq!(select_legacy_remote_target(None, None, None).unwrap(), None);
+        let selected = select_legacy_remote_target(
+            Some("javipi"), Some("/srv/workspaces/JaviPi"), Some("node"),
+        ).unwrap().unwrap();
+        assert_eq!(selected.machine, "javipi");
+        assert_eq!(selected.cwd.to_str(), Some("/srv/workspaces/JaviPi"));
+        // Once a machine is set, malformed settings still fail closed.
+        assert!(select_legacy_remote_target(Some("javipi"), Some(r"C:\\bad"), None).is_err());
+        assert!(select_legacy_remote_target(Some(""), None, None).is_err());
+    }
 
     #[test]
     fn per_agent_target_overrides_legacy_global_selection() {
