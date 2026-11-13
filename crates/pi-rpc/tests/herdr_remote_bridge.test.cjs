@@ -43,9 +43,10 @@ function harness(cwd = "/srv/workspaces/JaviPi") {
     if (name === "node:child_process") {
       return { spawn: (...args) => { calls.push(args); return child; } };
     }
-    // The remote Files extension only requires Node built-ins and
-    // performs no I/O until it receives a specific read-only request.
-    assert.ok(["node:fs/promises", "node:path", "node:util"].includes(name));
+    // Remote Files uses built-in fs and SHA-256 for opt-in revision-checked
+    // writes; no I/O occurs until the matching private command arrives.
+    assert.ok(["node:fs/promises", "node:fs", "node:crypto",
+               "node:path", "node:util"].includes(name));
     return require(name);
   };
   const execute = new Function(
@@ -232,4 +233,125 @@ test("read-only remote browser rejects invalid root and Windows paths", async ()
     root: "/srv/../workspaces", path: "/srv/../workspaces" });
   assert.equal((await fsReply(h, "fs-bad2")).success, false);
   assert.equal(h.childWrites.length, before);
+});
+
+test("5B can save a remote UTF-8 file after verifying the read revision", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const crypto = require("node:crypto");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-edit-ok-"));
+  try {
+    const file = path.join(root, "notes.txt");
+    fs.writeFileSync(file, "first line\n", { mode: 0o640 });
+    const h = harness(root);
+    const initialCalls = h.childWrites.length;
+    rpcInput(h, { type: "herdr_fs_read", id: "edit-r", root, path: file });
+    const opened = await fsReply(h, "edit-r");
+    assert.equal(opened.success, true);
+    assert.match(opened.data.revision, /^[a-f0-9]{64}$/);
+
+    rpcInput(h, {
+      type: "herdr_fs_write", id: "edit-w", root, path: file,
+      content: "Updated from Windows 🧪\n",
+      expectedRevision: opened.data.revision,
+    });
+    const saved = await fsReply(h, "edit-w");
+    assert.equal(saved.success, true);
+    assert.equal(fs.readFileSync(file, "utf8"), "Updated from Windows 🧪\n");
+    assert.equal(saved.data.revision,
+      crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
+    assert.equal(fs.statSync(file).mode & 0o777, 0o640);
+    assert.equal(h.childWrites.length, initialCalls,
+      "private writes must never go to Pi RPC or the chat transcript");
+    assert.equal(fs.readdirSync(root).filter(x => x.startsWith(".herdr-save-")).length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("5B rejects stale revisions and never overwrites concurrent edits", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-edit-conflict-"));
+  try {
+    const file = path.join(root, "notes.txt");
+    fs.writeFileSync(file, "original\n");
+    const h = harness(root);
+    rpcInput(h, { type: "herdr_fs_read", id: "conflict-r", root, path: file });
+    const opened = await fsReply(h, "conflict-r");
+    assert.equal(opened.success, true);
+    fs.writeFileSync(file, "external editor changed this\n");
+    rpcInput(h, { type: "herdr_fs_write", id: "conflict-w", root, path: file,
+      content: "STALE SAVE", expectedRevision: opened.data.revision });
+    const saved = await fsReply(h, "conflict-w");
+    assert.equal(saved.success, false);
+    assert.match(saved.error, /Conflict/);
+    assert.equal(fs.readFileSync(file, "utf8"), "external editor changed this\n");
+    assert.equal(fs.readdirSync(root).filter(x => x.startsWith(".herdr-save-")).length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("5B denies writes outside root, through symlinks, and without a revision", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-edit-deny-"));
+  try {
+    const file = path.join(root, "text.txt");
+    const escaped = path.join(path.dirname(root), "outside-edit-"+
+      path.basename(root) + ".txt");
+    fs.writeFileSync(file, "original");
+    fs.writeFileSync(escaped, "outside");
+    fs.symlinkSync(escaped, path.join(root, "alias.txt"));
+    const h = harness(root);
+    const hash = require("node:crypto").createHash("sha256")
+      .update("original").digest("hex");
+    const requests = [
+      { id: "deny-1", path: escaped, expectedRevision: hash },
+      { id: "deny-2", path: path.join(root, "alias.txt"), expectedRevision: hash },
+      { id: "deny-3", path: file, expectedRevision: "" },
+      { id: "deny-4", path: file, expectedRevision: hash, content: "x".repeat(128 * 1024 + 1) },
+    ];
+    for (const request of requests) {
+      rpcInput(h, { type: "herdr_fs_write", root, path: request.path,
+        content: request.content ?? "bad", expectedRevision: request.expectedRevision,
+        id: request.id });
+      const reply = await fsReply(h, request.id);
+      assert.equal(reply.success, false, request.id);
+    }
+    assert.equal(fs.readFileSync(file, "utf8"), "original");
+    assert.equal(fs.readFileSync(escaped, "utf8"), "outside");
+    assert.equal(fs.readdirSync(root).filter(x => x.startsWith(".herdr-save-")).length, 0);
+    fs.unlinkSync(escaped);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("5B requires an existing regular file and rejects binary replacement", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-edit-types-"));
+  try {
+    const file = path.join(root, "binary.dat");
+    fs.writeFileSync(file, Buffer.from([0, 1, 2]));
+    const h = harness(root);
+    const hash = require("node:crypto").createHash("sha256")
+      .update(fs.readFileSync(file)).digest("hex");
+    rpcInput(h, { type: "herdr_fs_write", id: "types-1",
+      root, path: file, content: "text", expectedRevision: hash });
+    assert.equal((await fsReply(h, "types-1")).success, false);
+    rpcInput(h, { type: "herdr_fs_write", id: "types-2",
+      root, path: path.join(root, "missing.txt"),
+      content: "text", expectedRevision: hash });
+    assert.equal((await fsReply(h, "types-2")).success, false);
+    assert.deepEqual(fs.readFileSync(file), Buffer.from([0, 1, 2]));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
