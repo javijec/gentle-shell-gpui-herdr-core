@@ -44,10 +44,12 @@ It now supports a third private request:
   multiply hardlinked files cannot be written.
 - Only valid UTF-8 text of at most 128 KiB, with no NULs.
 - The old revision is mandatory. Different bytes mean a **conflict**, not an
-  overwrite. The editor keeps the draft on rejection.
+  overwrite. The editor keeps the draft on rejection. Writes from the same
+  bridge are serialized by canonical file path.
 - Bridge writes to a private O_EXCL temporary file beside the original,
-  flushes it, rechecks identity/metadata/content and renames it over the
-  destination. Temp files are deleted on failed writes.
+  copies its permission bits, flushes it, rechecks identity/metadata/content
+  and renames it over the destination. Temp files are deleted on failed writes.
+  Large payloads are sent on the background executor, not the GPUI thread.
 - Same-bridge writes to the same path are serialized. The check is
   optimistic concurrency, not an OS-level atomic compare-and-swap with
   unrelated processes: a tiny race with an uncooperative external editor is
@@ -63,9 +65,10 @@ It now supports a third private request:
 - **Save** is enabled only when the editor differs from the preview.
 - **Cancel** abandons the in-view draft.
 - Navigation or closing the Files dock while editing is refused until
-  **Save** or **Cancel**; switching agents or quitting GPUI is not yet
-  backed by a persistent draft store, so do not rely on preserving an
-  unsaved draft across those actions.
+  **Save** or **Cancel**. Switching agents or machines keeps the separate
+  editor drafts *in memory*; returning to the same session restores them.
+  Quitting GPUI is not backed by a persistent draft store, so save or copy
+  unsaved text before application exit.
 - On conflict, show the error and keep the unsaved editor content.
   Cancel and reload to view the newer remote file; automatic merging is
   deliberately not attempted.
