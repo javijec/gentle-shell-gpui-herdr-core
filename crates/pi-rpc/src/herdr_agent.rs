@@ -22,7 +22,7 @@ const MAX_JSONL: usize = 8 * 1024 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOTE_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const TRANSPORT_TIMEOUT: Duration = Duration::from_secs(12);
- type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
+type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
 
 /// Inline Node.js bridge is injected as argv via Herdr Core on JaviPi.
 /// This contains no host secrets and does not create remote files.
@@ -166,7 +166,6 @@ fn recoverable_addresses(records: &[Value], machine: &str) -> Vec<String> {
     agents.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     agents.dedup_by(|a, b| a.1 == b.1);
     agents.into_iter().map(|(_, address)| address).collect()
-}
 }
 
 /// Verify both directions of Herdr's PTY, not just the bridge's child-pipe
