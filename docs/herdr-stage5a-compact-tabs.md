@@ -31,17 +31,18 @@ tab treatment.
 - The native `local` backend displays This computer without making Herdr
   requests. Herdr snapshots are fetched on a background executor every 12 s
   while Herdr mode is enabled.
-- **Machines stays on the left**. **Files / Changes / Branches is a separate
-  dock on the right**, visible by default, with its own close button and
-  title-bar / Machines-footer toggles. Opening Files does not replace or
-  collapse the machine navigator. Ctrl+B collapses only Machines.
-- Files / Changes / Branches continues to operate on the **Windows workspace
-  root**, even when the selected agent runs on JaviPi. The right dock is
-  explicitly labeled `Local Windows files`, and when a remote agent is
-  selected, `Local Windows files · not remote`. It is not a remote browser.
-  Local file previews, edits, Git changes and branch actions stay local.
-  Inserting a local path into a remote agent's prompt is blocked with a
-  notification; inserting into a local agent still works.
+- **Machines stays on the left**. The **Files dock on the right** is
+  contextual, visible by default, and independent of the Machines panel.
+  Title-bar / Machines-footer buttons toggle only Files. Ctrl+B toggles
+  only Machines.
+- Selecting **This computer** shows the native Windows Files / Changes /
+  Branches tree, with local edits and Git operations preserved.
+- Selecting **javipi** (or another remote Herdr agent) replaces that view
+  with a dedicated **Remote Linux files · read-only** browser rooted in the
+  selected agent's Linux working directory. It supports directory navigation,
+  text previews and inserting Linux file paths in that agent's prompt.
+  Changes, Branches, edits, creates, renames and deletes are not offered
+  in the remote mode. Windows paths are never inserted into remote prompts.
 - The workspace chip and active pane title remain in the title bar, but
   **no tab bar** is rendered. Keyboard tab shortcuts still work.
 - Closing the final session leaves an empty workspace; it does not
@@ -49,22 +50,64 @@ tab treatment.
 
 ## Right-side Files dock
 
-The FileTreeView was audited: it reads directories, file previews,
-working-tree status, changes and branches through native filesystem and
-Git APIs in the **Windows GPUI process**. It is not backed by the
-selected remote Pi agent. To prevent misleading actions, the dock is
-labeled as local and never inserts a Windows path into a remote agent
-prompt.
+The right dock chooses its source based on the selected agent:
 
-The local tree retains all current file operations, including creating,
-renaming, previewing and moving files; none of these commands are sent
-to Herdr. Real remote file browsing and editing would require an
-independently verified, permission-aware remote filesystem transport;
-this phase does not add one or silently substitute local files.
+- **Local agent:** existing `FileTreeView` on the Windows project, with
+  native file operations and local Changes/Branches.
+- **Remote Herdr agent:** `RemoteFilesView` on that same agent's Pi RPC
+  transport and configured Linux `cwd`, with no local filesystem fallback.
 
-The Machines pane is independent on the left, and the local Files pane
-is on the right. Each panel has its own open/close action; they can be
-visible simultaneously.
+### Stage A remote filesystem transport
+
+The injected `herdr_remote_bridge.cjs` handles only two private
+**read-only commands**, `herdr_fs_list` and `herdr_fs_read`, before they
+reach Pi RPC. They use Node built-in `fs/promises`, with no extra Herdr
+terminal, SSH setup, npm install, changes to the Gentle Shell process or
+visible shell calls in the agent transcript.
+
+- Only absolute Linux paths inside the selected process's working directory
+  are allowed. Lexical traversal and symlinks escaping the root are rejected.
+- Each directory response contains at most 500 entries, sorted with folders
+  first. Symlinks may be displayed but cannot be opened by this view.
+- Text previews are read-only and limited to 128 KiB, with strict UTF-8 and
+  binary-file rejection. The UI renders at most 600 lines per preview.
+- The Insert Path action emits the full Linux path to the matching agent's
+  composer. A stale view from a different agent cannot insert into it.
+- After switching agents the view is rebound to the new process and root;
+  outstanding replies from an older view are not shown in the new panel.
+- A disconnected agent shows an error/refresh option, not local project
+  files. The explorer has no remote write/create/delete/Git API.
+- **Compatibility:** Existing live JaviPi agents keep their originally
+  injected Node bridge until restarted. They may lack these read-only fs
+  commands. In that case the browser displays an explanatory message; create
+  a **new agent** under the desired machine/directory to use the new
+  bridge. Do not silently kill or restart existing remote agents.
+
+The local tree's previous path-insertion safeguard remains: Windows project
+paths are never inserted into remote Linux prompts.
+
+### Stage A acceptance
+
+1. Select a new agent in `javipi` started at `/srv/workspaces/herdr-jec`:
+   right dock shows `Remote Files · javipi` and lists files actually
+   present under that Linux root, independently of the Windows project.
+2. Open folders, go up to the remote root, open a small UTF-8 source file
+   in the right-hand **read-only preview**, then use Insert Path and verify
+   the path entered the *current JaviPi agent* composer.
+3. Try a large/binary file, external symlink, and directory above the root:
+   no content should be read beyond the permitted root/size.
+4. Switch to a local agent: the Windows Files / Changes / Branches tree
+   reappears, including existing edit behavior and local Git actions.
+5. Switch between two remote agents with different CWDs; each gets its own
+   Linux root, never the other's content. No agent or terminal is created
+   just by selecting or refreshing Files.
+6. Test an older restored JaviPi session: if its injected bridge predates
+   the file protocol, show an unsupported-bridge message, not a Windows
+   tree and not a duplicated replacement process.
+7. Disconnect and reconnect JaviPi. Refresh the browser after the original
+   agent is ready. Confirm no mutating command and no duplicate terminal.
+8. Run `node --test crates/pi-rpc/tests/herdr_remote_bridge.test.cjs` along
+   with Cargo Clippy and Rust tests.
 
 ## Directories: local workspace vs remote agent
 
@@ -154,10 +197,11 @@ showing the GPUI source repository under a JaviPi agent.
   checkout. Only the verified remote branch is displayed. The branch
   is rechecked after reconnect and after regular Git refresh triggers.
   Stale responses are discarded by generation and remote session guard.
-- The **Files/Changes/Branches dock on the right** and the workspace
-  selector still refer to GPUI's Windows project. They do **not** browse
-  or change files on JaviPi and never represent remote Git. Only the
-  agent's own composer footer displays its actual remote Git branch.
+- The workspace selector still refers to GPUI's Windows project.
+  The **right file dock is contextual**: it shows Windows Files/Changes/
+  Branches for local agents, or Linux Files (read-only, no Changes/Branches)
+  when a remote agent is selected. The agent composer footer displays the
+  selected remote repository's actual Git branch independently.
 
 ### Composer footer regression tests
 
@@ -325,14 +369,12 @@ cargo run --locked -p gentle-shell-gpui
 6. Close the final agent: no replacement process is created.
 7. Test Ctrl+T, Ctrl+Shift+T, keyboard cycling, split panes, and
    toggling the left Machines panel with Ctrl+B.
-8. Confirm the right Files / Changes / Branches dock is visible separately
-   from Machines and explicitly labeled as Windows-local. Test its title-bar
-   toggle, right-panel close button and Machines-footer shortcut. Closing
-   either dock must not collapse the other. Check re-rooting when switching
-   Windows workspaces, local file preview, changes and branch actions.
-   Inserting a local file path into a local agent still works; when JaviPi is
-   selected, inserting that Windows-relative path must be blocked with a
-   clear warning and no change to the remote prompt.
+8. Confirm the contextual right dock is independent of Machines. For a
+   local agent it shows Windows Files/Changes/Branches and allows local edits.
+   For JaviPi it shows remote read-only Files under the selected Linux root,
+   with no remote Changes/Branches or write actions. Switching between both
+   must never mix local and remote paths or Git state. Test closing each dock
+   independently, root switching and inserting the correct paths.
 9. Restart GPUI; saved remote agents reattach exactly once and stay under the
    correct machine; no duplicate or replayed UI events.
 10. Run in native local backend; the navigator remains usable and does not
