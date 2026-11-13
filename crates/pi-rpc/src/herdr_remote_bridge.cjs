@@ -1,6 +1,7 @@
 // Remote Pi RPC bridge injected by GPUI into Node.js through Herdr's
-// terminal.run argv. No installation, disk writes, npm install or Rust
-// compilation is needed on JaviPi. Only Node's built-in modules are used.
+// terminal.run argv. No installation, npm install or Rust compilation
+// is needed on JaviPi. The opt-in herdr_fs_write command can atomically
+// replace an existing text file after checking its content revision.
 "use strict";
 
 const { spawn } = require("node:child_process");
@@ -122,14 +123,32 @@ agent.stderr.on("data", (chunk) => {
 });
 
 
-// Read-only, same-process remote filesystem RPC. These commands are
-// intercepted before Pi sees them: no visible bash/tool transcript, no
-// extra Herdr terminal, no SSH, and no filesystem writes.
+// Same-process remote filesystem RPC. These private commands are intercepted
+// before Pi sees them: no visible bash/tool transcript, extra Herdr terminal
+// or SSH. Writes require an explicit matching content revision.
 const fs = require("node:fs/promises");
+const { constants: fsConstants } = require("node:fs");
+const { createHash, randomBytes } = require("node:crypto");
 const path = require("node:path");
 const { TextDecoder } = require("node:util");
 const MAX_REMOTE_FILE = 128 * 1024;
 const MAX_REMOTE_ENTRIES = 500;
+const writeInFlight = new Set();
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function decodeText(bytes) {
+  if (bytes.length > MAX_REMOTE_FILE || bytes.includes(0)) {
+    throw new Error("Binary files and files over 128 KiB cannot be edited");
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
+
+function validRevision(revision) {
+  return typeof revision === "string" && /^[a-f0-9]{64}$/.test(revision);
+}
 
 function validLinuxPath(value) {
   return typeof value === "string" && value.length > 0 &&
@@ -168,6 +187,84 @@ async function safeRemotePath(root, candidate) {
   return candidate;
 }
 
+// A constrained, explicit compare-before-replace write for existing text
+// files only. The bridge serializes writes to the same path; other processes
+// may still edit the file, so it checks both hash and inode again immediately
+// before rename. No API can promise an OS-level atomic CAS against unrelated
+// editors without a cooperative lock. A detected conflict always rejects.
+async function remoteWrite(req) {
+  const selected = await safeRemotePath(req.root, req.path);
+  if (typeof req.content !== "string" || !validRevision(req.expectedRevision)) {
+    throw new Error("Write requires text and a matching SHA-256 revision");
+  }
+  const nextBytes = Buffer.from(req.content, "utf8");
+  if (nextBytes.toString("utf8") !== req.content ||
+      nextBytes.length > MAX_REMOTE_FILE || nextBytes.includes(0)) {
+    throw new Error("Only valid UTF-8 text up to 128 KiB can be saved");
+  }
+  if (writeInFlight.has(selected)) {
+    throw new Error("Another save is already running for this file");
+  }
+  writeInFlight.add(selected);
+  let temp = null;
+  try {
+    // O_NOFOLLOW prevents a replaced final symlink from being followed.
+    // O_NONBLOCK avoids waiting forever if the file becomes a FIFO.
+    const handle = await fs.open(selected,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    let stat;
+    let original;
+    try {
+      stat = await handle.stat();
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_REMOTE_FILE) {
+        throw new Error("Only existing regular, non-linked text files up to 128 KiB can be saved");
+      }
+      original = await handle.readFile();
+    } finally {
+      await handle.close();
+    }
+    decodeText(original);
+    if (sha256(original) !== req.expectedRevision) {
+      throw new Error("Conflict: the remote file changed since it was opened. Your draft was not saved");
+    }
+    // Place a private temporary file in the same directory for atomic rename
+    // on the same filesystem. Never create user-visible destination files.
+    const directory = path.posix.dirname(selected);
+    temp = path.posix.join(directory,
+      ".herdr-save-" + randomBytes(16).toString("hex") + ".tmp");
+    const output = await fs.open(temp,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT |
+      fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, stat.mode & 0o777);
+    try {
+      await output.writeFile(nextBytes);
+      await output.sync();
+    } finally {
+      await output.close();
+    }
+    // Revalidate after staging: file identity, bytes and the original root.
+    await safeRemotePath(req.root, selected);
+    const latest = await fs.lstat(selected);
+    if (!latest.isFile() || latest.isSymbolicLink() ||
+        latest.dev !== stat.dev || latest.ino !== stat.ino ||
+        latest.size !== stat.size || latest.mtimeMs !== stat.mtimeMs ||
+        latest.ctimeMs !== stat.ctimeMs) {
+      throw new Error("Conflict: file identity or metadata changed. Your draft was not saved");
+    }
+    const now = await fs.readFile(selected);
+    if (sha256(now) !== req.expectedRevision) {
+      throw new Error("Conflict: remote content changed during save. Your draft was not saved");
+    }
+    await fs.rename(temp, selected);
+    temp = null;
+    return { path: selected, size: nextBytes.length, revision: sha256(nextBytes) };
+  } finally {
+    if (temp) {
+      try { await fs.unlink(temp); } catch {}
+    }
+    writeInFlight.delete(selected);
+  }
+}
+
 async function remoteFilesRequest(req) {
   const command = req.type;
   const response = (success, data, error) => emit("O", JSON.stringify({
@@ -178,8 +275,12 @@ async function remoteFilesRequest(req) {
     if (typeof req.id !== "string" || req.id.length > 128) {
       throw new Error("Missing request identifier");
     }
-    if (!["herdr_fs_list", "herdr_fs_read"].includes(command)) {
+    if (!["herdr_fs_list", "herdr_fs_read", "herdr_fs_write"].includes(command)) {
       throw new Error("Unsupported filesystem operation");
+    }
+    if (command === "herdr_fs_write") {
+      response(true, await remoteWrite(req));
+      return;
     }
     const selected = await safeRemotePath(req.root, req.path);
     if (command === "herdr_fs_list") {
@@ -207,8 +308,11 @@ async function remoteFilesRequest(req) {
       if (bytes.length > MAX_REMOTE_FILE || bytes.includes(0)) {
         throw new Error("Binary files and files over 128 KiB cannot be previewed");
       }
-      const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      response(true, { path: selected, content, size: bytes.length });
+      const content = decodeText(bytes);
+      response(true, {
+        path: selected, content, size: bytes.length,
+        revision: sha256(bytes),
+      });
     }
   } catch (error) {
     response(false, null, error && error.message ? error.message : "Filesystem query failed");
@@ -248,7 +352,8 @@ function inputLine() {
         let request = null;
         try { request = JSON.parse(requestLine.toString("utf8")); } catch {}
         if (request && (request.type === "herdr_fs_list" ||
-                        request.type === "herdr_fs_read")) {
+                        request.type === "herdr_fs_read" ||
+                        request.type === "herdr_fs_write")) {
           void remoteFilesRequest(request);
         } else {
           agent.stdin.write(requestLine);
