@@ -1,6 +1,6 @@
 //! Switch the right-hand file dock with the selected agent's machine.
-//! Local FileTreeView is owned by the app integration; remote browsing is
-//! strictly read-only and uses the selected Herdr agent's own RPC channel.
+//! Local FileTreeView is owned by the app integration. Remote browsing and
+//! revision-checked editing use the selected Herdr agent's own RPC channel.
 
 use super::*;
 
@@ -34,17 +34,33 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let selected = self.selected_remote_files(cx);
+        if let Some((session, _, root)) = &selected {
+            if self.remote_files.as_ref().is_some_and(|view| {
+                view.read(cx).matches(session, root)
+            }) {
+                return;
+            }
+        }
+        // Retain unsaved editors, including an in-flight save. Dropping an
+        // Entity on machine switch would otherwise lose the user's draft.
+        if let Some(previous) = self.remote_files.take()
+            && previous.read(cx).has_draft()
+        {
+            self.remote_file_drafts.push(previous);
+        }
+        self._remote_files_events = None;
+        // A saved draft may finish while another agent is selected.
+        self.remote_file_drafts.retain(|view| view.read(cx).has_draft());
         let Some((session, machine, root)) = selected else {
-            self.remote_files = None;
-            self._remote_files_events = None;
             return;
         };
-        if self.remote_files.as_ref().is_some_and(|view| {
-            view.read(cx).matches(&session, &root)
-        }) {
-            return;
-        }
-        let view = cx.new(|cx| RemoteFilesView::new(session, machine, root, cx));
+        let view = if let Some(index) = self.remote_file_drafts.iter()
+            .position(|view| view.read(cx).matches(&session, &root))
+        {
+            self.remote_file_drafts.remove(index)
+        } else {
+            cx.new(|cx| RemoteFilesView::new(session, machine, root, cx))
+        };
         let sub = cx.subscribe_in(
             &view,
             window,
