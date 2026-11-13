@@ -139,7 +139,8 @@ function validLinuxPath(value) {
 }
 
 function within(root, candidate) {
-  return candidate === root || candidate.startsWith(root + "/");
+  return candidate === root || (root === "/"
+    ? candidate.startsWith("/") : candidate.startsWith(root + "/"));
 }
 
 async function safeRemotePath(root, candidate) {
