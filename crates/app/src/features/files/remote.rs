@@ -65,6 +65,7 @@ fn friendly_error(error: &str) -> String {
     let low = error.to_lowercase();
     if low.contains("unknown command") || low.contains("unsupported command")
         || low.contains("unrecognized command") || low.contains("unknown type")
+        || low.contains("unknown rpc") || low.contains("not implemented")
     {
         "This running agent has an older Herdr bridge. Open a new remote agent to enable read-only files; the existing agent is preserved.".into()
     } else {
