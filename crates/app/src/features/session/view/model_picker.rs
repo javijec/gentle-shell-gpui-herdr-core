@@ -303,7 +303,7 @@ impl SessionView {
                             .py_1()
                             .text_xs()
                             .text_color(ui::muted())
-                            .child(Icon::new(IconName::Server).xsmall())
+                            .child(Icon::new(IconName::Layers).xsmall())
                             .child(format!("Models from {model_machine}")),
                     )
                     .child(list)
