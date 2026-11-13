@@ -84,6 +84,42 @@ como un nuevo proceso local en Windows.
 La selección por máquina es global y solo afecta pestañas nuevas
 en esta etapa 4B. Un selector explícito por pestaña queda para 4C.
 
+## Recuperar los mismos agentes después de cerrar GPUI
+
+El archivo existente de espacios de trabajo de GPUI
+(`workspaces.json`) ahora guarda también la dirección Herdr de cada
+**agente**, además de la dirección de las terminales normales. No guarda
+claves de proveedores ni transfiere archivos de sesión entre máquinas.
+
+1. Creá uno o dos agentes remotos, esperá que carguen modelos y registrá
+   sus direcciones `javipi/tN` mediante `hc ls`.
+2. Cerrá **GPUI normalmente**. Herdr y los procesos Pi de JaviPi siguen vivos;
+   solo se desconectan los visores. No hace falta terminar sus turnos.
+3. Volvé a abrir GPUI. Las pestañas guardadas reusan exactamente las mismas
+   direcciones Herdr y el mismo token RPC, sin hacer otro `terminal.run`.
+   El programa valida un `get_state` completo y solicita `get_messages`
+   para recuperar el historial reciente.
+4. Confirmá con `hc ls` que las direcciones no cambiaron y que no apareció
+   una segunda copia del agente. Enviá otro mensaje al mismo agente.
+5. Cerrá **una pestaña** y comprobá que se termine solo esa terminal. Cerrar
+   una pestaña significa terminar el agente; cerrar GPUI significa desconectar
+   su vista.
+
+Para agentes remotos que quedaron vivos con las compilaciones **anteriores**
+de 4B (que no guardaban la dirección), mantené
+`GENTLE_SHELL_HERDR_AGENT_MACHINE=javipi` al abrir GPUI. Se consultan las
+terminales remotas vivas etiquetadas `gentle-shell=rpc-agent`, se verifica
+su protocolo y se abren pestañas recuperadas **sin iniciar otro proceso**.
+Solo se incorporan las que no tengan ya una pestaña con dirección guardada.
+Los paneles vacíos antiguos pueden seguir presentes hasta que los cierres.
+
+Si JaviPi está desconectada o la terminal guardada finalizó, se muestra un
+error en esa pestaña; **no se ejecuta otro agente en Windows ni se reemplaza
+silenciosamente el proceso**. La recuperación automática tras una pérdida
+de conexión prolongada durante la ejecución sigue siendo objetivo de 4D.
+
+
+
 ## Diagnóstico si Herdr no encuentra Node o Gentle Shell
 
 Desde una terminal Herdr conectada a JaviPi (o su terminal SSH existente),
@@ -178,6 +214,25 @@ El backend `local` ignora toda configuración remota y no utiliza Herdr.
 | 56 | Quitar selección remota en Herdr | Nuevas pestañas vuelven al agente 4A |
 | 57 | Elegir backend `local` con variables remotas | Sin procesos ni conexiones Herdr |
 | 58 | Inspeccionar entorno remoto | Ninguna credencial o ruta Windows transferida |
+
+## Pruebas de persistencia (4B-P)
+
+| Nº | Acción | Esperado |
+|----|--------|----------|
+| P1 | Abrir 2 agentes remotos y anotar `hc ls` | Dos direcciones distintas `javipi/tN` |
+| P2 | Salir normalmente de GPUI | Ambos agentes siguen en Herdr |
+| P3 | Volver a abrir GPUI | Dos pestañas enlazadas a las mismas direcciones, sin nuevas terminales |
+| P4 | Consultar el historial y enviar otro prompt | Mismos modelos y mensajes, respuesta RPC válida |
+| P5 | Cerrar una pestaña recuperada | Termina solo su agente; el otro sigue vivo |
+| P6 | Cerrar una pestaña recuperada antes de activarla | También termina el proceso elegido |
+| P7 | Reabrir con JaviPi desconectada | Error de conexión, ningún fallback local |
+| P8 | Recuperar agentes huérfanos de una compilación 4B vieja | Pestañas nuevas, sin duplicar procesos |
+| P9 | Cambiar a backend nativo `local` | Herdr no se contacta y las identidades remotas quedan guardadas |
+
+La recuperación tras reiniciar GPUI es deliberadamente distinta de 4D:
+el cliente que vuelve a abrir consulta Herdr y reatacha el terminal existente;
+no se ha implementado todavía el rebinding durable ante cada interrupción
+arbitraria de un flujo RPC en plena ejecución.
 
 ## Límites
 
