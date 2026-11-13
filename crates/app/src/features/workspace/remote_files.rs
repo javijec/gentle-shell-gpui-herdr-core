@@ -5,6 +5,64 @@
 use super::*;
 
 impl Workspace {
+    /// A selected Linux file opens beside its agent in the main workspace,
+    /// just like a local FileView preview. Files stays a directory browser.
+    pub(super) fn open_remote_file(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((session, machine, root)) = self.selected_remote_files(cx) else {
+            return;
+        };
+        // A path is never translated to Windows. This preliminary lexical
+        // check protects the UI; Herdr bridge also validates realpath/root.
+        if !path.starts_with('/') || path == root
+            || !(root == "/" || path.starts_with(&(root.clone() + "/")))
+            || path.split('/').any(|part| part == ".." || part == ".")
+        {
+            window.push_notification(Notification::info(
+                "Remote path is outside the selected agent's project.",
+            ), cx);
+            return;
+        }
+        let file = cx.new(|cx| RemoteFilesView::new_pane(
+            session.clone(), machine.clone(), root.clone(), path, window, cx,
+        ));
+        let title_view = file.clone();
+        let unsaved_view = file.clone();
+        let item = PaneItem {
+            kind: PaneKind::File,
+            view: file.clone().into(),
+            focus: file.focus_handle(cx),
+            title: Rc::new(move |cx: &App| title_view.read(cx).file_title()),
+            unsaved: Some(Rc::new(move |cx: &App| {
+                unsaved_view.read(cx).has_unsaved(cx)
+            })),
+            // File panes never own or shut down the connected Herdr agent.
+            terminal_address: None,
+        };
+        let id = self.alloc_id();
+        let mut pane = Pane {
+            item,
+            session: None,
+            linked_session: Some(session),
+            cwd: self.space().root.clone(),
+            path: None, // Not a Windows path; never restore as a local file.
+            session_file: None,
+            herdr_address: None,
+            agent_target: Some(pi_rpc::AgentTarget::Remote { machine, cwd: root }),
+            title: SharedString::default(),
+            running: false,
+            needs_you: false,
+            _subscriptions: Vec::new(),
+        };
+        pane.sync_chrome(cx);
+        self.panes.insert(id, pane);
+        self.place_preview(id, window, cx);
+    }
+
     /// Remote filesystem root is the agent's launch directory, never the
     /// locally saved Windows workspace root.
     fn selected_remote_files(&self, cx: &App) -> Option<(Entity<SessionView>, String, String)> {
@@ -59,7 +117,7 @@ impl Workspace {
         {
             self.remote_file_drafts.remove(index)
         } else {
-            cx.new(|cx| RemoteFilesView::new(session, machine, root, cx))
+            cx.new(|cx| RemoteFilesView::new(session, machine, root, window, cx))
         };
         let sub = cx.subscribe_in(
             &view,
@@ -67,6 +125,14 @@ impl Workspace {
             |this, source, event: &RemoteFilesEvent, window, cx| {
                 match event {
                     RemoteFilesEvent::Close => this.toggle_files_panel(cx),
+                    RemoteFilesEvent::OpenFile(path) => {
+                        if this.active_session().as_ref()
+                            != Some(source.read(cx).session())
+                        {
+                            return;
+                        }
+                        this.open_remote_file(path.clone(), window, cx);
+                    },
                     RemoteFilesEvent::InsertPath(path) => {
                         if this.active_session().as_ref()
                             != Some(source.read(cx).session())
