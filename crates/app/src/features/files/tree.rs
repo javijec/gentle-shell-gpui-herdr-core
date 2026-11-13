@@ -1420,8 +1420,8 @@ impl Render for FileTreeView {
             .child(
                 Self::header_button(
                     "file-tree-collapse",
-                    IconName::PanelLeftClose,
-                    "Hide sidebar",
+                    IconName::X,
+                    "Hide local Files panel on the right",
                 )
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(FileTreeEvent::Collapse))),
             );
