@@ -51,7 +51,9 @@ impl Workspace {
             let space = &mut self.spaces[index];
             space.active = active.min(space.tabs.len().saturating_sub(1));
         }
-        if fill && self.spaces[index].tabs.is_empty() {
+        if fill && self.spaces[index].tabs.is_empty()
+            && self.remote_agent_recovery.may_create_default_agent()
+        {
             let root = self.spaces[index].root.clone();
             self.open_tab(PaneKind::Agent, root, None, None, window, cx);
         }
