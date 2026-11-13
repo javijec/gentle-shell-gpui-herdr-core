@@ -654,33 +654,33 @@ impl RemoteFilesView {
             .pb_1p5()
             .gap_1()
             .child(
-                if files {
+                (if files {
                     Button::new("remote-tab-files").primary().small().label("Files")
                 } else {
                     Button::new("remote-tab-files").ghost().small().label("Files")
-                }
+                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.set_tab(RemoteTab::Files, cx)
                 })),
             )
             .child(
-                if changes {
+                (if changes {
                     Button::new("remote-tab-changes").primary().small()
                         .label(format!("Changes ({count})"))
                 } else {
                     Button::new("remote-tab-changes").ghost().small()
                         .label(format!("Changes ({count})"))
-                }
+                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.set_tab(RemoteTab::Changes, cx)
                 })),
             )
             .child(
-                if branches {
+                (if branches {
                     Button::new("remote-tab-branches").primary().small().label("Branches")
                 } else {
                     Button::new("remote-tab-branches").ghost().small().label("Branches")
-                }
+                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.set_tab(RemoteTab::Branches, cx)
                 })),
