@@ -16,10 +16,13 @@ impl Render for Workspace {
         {
             tab.focused = inside;
         }
-        let sidebar = self.sidebar.clone().filter(|_| {
-            self.sidebar_visible && self.files_sidebar_open
+        // The two docks are independent: Machines lives on the left, while
+        // the existing native FileTreeView always occupies the right.
+        let files = self.sidebar.clone().filter(|_| self.files_sidebar_open);
+        let navigator_visible = self.sidebar_visible;
+        let selected_remote = self.active_session().is_some_and(|session| {
+            session.read(cx).is_remote_herdr()
         });
-        let navigator_visible = self.sidebar_visible && !self.files_sidebar_open;
         let has_sidebar = true;
         // Below this the screen buttons fold into one overflow menu.
         let narrow = window.viewport_size().width < px(900.);
@@ -382,9 +385,9 @@ impl Render for Workspace {
                                                     IconName::Folder
                                                 }))
                                                 .tooltip(if self.files_sidebar_open {
-                                                    "Show machines and agents"
+                                                    "Hide local Windows Files (right)"
                                                 } else {
-                                                    "Show project files"
+                                                    "Show local Windows Files (right)"
                                                 })
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.toggle_sidebar_mode(cx)
@@ -399,7 +402,7 @@ impl Render for Workspace {
                                                 } else {
                                                     IconName::PanelLeftOpen
                                                 }))
-                                                .tooltip("Toggle sidebar (⌘B)")
+                                                .tooltip("Toggle Machines (Ctrl+B)")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.toggle_sidebar(cx)
                                                 })),
@@ -432,9 +435,18 @@ impl Render for Workspace {
                             ),
                         )
                     })
-                    .children(sidebar.map(|view| {
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(self.render_body(window, cx)),
+                    )
+                    .when(devices_docked, |row| row.child(self.devices.clone()))
+                    .children(files.map(|view| {
                         ui::appear(
-                            "sidebar-in",
+                            "files-right-in",
                             div()
                                 .w(px(SIDEBAR_WIDTH))
                                 .flex_none()
@@ -444,18 +456,52 @@ impl Render for Workspace {
                                 .border_1()
                                 .border_color(gpui_kit::transparent_black())
                                 .overflow_hidden()
-                                .child(view.cached(StyleRefinement::default().size_full())),
+                                .child(
+                                    v_flex()
+                                        .size_full()
+                                        .min_h_0()
+                                        .child(
+                                            h_flex()
+                                                .h(px(27.))
+                                                .flex_none()
+                                                .px_3()
+                                                .gap_2()
+                                                .border_b_1()
+                                                .border_color(ui::border())
+                                                .child(
+                                                    Icon::new(IconName::Monitor)
+                                                        .xsmall()
+                                                        .text_color(ui::muted()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .text_color(if selected_remote {
+                                                            ui::warning()
+                                                        } else {
+                                                            ui::muted()
+                                                        })
+                                                        .child(if selected_remote {
+                                                            "Local Windows files · not remote"
+                                                        } else {
+                                                            "Local Windows files"
+                                                        }),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_h_0()
+                                                .child(view.cached(
+                                                    StyleRefinement::default().size_full(),
+                                                )),
+                                        ),
+                                ),
                         )
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(self.render_body(window, cx)),
-                    )
-                    .when(devices_docked, |row| row.child(self.devices.clone())),
+                    })),
             )
             .children(self.stages.iter().filter_map(Stage::element))
             .when(devices_floating, |root| root.child(self.devices.clone()))
