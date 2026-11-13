@@ -376,7 +376,7 @@ impl Workspace {
                             })),
                     ),
             )
-            .when_some(self.machine_error.as_ref().filter(|_| herdr), |panel, error| {
+            .when_some(self.machine_error.clone().filter(|_| herdr), |panel, error| {
                 panel.child(
                     div()
                         .px_3()
