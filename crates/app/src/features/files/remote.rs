@@ -824,6 +824,9 @@ impl Focusable for RemoteFilesView {
 
 impl Render for RemoteFilesView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.pane_path.is_none() && self.tab != RemoteTab::Files {
+            return self.render_git_panel(cx).into_any_element();
+        }
         let parent = remote_parent(&self.root, &self.current);
         let central = self.pane_path.is_some();
         let mut content = v_flex().gap(px(1.));
@@ -1066,6 +1069,7 @@ impl Render for RemoteFilesView {
                             })),
                     )),
             )
+            .when(!central, |panel| panel.child(self.render_tabs(cx)))
             .when(!central, |panel| panel.child(
                 div().px_3().pb_2().text_xs().text_color(ui::muted())
                     .child(self.current.clone()),
@@ -1096,9 +1100,10 @@ impl Render for RemoteFilesView {
                     .child(if self.editor.is_some() {
                         "Editing · SHA-256 conflict protection · 128 KiB"
                     } else {
-                        "Preview first · Edit to modify · 128 KiB maximum"
+                        "Files · preview first · 128 KiB maximum"
                     }),
             )
+            .into_any_element()
     }
 }
 
