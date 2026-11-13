@@ -354,9 +354,9 @@ impl SessionView {
         }
     }
 
-    /// The read-only remote Files sidebar may request its own filesystem
-    /// commands only through the existing Herdr transport. There is never a
-    /// native Pi fallback or a newly spawned terminal for these reads.
+    /// Remote Files lists, previews and explicit revision-checked text saves
+    /// use only the existing Herdr transport. There is never a local
+    /// filesystem fallback or a newly spawned terminal for these operations.
     pub(crate) fn remote_fs_process(&self) -> Option<std::sync::Arc<pi_rpc::RpcProcess>> {
         if !self.is_remote_herdr() {
             return None;
