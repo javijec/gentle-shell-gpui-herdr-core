@@ -218,6 +218,18 @@ impl SessionView {
         true
     }
 
+    /// Explicit tab close is different from app quit: stop exactly this
+    /// agent, even if its restored tab was never activated this run.
+    pub fn shutdown_for_tab_close(&self) {
+        if matches!(self.backend.status, BackendStatus::Ready(_)) {
+            self.shutdown_backend();
+        } else if crate::features::terminal::herdr_enabled()
+            && let Some(address) = self.restored_herdr.clone()
+        {
+            HerdrAgentProcess::terminate_saved(address);
+        }
+    }
+
     /// On GPUI quit, detach live remote Herdr agents without killing them.
     /// Local/native agent shutdown remains unchanged; closing an individual
     /// tab still explicitly ends its agent via the normal Drop path.
