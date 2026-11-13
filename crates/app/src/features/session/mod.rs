@@ -351,6 +351,10 @@ impl SessionView {
         self.restored_herdr = Some(address);
     }
 
+    pub fn set_agent_target(&mut self, target: Option<pi_rpc::AgentTarget>) {
+        self.agent_target = target;
+    }
+
     pub fn model_choices(&self) -> Vec<(String, String, String, bool)> {
         self.models
             .available
