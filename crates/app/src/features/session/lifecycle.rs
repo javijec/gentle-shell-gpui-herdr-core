@@ -222,10 +222,13 @@ impl SessionView {
     /// Local/native agent shutdown remains unchanged; closing an individual
     /// tab still explicitly ends its agent via the normal Drop path.
     pub fn shutdown_for_app_quit(&self) -> bool {
-        match &self.backend.status {
-            BackendStatus::Ready(RpcProcess::Herdr(agent)) if agent.park_for_app_quit() => false,
-            _ => self.shutdown_backend(),
+        if let BackendStatus::Ready(process) = &self.backend.status
+            && let RpcProcess::Herdr(agent) = process.as_ref()
+            && agent.park_for_app_quit()
+        {
+            return false;
         }
+        self.shutdown_backend()
     }
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
