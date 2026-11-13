@@ -781,6 +781,25 @@ mod tests {
     }
 
     #[test]
+    fn a_repaint_with_partial_jsonl_can_consume_first_probe_but_not_retry() {
+        // Herdr sends a VT screen repaint before live PTY bytes on attach.
+        // The repaint can start halfway through an earlier JSONL record.
+        // Reusing the get_state id on a retry recovers the decoder safely.
+        let pending: Pending = Arc::new(Mutex::new(Default::default()));
+        let (reply_tx, reply_rx) = async_channel::bounded(1);
+        pending.lock().unwrap().insert("reconnect-probe".into(), reply_tx);
+        let (events, _) = async_channel::unbounded();
+        let mut parser = IncomingState::new("test".into());
+        parser.consume(&encode("test", 'O', b"unfinished-old-jsonl").concat(), &pending, &events);
+        let reply = b"{\"type\":\"response\",\"id\":\"reconnect-probe\",\"command\":\"get_state\",\"success\":true,\"data\":{}}\n";
+        let frames = encode("test", 'O', reply).concat();
+        parser.consume(&frames, &pending, &events);
+        assert!(reply_rx.try_recv().is_err());
+        parser.consume(&frames, &pending, &events);
+        assert!(reply_rx.try_recv().unwrap().success);
+    }
+
+    #[test]
     fn response_reassembly_correlates_request_ids() {
         let pending: Pending = Arc::new(Mutex::new(Default::default()));
         let (reply_tx, reply_rx) = async_channel::bounded(1);
