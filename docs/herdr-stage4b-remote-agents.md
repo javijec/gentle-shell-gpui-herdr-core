@@ -134,6 +134,26 @@ error en esa pestaña; **no se ejecuta otro agente en Windows ni se reemplaza
 silenciosamente el proceso**. La recuperación automática tras una pérdida
 de conexión prolongada durante la ejecución sigue siendo objetivo de 4D.
 
+**Sincronización al reconectar:** la primera salida recibida al adjuntarse a
+una terminal Herdr antigua puede ser una *representación de pantalla* en vez
+de un registro JSONL completo. Si eso interfiere con la primera respuesta,
+GPUI vuelve a enviar únicamente `get_state` con el mismo ID de correlación,
+cada 4 segundos, durante un máximo de 45 segundos. No se crea un proceso
+nuevo y, si el tiempo se agota, **no se mata el agente existente**: la pestaña
+muestra un error y puede investigarse su terminal con `hc ls`.
+
+Para verificar que la reconexión no crea duplicados:
+
+```powershell
+hc ls
+# Abrí GPUI, sin pulsar New agent tab; repetí:
+hc ls
+```
+
+Las direcciones `javipi/tN` deben conservarse. Comprobá que aparecen los
+mensajes previos y que el agente acepta otro prompt. Si falla, conservá la
+dirección del agente para diagnosticarlo, sin ejecutar `hc kill`.
+
 
 
 ## Diagnóstico si Herdr no encuentra Node o Gentle Shell
