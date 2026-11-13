@@ -331,7 +331,7 @@ impl SessionView {
 
     /// True only when this viewer points at a Herdr agent on another
     /// computer. A saved remote target does not make native mode remote.
-    pub(super) fn is_remote_herdr(&self) -> bool {
+    pub(crate) fn is_remote_herdr(&self) -> bool {
         if !crate::features::terminal::herdr_enabled() {
             return false;
         }
