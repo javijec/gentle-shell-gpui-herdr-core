@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
+use herdr_client::HerdrClient;
 use herdr_client::terminal::{TerminalEvent, TerminalSession};
 use serde_json::{Value, json};
 
@@ -95,6 +96,71 @@ impl RemoteTarget {
         let node = read("GENTLE_SHELL_HERDR_REMOTE_NODE")?;
         validate_remote_target(machine.as_deref(), cwd.as_deref(), node.as_deref())
     }
+}
+
+/// Recover only live terminals started with our validated bridge protocol.
+/// The token is available in Herdr's original argv, so workspaces persist only
+/// the stable address, not a secret or a copy of 5 KiB of JavaScript.
+fn token_for_terminal(value: &Value, address: &str) -> Result<String> {
+    anyhow::ensure!(
+        !address.is_empty() && address.len() <= 256
+            && address.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/')),
+        "Invalid Herdr terminal address"
+    );
+    anyhow::ensure!(value["address"] == address, "Herdr returned another terminal address");
+    anyhow::ensure!(value["state"] == "live", "Herdr RPC agent is no longer running");
+    anyhow::ensure!(value["labels"]["gentle-shell"] == "rpc-agent",
+        "Terminal is not a Gentle Shell RPC agent");
+    let argv = value["argv"].as_array().ok_or_else(|| anyhow!("Herdr terminal has no argv"))?;
+    let token = if argv.len() == 4
+        && argv[1] == "--eval"
+        && argv[2].as_str().is_some_and(|code|
+            code.contains("GS4A1|") && code.contains("gs4a-startup"))
+    {
+        argv[3].as_str()
+    } else if argv.len() >= 3 && argv[1] == "--herdr-agent-bridge" {
+        argv[2].as_str()
+    } else {
+        None
+    }.ok_or_else(|| anyhow!("Terminal does not use the compatible GPUI Pi RPC bridge"))?;
+    anyhow::ensure!(super::herdr_wire::valid_token(token),
+        "Herdr agent has an invalid RPC token");
+    Ok(token.to_owned())
+}
+
+fn core_client() -> Result<HerdrClient> {
+    let executable = std::env::var_os("GENTLE_SHELL_HERDR_HC")
+        .filter(|path| !path.is_empty()).unwrap_or_else(|| "hc".into());
+    HerdrClient::connect_with_executable(executable).map_err(Into::into)
+}
+
+fn inspect_existing(address: &str) -> Result<String> {
+    let mut client = core_client()?;
+    let record = client.call("terminal.get", json!({"terminal": address}))?;
+    token_for_terminal(&record, address)
+}
+
+/// Discover remote agents from older 4B runs whose addresses were not yet
+/// stored in workspaces.json. No terminal is started, attached or killed.
+/// The GUI can offer each untracked agent as a recovered tab.
+pub fn discover_live_remote_agents() -> Result<Vec<String>> {
+    let Some(target) = RemoteTarget::from_env()? else {
+        return Ok(Vec::new());
+    };
+    let mut client = core_client()?;
+    let list = client.list_terminals()?;
+    let mut agents: Vec<(u64, String)> = list.terminals.iter().filter_map(|record| {
+        let address = record["address"].as_str()?;
+        if !address.starts_with(&format!("{}/", target.machine)) {
+            return None;
+        }
+        token_for_terminal(record, address).ok()?;
+        let created = record["created_ms"].as_u64().unwrap_or_default();
+        Some((created, address.to_string()))
+    }).collect();
+    agents.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    agents.dedup_by(|a, b| a.1 == b.1);
+    Ok(agents.into_iter().map(|(_, address)| address).collect())
 }
 
 /// Verify both directions of Herdr's PTY, not just the bridge's child-pipe
@@ -261,11 +327,17 @@ impl HerdrAgentProcess {
     pub fn spawn(
         cwd: PathBuf,
         resume: Option<&Path>,
+        existing: Option<&str>,
     ) -> Result<(Arc<Self>, async_channel::Receiver<Incoming>)> {
-        let remote = RemoteTarget::from_env()?;
+        // Inspect the existing terminal before attaching: a stale or foreign
+        // address must fail closed instead of launching another Pi agent.
+        let existing_token = existing.map(inspect_existing).transpose()?;
+        let remote = if existing.is_some() { None } else { RemoteTarget::from_env()? };
         let ticks = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let token = format!("p{}{:x}", std::process::id(), ticks);
-        let (target_cwd, argv, on) = if let Some(remote) = remote {
+        let token = existing_token.unwrap_or_else(|| format!("p{}{:x}", std::process::id(), ticks));
+        let (target_cwd, argv, on) = if existing.is_some() {
+            (cwd.clone(), Vec::new(), None)
+        } else if let Some(remote) = remote {
             // Windows-local session files cannot be resumed on Linux: fail
             // closed instead of leaking the Windows path onto JaviPi.
             anyhow::ensure!(resume.is_none(),
@@ -294,7 +366,8 @@ impl HerdrAgentProcess {
             }
             (cwd, argv, None)
         };
-        let remote_start = on.is_some();
+        let reattaching = existing.is_some();
+        let remote_start = on.is_some() || existing.is_some_and(|address| address.contains('/'));
         let (events, rx) = async_channel::unbounded();
         let (started_tx, started_rx) = mpsc::sync_channel::<Result<()>>(1);
         let started_tx = Arc::new(Mutex::new(Some(started_tx)));
@@ -305,7 +378,8 @@ impl HerdrAgentProcess {
         let incoming = Arc::new(Mutex::new(IncomingState::new(token.clone())));
         let session_ref: SessionReference = Arc::new(Mutex::new(None));
 
-        let session = Arc::new(TerminalSession::spawn_program_at(target_cwd, argv, on, 240, 80, {
+        let session = Arc::new(TerminalSession::spawn_program_at(
+            target_cwd, argv, on, existing.map(str::to_owned), 240, 80, {
             let address = address.clone();
             let pending = pending.clone();
             let ready = ready.clone();
@@ -315,7 +389,17 @@ impl HerdrAgentProcess {
                 TerminalEvent::Assigned(value) => {
                     *address.lock().unwrap() = Some(value);
                 }
-                TerminalEvent::Attached { .. } => {}
+                TerminalEvent::Attached { .. } => {
+                    // A running bridge emitted READY before GPUI was closed.
+                    // After reattaching, validate by get_state round trip;
+                    // expecting another READY would hang forever.
+                    if reattaching {
+                        ready.store(true, Ordering::Release);
+                        if let Some(tx) = started_tx.lock().unwrap().take() {
+                            let _ = tx.send(Ok(()));
+                        }
+                    }
+                }
                 TerminalEvent::Output { generation, bytes } => {
                     if let Some(session) = session_ref.lock().unwrap().as_ref().and_then(Weak::upgrade) {
                         session.consumed(generation, bytes.len());
@@ -397,8 +481,12 @@ impl HerdrAgentProcess {
             &session, &token, &pending, &ready,
         ));
         if let Err(error) = verified {
-            if let Some(address) = address.lock().unwrap().clone() {
-                stop_owned_terminal(address);
+            // Never kill an *existing* agent just because this viewer failed
+            // to reconnect; the owner can retry later.
+            if !reattaching {
+                if let Some(address) = address.lock().unwrap().clone() {
+                    stop_owned_terminal(address);
+                }
             }
             return Err(error);
         }
@@ -476,7 +564,26 @@ impl HerdrAgentProcess {
         self.write(&value)
     }
 
-    /// 4A stops its owned Herdr process on close; persistent restart is 4D.
+    /// Stable address stored in the workspace for process-preserving restart.
+    pub fn address(&self) -> Option<String> {
+        self.address.lock().unwrap().clone()
+    }
+
+    /// On app quit keep remote agents alive; dropping TerminalSession detaches
+    /// its viewer, and setting stopping prevents Drop from issuing terminal.kill.
+    /// Explicit tab close still uses shutdown and kills its owned terminal.
+    pub fn park_for_app_quit(&self) -> bool {
+        if self.address().as_deref().is_some_and(|address| address.contains('/')) {
+            self.stopping.store(true, Ordering::Release);
+            self.ready.store(false, Ordering::Release);
+            self.pending.lock().unwrap().clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Explicit close/restart terminates the managed agent, never Herdr Core.
     pub fn shutdown(&self, _grace: Duration) {
         if self.stopping.swap(true, Ordering::AcqRel) {
             return;
