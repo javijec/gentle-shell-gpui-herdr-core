@@ -106,11 +106,21 @@ impl Workspace {
         cwd: PathBuf,
         prompt: Option<String>,
         resume: Option<PathBuf>,
+        restored_herdr: Option<String>,
         start_now: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PaneId {
-        let session = cx.new(|cx| SessionView::new(cwd.clone(), prompt, window, cx, start_now));
+        let session = cx.new(|cx| {
+            let mut session = SessionView::new(cwd.clone(), prompt, window, cx, false);
+            if let Some(address) = restored_herdr.clone() {
+                session.restore_herdr_terminal(address);
+            }
+            session
+        });
+        if start_now {
+            session.update(cx, |s, cx| s.ensure_started(window, cx));
+        }
         if let Some(path) = resume.clone() {
             session.update(cx, |s, cx| s.resume_when_ready(path, cx));
         }
@@ -185,13 +195,16 @@ impl Workspace {
                 focus,
                 title,
                 unsaved: None,
-                terminal_address: None,
+                terminal_address: Some({
+                    let session = session.clone();
+                    Rc::new(move |cx: &App| session.read(cx).herdr_terminal())
+                }),
             },
             session: Some(session),
             cwd,
             path: None,
             session_file: resume,
-            herdr_address: None,
+            herdr_address: restored_herdr,
             title: SharedString::default(),
             running: false,
             _subscriptions: subscriptions,
@@ -289,7 +302,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<PaneId> {
         match kind {
-            PaneKind::Agent => Some(self.new_agent_pane(target, prompt, resume, true, window, cx)),
+            PaneKind::Agent => Some(self.new_agent_pane(target, prompt, resume, None, true, window, cx)),
             PaneKind::Terminal | PaneKind::File => self.new_factory_pane(kind, target, window, cx),
         }
     }
@@ -311,7 +324,9 @@ impl Workspace {
             PaneKind::Agent => {
                 let resume = saved.session.clone().filter(|p| p.exists());
                 // Started once its tab is shown (see `start_shown`).
-                Some(self.new_agent_pane(cwd, None, resume, false, window, cx))
+                Some(self.new_agent_pane(
+                    cwd, None, resume, saved.herdr_terminal.clone(), false, window, cx,
+                ))
             }
             PaneKind::Terminal => {
                 PaneFactories::get(cx).terminal.as_ref()?;
