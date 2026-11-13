@@ -582,8 +582,14 @@ impl HerdrAgentProcess {
         let _ = std::thread::Builder::new()
             .name("herdr-agent-close-saved".into())
             .spawn(move || {
-                if inspect_existing(&address).is_ok() {
-                    stop_owned_terminal(address);
+                // Authenticate the exact terminal first, then kill it through
+                // the same Herdr connection. Avoid chained detached threads.
+                let Ok(mut client) = core_client() else { return };
+                let Ok(record) = client.call("terminal.get", json!({"terminal": address})) else {
+                    return;
+                };
+                if token_for_terminal(&record, &address).is_ok() {
+                    let _ = client.call("terminal.kill", json!({"terminal": address}));
                 }
             });
     }
