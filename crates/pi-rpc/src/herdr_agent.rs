@@ -30,7 +30,39 @@ type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
 /// This contains no host secrets and does not create remote files.
 const REMOTE_BRIDGE_JS: &str = include_str!("herdr_remote_bridge.cjs");
 
-/// Stage 4B opt-in machine selection until the per-tab UI is added in 4C.
+/// Per-agent execution location. This is stored in GPUI's workspace JSON,
+/// not as a process-global environment variable. Reattached addresses take
+/// precedence, so selecting a machine cannot migrate a running agent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentTarget {
+    /// An agent managed by Herdr Core on the same Windows computer.
+    Local,
+    /// An agent managed by Herdr on a named Linux computer.
+    Remote { machine: String, cwd: String },
+}
+
+impl AgentTarget {
+    pub fn machine_label(&self) -> &str {
+        match self {
+            Self::Local => "This computer",
+            Self::Remote { machine, .. } => machine,
+        }
+    }
+
+    pub fn remote_for_machine(machine: String) -> Self {
+        // 4B's established workspace on JaviPi is retained. Unknown remote
+        // machines start at / rather than inheriting a Windows cwd.
+        let cwd = if machine.eq_ignore_ascii_case("javipi") {
+            "/srv/workspaces/JaviPi"
+        } else {
+            "/"
+        };
+        Self::Remote { machine, cwd: cwd.to_owned() }
+    }
+}
+
+/// Legacy 4B global selection is supported for already-existing workflows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoteTarget {
     machine: String,
@@ -84,6 +116,31 @@ fn validate_remote_target(
 }
 
 impl RemoteTarget {
+    fn from_agent_target(target: Option<&AgentTarget>) -> Result<Option<Self>> {
+        match target {
+            Some(AgentTarget::Local) => Ok(None),
+            Some(AgentTarget::Remote { machine, cwd }) => {
+                let node = std::env::var("GENTLE_SHELL_HERDR_REMOTE_NODE")
+                    .map_err(|err| match err {
+                        std::env::VarError::NotPresent => anyhow!(""),
+                        _ => anyhow!("GENTLE_SHELL_HERDR_REMOTE_NODE must contain UTF-8"),
+                    });
+                // Absent env is normal. Invalid unicode remains an error.
+                let node = match node {
+                    Ok(value) => Some(value),
+                    Err(error) if error.to_string().is_empty() => None,
+                    Err(error) => return Err(error),
+                };
+                validate_remote_target(
+                    Some(machine),
+                    Some(cwd),
+                    node.as_deref(),
+                )
+            }
+            None => Self::from_env(),
+        }
+    }
+
     fn from_env() -> Result<Option<Self>> {
         let read = |key: &str| -> Result<Option<String>> {
             match std::env::var(key) {
@@ -367,11 +424,16 @@ impl HerdrAgentProcess {
         cwd: PathBuf,
         resume: Option<&Path>,
         existing: Option<&str>,
+        target: Option<&AgentTarget>,
     ) -> Result<(Arc<Self>, async_channel::Receiver<Incoming>)> {
         // Inspect the existing terminal before attaching: a stale or foreign
         // address must fail closed instead of launching another Pi agent.
         let existing_token = existing.map(inspect_existing).transpose()?;
-        let remote = if existing.is_some() { None } else { RemoteTarget::from_env()? };
+        let remote = if existing.is_some() {
+            None
+        } else {
+            RemoteTarget::from_agent_target(target)?
+        };
         let ticks = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let token = existing_token.unwrap_or_else(|| format!("p{}{:x}", std::process::id(), ticks));
         // A reattached Pi may still answer old requests from a previous GPUI.
