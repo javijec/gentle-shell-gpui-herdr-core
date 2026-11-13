@@ -115,6 +115,8 @@ pub struct SessionView {
     session_file: Option<PathBuf>,
     /// Exact Herdr address of a previously running agent, awaiting reattach.
     restored_herdr: Option<String>,
+    /// Machine chosen for this agent. Existing addresses always win.
+    agent_target: Option<pi_rpc::AgentTarget>,
     title: Option<String>,
     active_shell: Option<usize>,
     banner: crate::shared::banner::BannerConfig,
