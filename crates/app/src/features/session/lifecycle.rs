@@ -285,6 +285,7 @@ impl SessionView {
                         // its Herdr-managed terminal, never in this GUI.
                         let (backend, rx) = HerdrAgentProcess::spawn(
                             cwd, resume.as_deref(), restore_herdr.as_deref(),
+                            agent_target.as_ref(),
                         )?;
                         anyhow::Ok((Arc::new(RpcProcess::Herdr(backend)), rx, None))
                     } else {
