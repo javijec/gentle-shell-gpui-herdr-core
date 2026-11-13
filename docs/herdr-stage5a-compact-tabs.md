@@ -149,6 +149,56 @@ showing the GPUI source repository under a JaviPi agent.
 6. Restore a legacy 4B address with no saved target: the footer must say
    `remote cwd unknown`, never show Windows as its execution folder.
 
+## Local stale addresses and remote startup latency
+
+A GPUI exit intentionally stops local Herdr RPC agents, whereas JaviPi
+agents may remain alive. An older `tN` local terminal may still be saved
+in the workspace after it has exited. On restore:
+
+- A confirmed **exited, GPUI-owned local** terminal is not reattached.
+  A new local Pi runtime is started, using the existing local session
+  path where available.
+- An existing **live local** terminal is reattached as before.
+- An unreachable, stopped, malformed or foreign **remote** terminal
+  must **not** auto-launch a replacement. Its `javipi/tN` identity
+  remains authoritative for recovery or explicit user action.
+- An unknown/failed Herdr inspection fails closed rather than silently
+  launching a process. Closing a tab remains an explicit termination.
+
+Remote initialization has several distinct costs: inspection via
+`terminal.get`, bridge `terminal.attach`/READY, and the final read-only
+`get_state` probe through the PTY. During reattach, the first bytes may
+be a screen repaint rather than a valid Pi stream. 5A initially retries
+the idempotent probe after 1.2 seconds (then backs off to 4 seconds);
+it **never** resends user messages or uses another `terminal.run`.
+The safety deadlines of 90s for remote cold start, 60s for Pi4 bridge
+startup, and 45s for reattach transport are unchanged.
+
+When a remote connect takes 2+ seconds, the Windows launch terminal now
+prints a diagnostic line of the form:
+
+```text
+gentle-shell-gpui: Herdr remote startup reattach=true inspect=...ms attach_or_ready=...ms rpc_probe=...ms
+```
+
+This differentiates a slow Pi/Herdr attach from a delayed PTY probe,
+without printing credentials or protocol tokens. If delays persist,
+collect these timings before adjusting the safe startup ceilings.
+
+### Local/remote startup acceptance
+
+1. Restart GPUI after local agent exit: selecting the saved local
+   conversation launches a fresh local process, not an attach to a dead
+   `tN`. No `Herdr RPC agent is no longer running` failure.
+2. Simulate a stopped saved JaviPi agent: it must **not** automatically
+   create a new `javipi/tN`.
+3. Restore an existing live JaviPi agent; it retains exactly the same
+   Herdr address with no duplicate instance.
+4. Inspect the startup-timing line for each slow JaviPi connection and
+   identify whether inspection, READY, or get_state takes the time.
+5. Confirm reconnection after a long outage still works: no replayed
+   mutating commands, no stale viewer events or duplicate terminals.
+
 ## Scope
 
 This is a presentation/navigation change. The internal `Tab` / `Pane`
