@@ -33,7 +33,8 @@ impl Workspace {
                 && self
                     .panes
                     .get(id)
-                    .is_some_and(|p| p.item.kind == PaneKind::File)
+                    .is_some_and(|p| p.item.kind == PaneKind::File
+                        && !p.item.unsaved.as_ref().is_some_and(|probe| probe(cx)))
         });
         if let Some(old) = preview
             && let Some(pane) = self.panes.remove(&new)
@@ -230,6 +231,7 @@ impl Workspace {
                 }),
             },
             session: Some(session),
+            linked_session: None,
             cwd,
             path: None,
             session_file: resume,
@@ -310,6 +312,7 @@ impl Workspace {
         let mut pane = Pane {
             item,
             session: None,
+            linked_session: None,
             cwd,
             path,
             session_file: None,
