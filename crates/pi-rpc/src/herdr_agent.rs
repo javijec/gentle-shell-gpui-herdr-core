@@ -201,21 +201,23 @@ impl HerdrAgentProcess {
     /// stored in workspaces.json. No terminal is started, attached or killed.
     /// The GUI can offer each untracked agent as a recovered tab.
     pub fn discover_live_remote_agents() -> Result<Vec<String>> {
-        let Some(target) = RemoteTarget::from_env()? else {
-            return Ok(Vec::new());
-        };
         let mut client = core_client()?;
         let list = client.list_terminals()?;
-        Ok(recoverable_addresses(&list.terminals, &target.machine))
+        // 4C recovers *all* registered remote machines, not only the legacy
+        // GENTLE_SHELL_HERDR_AGENT_MACHINE environment selection.
+        Ok(recoverable_addresses(&list.terminals, None))
     }
 }
 
 /// Pure discovery filter: never recover foreign terminals, dead processes or
 /// agents owned by a different machine. Stable order is their creation time.
-fn recoverable_addresses(records: &[Value], machine: &str) -> Vec<String> {
+fn recoverable_addresses(records: &[Value], machine: Option<&str>) -> Vec<String> {
     let mut agents: Vec<(u64, String)> = records.iter().filter_map(|record| {
         let address = record["address"].as_str()?;
-        if address.split_once('/').map(|(prefix, _)| prefix) != Some(machine) {
+        // A remote terminal has a qualified address; local terminals must
+        // never be treated as remote RPC agents.
+        let (prefix, _) = address.split_once('/')?;
+        if machine.is_some_and(|requested| prefix != requested) {
             return None;
         }
         token_for_terminal(record, address).ok()?;
@@ -801,8 +803,12 @@ mod tests {
             json!({"address":"javipi/t2","state":"live","labels":{"gentle-shell":"other"}}),
         ];
         assert_eq!(
-            recoverable_addresses(&candidates, "javipi"),
+            recoverable_addresses(&candidates, Some("javipi")),
             vec!["javipi/t1", "javipi/t5", "javipi/t33"]
+        );
+        assert_eq!(
+            recoverable_addresses(&candidates, None),
+            vec!["other/t4", "javipi/t1", "javipi/t5", "javipi/t33"]
         );
     }
 
