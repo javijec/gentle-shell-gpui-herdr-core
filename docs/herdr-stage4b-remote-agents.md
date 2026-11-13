@@ -52,6 +52,7 @@ git merge --ff-only FETCH_HEAD
 
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+node --test crates/pi-rpc/tests/herdr_remote_bridge.test.cjs
 
 hc machine ls
 ```
