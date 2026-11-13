@@ -1115,18 +1115,18 @@ mod tests {
             &pending, &events, true,
         );
         parser.reset_stream("test");
-        let replay = b"{\"type\":\"message_update\",\"value\":\"OLD\"}\\n";
+        let replay = b"{\"type\":\"message_update\",\"value\":\"OLD\"}\n";
         // The 4D viewer reattach starts with a screen repaint. Its old
         // events must not be emitted twice to the transcript.
         parser.consume(&encode("test", 'O', replay).concat(), &pending, &events, false);
         assert!(rx.try_recv().is_err());
 
-        let response = b"{\"type\":\"response\",\"id\":\"reconnect-probe\",\"command\":\"get_state\",\"success\":true,\"data\":{}}\\n";
+        let response = b"{\"type\":\"response\",\"id\":\"reconnect-probe\",\"command\":\"get_state\",\"success\":true,\"data\":{}}\n";
         parser.consume(&encode("test", 'O', response).concat(), &pending, &events, false);
         assert!(probe_rx.try_recv().unwrap().success);
         assert!(rx.try_recv().is_err());
 
-        let live = b"{\"type\":\"message_update\",\"value\":\"LIVE\"}\\n";
+        let live = b"{\"type\":\"message_update\",\"value\":\"LIVE\"}\n";
         parser.consume(&encode("test", 'O', live).concat(), &pending, &events, true);
         match rx.try_recv().unwrap() {
             Incoming::Event(event) => assert_eq!(event["value"], "LIVE"),
