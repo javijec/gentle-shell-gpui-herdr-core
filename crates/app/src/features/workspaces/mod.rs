@@ -32,6 +32,9 @@ pub struct SavedPane {
     /// Persistent Herdr terminal address: local tN or remote machine/tN.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub herdr_terminal: Option<String>,
+    /// Per-agent machine selection. None preserves legacy 4B environment behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_target: Option<pi_rpc::AgentTarget>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
