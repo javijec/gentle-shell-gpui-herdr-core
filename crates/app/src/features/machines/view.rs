@@ -119,6 +119,20 @@ impl MachinesView {
             )
             .child(ui::chip(state.to_string(), state_color).flex_shrink_0())
             .child(div().flex_1())
+            .when(connected, |bar| {
+                let machine_for_agent = action.clone();
+                bar.child(
+                    Button::new(("machines-new-agent", index))
+                        .small()
+                        .ghost()
+                        .icon(Icon::new(IconName::Bot))
+                        .label("New agent")
+                        .loading(self.busy)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.new_agent(machine_for_agent.clone(), cx)
+                        })),
+                )
+            })
             .child(
                 if connected {
                     Button::new(("machines-new-shell", index))
