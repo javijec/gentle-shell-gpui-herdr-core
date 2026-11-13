@@ -116,8 +116,11 @@ enum Overlay {
 
 struct Pane {
     item: PaneItem,
-    /// Set for agent panes.
+    /// Set for agent panes. Closing such a pane can shut down its agent.
     session: Option<Entity<SessionView>>,
+    /// A remote file pane only borrows the owning agent; closing the file
+    /// must never terminate that remote session.
+    linked_session: Option<Entity<SessionView>>,
     /// Folder of a terminal; parent folder of a file.
     cwd: PathBuf,
     /// The file a file pane shows.
@@ -736,6 +739,7 @@ impl Workspace {
         let mut pane = Pane {
             item,
             session: None,
+            linked_session: None,
             cwd,
             path: Some(path),
             session_file: None,
