@@ -60,6 +60,17 @@ impl AgentTarget {
         };
         Self::Remote { machine, cwd: cwd.to_owned() }
     }
+
+    /// Create a remote target from a user-selected Linux directory.
+    /// Validate before opening a pane so bad Windows/traversal paths never
+    /// create even a provisional remote agent.
+    pub fn remote_with_cwd(machine: String, cwd: String) -> Result<Self> {
+        let cwd = cwd.trim();
+        anyhow::ensure!(!cwd.is_empty() && cwd.len() <= 2048,
+            "Remote directory must be 1–2048 characters");
+        validate_remote_target(Some(&machine), Some(cwd), None)?;
+        Ok(Self::Remote { machine, cwd: cwd.to_owned() })
+    }
 }
 
 /// Legacy 4B global selection is supported for already-existing workflows.
@@ -948,6 +959,32 @@ mod tests {
         // Once a machine is set, malformed settings still fail closed.
         assert!(select_legacy_remote_target(Some("javipi"), Some(r"C:\\bad"), None).is_err());
         assert!(select_legacy_remote_target(Some(""), None, None).is_err());
+    }
+
+    #[test]
+    fn custom_remote_working_directory_requires_valid_linux_path() {
+        assert_eq!(
+            AgentTarget::remote_with_cwd(
+                "javipi".into(), " /srv/workspaces/PoeTradePlus2 ".into()
+            ).unwrap(),
+            AgentTarget::Remote {
+                machine: "javipi".into(),
+                cwd: "/srv/workspaces/PoeTradePlus2".into(),
+            },
+        );
+        for path in ["", "relative/project", r"C:\\Programacion\\project",
+                     "/srv/../private", "/srv/./project", "/tmp/with\\backslash",
+                     "/tmp/with\\nline"] {
+            assert!(AgentTarget::remote_with_cwd("javipi".into(), path.into()).is_err(),
+                "accepted {path:?}");
+        }
+        assert!(AgentTarget::remote_with_cwd("bad/name".into(), "/srv".into()).is_err());
+        assert_eq!(
+            AgentTarget::remote_with_cwd("buildbox".into(), "/".into()).unwrap(),
+            AgentTarget::Remote {
+                machine: "buildbox".into(), cwd: "/".into()
+            }
+        );
     }
 
     #[test]
