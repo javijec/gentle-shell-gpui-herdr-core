@@ -282,7 +282,7 @@ impl Render for RemoteFilesView {
             if let Some(parent) = parent {
                 content = content.child(
                     h_flex().id("remote-files-parent")
-                        .h(px(30.)).px_2().gap_2()
+                        .h(px(26.)).px_2().gap(px(5.))
                         .cursor_pointer()
                         .hover(|row| row.bg(ui::surface_hover()))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -301,7 +301,7 @@ impl Render for RemoteFilesView {
                 content = content.child(
                     h_flex()
                         .id(("remote-file-row", index))
-                        .h(px(32.)).px_2().gap_2()
+                        .h(px(26.)).px_2().gap(px(5.))
                         .cursor_pointer()
                         .hover(|row| row.bg(ui::surface_hover()))
                         .on_click(cx.listener(move |this, _, _, cx| {
