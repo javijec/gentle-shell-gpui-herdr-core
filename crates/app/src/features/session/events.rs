@@ -22,6 +22,19 @@ const GIT_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 /// Stderr lines kept for an exited backend.
 const STDERR_LINES: usize = 40;
 
+/// A Git status query on a remote Pi process is advisory. Show only a
+/// successful branch/short-HEAD result; never fall back to Windows Git.
+fn remote_git_branch(data: &Value) -> Option<String> {
+    if data["exitCode"].as_i64() != Some(0) {
+        return None;
+    }
+    data["output"].as_str()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty() && branch.len() <= 256
+            && !branch.chars().any(char::is_control))
+        .map(str::to_owned)
+}
+
 impl SessionView {
     /// A turn can end while Herdr is disconnected, including during the
     /// read-only reattach probe. Poll get_state until that turn settles;
@@ -406,11 +419,8 @@ impl SessionView {
                         if this.git.seq != seq || !this.is_remote_herdr() {
                             return;
                         }
-                        this.git.remote_branch = result.ok().and_then(|data| {
-                            (data["exitCode"].as_i64() == Some(0)).then(|| {
-                                data["output"].as_str().unwrap_or("").trim().to_owned()
-                            })
-                        }).filter(|branch| !branch.is_empty());
+                        this.git.remote_branch = result.ok()
+                            .and_then(|data| remote_git_branch(&data));
                         cx.notify();
                     },
                 );
@@ -683,5 +693,23 @@ mod tests {
         activity.tool_started(&json!({"toolName": "unknown_tool", "args": {}}));
         assert_eq!(activity.phase, Some("exploring"));
         assert!(activity.job_commands.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod remote_git_branch_tests {
+    use super::remote_git_branch;
+    use serde_json::json;
+
+    #[test]
+    fn does_not_show_windows_branch_when_remote_query_fails() {
+        assert_eq!(remote_git_branch(&json!({
+            "exitCode": 0, "output": "feature/javipi-work\n"
+        })).as_deref(), Some("feature/javipi-work"));
+        assert_eq!(remote_git_branch(&json!({
+            "exitCode": 128, "output": "fatal: not a git repository"
+        })), None);
+        assert_eq!(remote_git_branch(&json!({"exitCode": 0, "output": ""})), None);
+        assert_eq!(remote_git_branch(&json!({"exitCode": 0, "output": "bad\nbranch"})), None);
     }
 }
