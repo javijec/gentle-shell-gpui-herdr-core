@@ -82,22 +82,7 @@ impl SessionView {
                 this.usage.auto_compaction = state["autoCompactionEnabled"].as_bool();
             }
         });
-        self.request(
-            json!({"type": "get_available_models"}),
-            cx,
-            |this, result, _| {
-                this.models.loaded = true;
-                this.models.rev += 1;
-                if let Some(data) = this.report(result) {
-                    this.models.available = data["models"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(ModelInfo::parse)
-                        .collect();
-                }
-            },
-        );
+        self.refresh_available_models(cx);
         self.refresh_thinking_levels(cx);
         self.request(json!({"type": "get_commands"}), cx, |this, result, _| {
             if let Some(data) = this.report(result) {
@@ -186,6 +171,44 @@ impl SessionView {
                 return;
             }
         }
+    }
+
+    /// Query the model catalog of THIS session's Pi RPC process. A Herdr
+    /// remote agent answers on its own machine, using its own provider auth;
+    /// this must never read the local Windows credentials or restart Pi.
+    pub(super) fn refresh_available_models(&mut self, cx: &mut Context<Self>) {
+        if self.process().is_none() {
+            return;
+        }
+        self.models.loaded = false;
+        // After a new process or reconnection, old model options may no
+        // longer be usable. Keep the active model until get_state updates it,
+        // but drop the old selector choices before querying the new source.
+        self.models.available.clear();
+        self.models.rev = self.models.rev.wrapping_add(1);
+        let catalog_revision = self.models.rev;
+        let connection_generation = self.recovery_generation;
+        self.request(
+            json!({"type": "get_available_models"}),
+            cx,
+            move |this, result, cx| {
+                if this.models.rev != catalog_revision
+                    || this.recovery_generation != connection_generation
+                {
+                    return;
+                }
+                this.models.loaded = true;
+                if let Some(data) = this.report(result) {
+                    this.models.available = data["models"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(ModelInfo::parse)
+                        .collect();
+                }
+                cx.notify();
+            },
+        );
     }
 
     pub(super) fn set_model(&mut self, model: ModelInfo, cx: &mut Context<Self>) {
