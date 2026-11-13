@@ -192,6 +192,61 @@ struct Tab {
     focused: PaneId,
 }
 
+/// Before Herdr's remote discovery completes, opening a saved workspace
+/// must never accidentally launch another Pi agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteAgentRecovery {
+    /// Local native backend, or Herdr without remote machine selection.
+    NotNeeded,
+    /// Defer automatic tabs and backend starts until we know what is live.
+    Discovering,
+    /// At least one remote Pi bridge already exists: attach, do not auto-spawn.
+    Existing,
+    /// No remote agent was found; preserve the normal fresh-start behavior.
+    Empty,
+    /// We cannot safely conclude there are no existing remote agents.
+    Failed,
+}
+
+impl RemoteAgentRecovery {
+    fn may_create_default_agent(self) -> bool {
+        matches!(self, Self::NotNeeded | Self::Empty)
+    }
+
+    fn may_auto_start(self, has_herdr_address: bool) -> bool {
+        match self {
+            Self::NotNeeded | Self::Empty => true,
+            Self::Existing => has_herdr_address,
+            Self::Discovering | Self::Failed => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod remote_recovery_tests {
+    use super::RemoteAgentRecovery as Recovery;
+
+    #[test]
+    fn running_agents_prevent_automatic_duplicates() {
+        assert!(!Recovery::Existing.may_create_default_agent());
+        assert!(!Recovery::Existing.may_auto_start(false));
+        assert!(Recovery::Existing.may_auto_start(true));
+    }
+
+    #[test]
+    fn discovery_must_finish_safely_before_any_automatic_start() {
+        for state in [Recovery::Discovering, Recovery::Failed] {
+            assert!(!state.may_create_default_agent());
+            assert!(!state.may_auto_start(false));
+            assert!(!state.may_auto_start(true));
+        }
+        for state in [Recovery::NotNeeded, Recovery::Empty] {
+            assert!(state.may_create_default_agent());
+            assert!(state.may_auto_start(false));
+        }
+    }
+}
+
 /// One named workspace.
 struct Space {
     name: String,
@@ -283,6 +338,8 @@ pub struct Workspace {
     current: usize,
     panes: HashMap<PaneId, Pane>,
     next_id: usize,
+    /// Prevent an automatic Pi spawn before remote agent discovery finishes.
+    remote_agent_recovery: RemoteAgentRecovery,
     overlay: Option<(Overlay, Subscription)>,
     sidebar: Option<AnyView>,
     sidebar_visible: bool,
@@ -341,6 +398,9 @@ impl Workspace {
                 saved: Some((w.tabs, w.active_tab)),
             })
             .collect();
+        let discover_remote = crate::features::terminal::herdr_enabled()
+            && std::env::var("GENTLE_SHELL_HERDR_AGENT_MACHINE")
+                .is_ok_and(|machine| !machine.trim().is_empty());
         let music = cx.new(|cx| Music::new(window, cx));
         let devices = cx.new(DevicePanel::new);
         let lifecycle = vec![
@@ -398,6 +458,11 @@ impl Workspace {
             spaces,
             panes: HashMap::new(),
             next_id: 0,
+            remote_agent_recovery: if discover_remote {
+                RemoteAgentRecovery::Discovering
+            } else {
+                RemoteAgentRecovery::NotNeeded
+            },
             overlay: None,
             sidebar: None,
             sidebar_visible: saved.sidebar,
@@ -432,7 +497,14 @@ impl Workspace {
             None => this.current,
         };
         this.current = target;
-        this.ensure_open(target, prompt.is_none(), window, cx);
+        // A fresh default agent must NOT start before discovering older
+        // Herdr jobs. A command-line prompt is an explicit new-agent request.
+        this.ensure_open(
+            target,
+            prompt.is_none() && !discover_remote,
+            window,
+            cx,
+        );
         if let Some(prompt) = prompt {
             let root = this.space().root.clone();
             this.open_tab(PaneKind::Agent, root, Some(prompt), None, window, cx);
@@ -442,12 +514,8 @@ impl Workspace {
         }
         this.space_mut().last_active = workspaces::now();
         this.focus_active(window, cx);
-        // New 4B builds know every agent's Herdr address. For agents left
-        // running by older builds, discover their still-live terminals once
-        // (off the UI thread) before activating a restored address-less tab.
-        let discover_remote = crate::features::terminal::herdr_enabled()
-            && std::env::var("GENTLE_SHELL_HERDR_AGENT_MACHINE")
-                .is_ok_and(|machine| !machine.trim().is_empty());
+        // Remote agent discovery completes before any restored/default
+        // agent can auto-start. Existing agents always win over placeholders.
         if discover_remote {
             cx.spawn_in(window, async move |this, cx| {
                 let discovered = cx.background_executor().spawn(async {
@@ -455,12 +523,32 @@ impl Workspace {
                 }).await;
                 let _ = this.update_in(cx, |this, window, cx| {
                     match discovered {
-                        Ok(addresses) => this.recover_untracked_agents(addresses, window, cx),
+                        Ok(addresses) if addresses.is_empty() => {
+                            this.remote_agent_recovery = RemoteAgentRecovery::Empty;
+                            // There are no running remote agents: the usual
+                            // first-tab default is safe to create.
+                            let current = this.current;
+                            this.ensure_open(current, true, window, cx);
+                        }
+                        Ok(addresses) => {
+                            this.remote_agent_recovery = RemoteAgentRecovery::Existing;
+                            this.recover_untracked_agents(addresses.clone(), window, cx);
+                            // When all running agents already had saved
+                            // addresses, prefer an existing one over an old
+                            // address-less placeholder in the active tab.
+                            this.focus_existing_remote_agent(&addresses, window, cx);
+                        }
                         Err(error) => {
-                            eprintln!("gentle-shell-gpui: remote agent discovery failed: {error:#}");
+                            // A failed lookup is NOT evidence that no agents
+                            // exist: avoid accidentally duplicating remote Pi.
+                            this.remote_agent_recovery = RemoteAgentRecovery::Failed;
+                            eprintln!(
+                                "gentle-shell-gpui: remote agent discovery failed; no automatic agent launched: {error:#}"
+                            );
                         }
                     }
                     this.start_shown(window, cx);
+                    cx.notify();
                 });
             }).detach();
         } else {
