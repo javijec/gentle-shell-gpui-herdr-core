@@ -19,6 +19,7 @@ use super::{Incoming, Pending, Record, Response, UiAnswer, parse_record};
 
 const MAX_JSONL: usize = 8 * 1024 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const REMOTE_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const TRANSPORT_TIMEOUT: Duration = Duration::from_secs(12);
 const TRANSPORT_PROBE_ID: &str = "gs4a-transport-probe";
 type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
@@ -293,6 +294,7 @@ impl HerdrAgentProcess {
             }
             (cwd, argv, None)
         };
+        let remote_start = on.is_some();
         let (events, rx) = async_channel::unbounded();
         let (started_tx, started_rx) = mpsc::sync_channel::<Result<()>>(1);
         let started_tx = Arc::new(Mutex::new(Some(started_tx)));
@@ -376,9 +378,18 @@ impl HerdrAgentProcess {
             }
         }));
         *session_ref.lock().unwrap() = Some(Arc::downgrade(&session));
-        let started = match started_rx.recv_timeout(STARTUP_TIMEOUT) {
+        let startup_timeout = if remote_start {
+            REMOTE_STARTUP_TIMEOUT
+        } else {
+            STARTUP_TIMEOUT
+        };
+        let started = match started_rx.recv_timeout(startup_timeout) {
             Ok(result) => result,
-            Err(_) => Err(anyhow!("Herdr RPC bridge did not become ready within 30 seconds")),
+            Err(_) => Err(anyhow!(
+                "Herdr {} RPC bridge did not become ready within {} seconds",
+                if remote_start { "remote" } else { "local" },
+                startup_timeout.as_secs(),
+            )),
         };
         // Bridge READY is insufficient: test a real RPC command through
         // terminal input + decoded output before SessionView refreshes models.
