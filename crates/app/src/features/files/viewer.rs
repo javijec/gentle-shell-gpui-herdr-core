@@ -187,19 +187,9 @@ impl FileView {
             Ok((text, size)) => {
                 meta.size = Some(size);
                 meta.lines = Some(line_count(&text));
-                let token = language(&path).0;
                 let preview =
                     is_markdown(&path).then(|| cx.new(|cx| TextViewState::markdown(&text, cx)));
-                let editor = cx.new(|cx| {
-                    let state = EditorState::new(window, cx)
-                        .line_number(true)
-                        .soft_wrap(false);
-                    match token {
-                        Some(lang) => state.language(lang),
-                        None => state,
-                    }
-                    .default_value(text)
-                });
+                let editor = cx.new(|cx| super::source_editor(&path, text, window, cx));
                 let edit = Editing {
                     saved: editor.read(cx).text().clone(),
                     dirty: stamp.is_none(),
