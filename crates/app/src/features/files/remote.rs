@@ -333,10 +333,15 @@ impl RemoteFilesView {
         let generation = self.generation;
         self.saving = true;
         self.error = None;
-        let response = process.request(json!({
+        let command = json!({
             "type": "herdr_fs_write", "root": self.root,
             "path": path, "content": text, "expectedRevision": revision,
-        }));
+        });
+        // A 128 KiB file takes many 96-byte PTY frames. The bridge request
+        // writes synchronously, so start it off the GPUI foreground thread.
+        let response = cx.background_executor().spawn(async move {
+            process.request(command).await
+        });
         cx.spawn(async move |this, cx| {
             let result = response.await;
             let _ = this.update(cx, |this, cx| {
