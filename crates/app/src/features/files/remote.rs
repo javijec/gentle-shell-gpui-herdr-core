@@ -19,6 +19,8 @@ pub enum RemoteFilesEvent {
     InsertPath(String),
     /// Open an existing remote Linux file in a normal central editor pane.
     OpenFile(String),
+    /// Request a native central diff for a changed Linux file.
+    OpenDiff(String),
     Close,
 }
 
@@ -36,6 +38,81 @@ struct RemotePreview {
     revision: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteTab {
+    Files,
+    Changes,
+    Branches,
+}
+
+struct RemoteGitFile {
+    path: String,
+    index: char,
+    worktree: char,
+}
+
+struct RemoteGitBranch {
+    name: String,
+    current: bool,
+}
+
+struct RemoteGitSnapshot {
+    toplevel: String,
+    files: Vec<RemoteGitFile>,
+    branches: Vec<RemoteGitBranch>,
+    files_truncated: bool,
+    branches_truncated: bool,
+}
+
+/// The JSON shape is not trusted just because it came from an RPC bridge.
+/// Never turn a returned Linux path into a local Windows file path.
+fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'static str> {
+    let toplevel = data["toplevel"].as_str()
+        .filter(|root| root.starts_with('/') && !root.contains('\\'))
+        .ok_or("Invalid remote Git repository path")?
+        .to_owned();
+    if data["readOnly"].as_bool() != Some(true) {
+        return Err("Invalid remote Git snapshot mode");
+    }
+    let files = data["files"].as_array()
+        .ok_or("Missing remote Git status")?
+        .iter()
+        .take(200)
+        .map(|item| {
+            let path = item["path"].as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 2048
+                    && !s.starts_with('/') && !s.contains('\\')
+                    && !s.split('/').any(|p| p == "." || p == ".."))
+                .ok_or("Invalid Git status file")?;
+            let index = item["index"].as_str()
+                .filter(|s| s.len() == 1)
+                .ok_or("Invalid Git index state")?
+                .chars().next().ok_or("Invalid Git index state")?;
+            let worktree = item["worktree"].as_str()
+                .filter(|s| s.len() == 1)
+                .ok_or("Invalid Git worktree state")?
+                .chars().next().ok_or("Invalid Git worktree state")?;
+            Ok(RemoteGitFile { path: path.to_owned(), index, worktree })
+        }).collect::<Result<Vec<_>, &'static str>>()?;
+    let branches = data["branches"].as_array()
+        .ok_or("Missing remote branches")?
+        .iter()
+        .take(120)
+        .map(|item| {
+            let name = item["name"].as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 512)
+                .ok_or("Invalid remote branch")?;
+            let current = item["current"].as_bool()
+                .ok_or("Missing active branch state")?;
+            Ok(RemoteGitBranch { name: name.to_owned(), current })
+        }).collect::<Result<Vec<_>, &'static str>>()?;
+    Ok(RemoteGitSnapshot {
+        toplevel, files, branches,
+        files_truncated: data["filesTruncated"].as_bool().unwrap_or(false),
+        branches_truncated: data["branchesTruncated"].as_bool().unwrap_or(false),
+    })
+}
+
 const MAX_EDIT_BYTES: usize = 128 * 1024;
 const CONTEXT: &str = "GentleRemoteFileView";
 const SAVE_HINT: &str = if cfg!(target_os = "macos") { "⌘S" } else { "Ctrl+S" };
@@ -50,6 +127,12 @@ pub struct RemoteFilesView {
     /// A central file pane has a fixed remote file path; None is the
     /// right-hand directory browser. Never convert this into Windows PathBuf.
     pane_path: Option<String>,
+    /// The right dock uses Files/Changes/Branches, never the local Git repo.
+    tab: RemoteTab,
+    git: Option<RemoteGitSnapshot>,
+    git_loading: bool,
+    git_error: Option<String>,
+    git_generation: u64,
     focus: FocusHandle,
     entries: Vec<RemoteEntry>,
     preview: Option<RemotePreview>,
@@ -126,6 +209,11 @@ impl RemoteFilesView {
             current: root.clone(),
             root,
             pane_path: None,
+            tab: RemoteTab::Files,
+            git: None,
+            git_loading: false,
+            git_error: None,
+            git_generation: 0,
             focus: cx.focus_handle(),
             entries: Vec::new(),
             preview: None,
