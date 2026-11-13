@@ -2,7 +2,10 @@
 //! inspect persistent terminal addresses, and open existing/new shell panels.
 
 pub(crate) mod model;
+mod directory_picker;
 mod view;
+
+pub use directory_picker::{RemoteDirectoryEvent, RemoteDirectoryPicker};
 
 use gpui_kit::*;
 
