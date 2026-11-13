@@ -596,6 +596,20 @@ fn validate_started_address(address: &str, on: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// An explicitly addressed bridge must attach, not launch a second agent.
+/// Ignore the generic terminal env override when an explicit program is used.
+fn choose_terminal_address(
+    resume: Option<String>,
+    explicit_program: bool,
+    environment_address: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    if explicit_program {
+        resume
+    } else {
+        resume.or_else(environment_address)
+    }
+}
+
 fn serve(
     cwd: PathBuf,
     resume: Option<String>,
@@ -613,15 +627,11 @@ fn serve(
         .unwrap_or_else(|| OsString::from("hc"));
     // Resolve once. NEVER call terminal.run again after this point.
     // An explicit command cannot be redirected by the generic resume env var.
-    let selected = if argv.is_some() {
-        resume
-    } else {
-        resume.or_else(|| {
-            std::env::var("GENTLE_SHELL_HERDR_TERMINAL")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        })
-    };
+    let selected = choose_terminal_address(resume, argv.is_some(), || {
+        std::env::var("GENTLE_SHELL_HERDR_TERMINAL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+    });
     let address = match selected {
         Some(address) => address,
         None => {
@@ -730,10 +740,28 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        CREDIT, DATA, Command, Error, bridge_environment, check_response, discard_offline,
-        encode_frame, read_frame, retry_delay, terminal_finished, validate_started_address,
-        wait_retry,
+        CREDIT, DATA, Command, Error, bridge_environment, check_response,
+        choose_terminal_address, discard_offline, encode_frame, read_frame, retry_delay,
+        terminal_finished, validate_started_address, wait_retry,
     };
+
+    #[test]
+    fn saved_rpc_address_attaches_without_new_terminal_run() {
+        assert_eq!(
+            choose_terminal_address(Some("javipi/t42".into()), true, || {
+                panic!("explicit program must ignore generic resume environment")
+            }),
+            Some("javipi/t42".into())
+        );
+        assert_eq!(
+            choose_terminal_address(None, true, || Some("wrong/t5".into())),
+            None
+        );
+        assert_eq!(
+            choose_terminal_address(None, false, || Some("t5".into())),
+            Some("t5".into())
+        );
+    }
 
     #[test]
     fn remote_run_must_return_a_terminal_on_the_selected_machine() {
