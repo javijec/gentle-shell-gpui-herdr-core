@@ -393,7 +393,7 @@ async function gitRepository(root) {
 function safeGitRelative(name) {
   return typeof name === "string" && name.length > 0 &&
     name.length <= 2048 && !name.startsWith("/") &&
-    !name.includes("\\") &&
+    !name.includes("\\") && !name.includes(":") &&
     !/[\x00-\x1f\x7f]/.test(name) &&
     !name.split("/").some((part) => part === "." || part === "..");
 }
