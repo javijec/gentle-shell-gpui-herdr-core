@@ -139,16 +139,18 @@ fn inspect_existing(address: &str) -> Result<String> {
     token_for_terminal(&record, address)
 }
 
-/// Discover remote agents from older 4B runs whose addresses were not yet
-/// stored in workspaces.json. No terminal is started, attached or killed.
-/// The GUI can offer each untracked agent as a recovered tab.
-pub fn discover_live_remote_agents() -> Result<Vec<String>> {
-    let Some(target) = RemoteTarget::from_env()? else {
-        return Ok(Vec::new());
-    };
-    let mut client = core_client()?;
-    let list = client.list_terminals()?;
-    Ok(recoverable_addresses(&list.terminals, &target.machine))
+impl HerdrAgentProcess {
+    /// Discover remote agents from older 4B runs whose addresses were not yet
+    /// stored in workspaces.json. No terminal is started, attached or killed.
+    /// The GUI can offer each untracked agent as a recovered tab.
+    pub fn discover_live_remote_agents() -> Result<Vec<String>> {
+        let Some(target) = RemoteTarget::from_env()? else {
+            return Ok(Vec::new());
+        };
+        let mut client = core_client()?;
+        let list = client.list_terminals()?;
+        Ok(recoverable_addresses(&list.terminals, &target.machine))
+    }
 }
 
 /// Pure discovery filter: never recover foreign terminals, dead processes or
@@ -494,10 +496,10 @@ impl HerdrAgentProcess {
         if let Err(error) = verified {
             // Never kill an *existing* agent just because this viewer failed
             // to reconnect; the owner can retry later.
-            if !reattaching {
-                if let Some(address) = address.lock().unwrap().clone() {
-                    stop_owned_terminal(address);
-                }
+            if !reattaching
+                && let Some(address) = address.lock().unwrap().clone()
+            {
+                stop_owned_terminal(address);
             }
             return Err(error);
         }
