@@ -385,7 +385,7 @@ function gitInit(root) {
     assert.equal(result.status, 0, result.stderr);
   };
   git("init", "-q");
-  fs.writeFileSync(path.join(root, "tracked.txt"), "first\\n");
+  fs.writeFileSync(path.join(root, "tracked.txt"), "first\n");
   git("add", "--", "tracked.txt");
   git("-c", "user.name=Herdr", "-c", "user.email=herdr@example.invalid",
     "commit", "-qm", "Initial");
@@ -400,8 +400,10 @@ test("5C reports remote Git changes and branches without sending Pi commands", {
   try {
     const git = gitInit(root);
     git("branch", "feature/test");
-    fs.writeFileSync(path.join(root, "tracked.txt"), "changed\\n");
-    fs.writeFileSync(path.join(root, "new.txt"), "untracked\\n");
+    fs.writeFileSync(path.join(root, "tracked.txt"), "changed\n");
+    git("add", "--", "tracked.txt");
+    fs.writeFileSync(path.join(root, "tracked.txt"), "changed again\n");
+    fs.writeFileSync(path.join(root, "new.txt"), "untracked\n");
     const h = harness(root);
     const before = h.childWrites.length;
     rpcInput(h, { type: "herdr_git_snapshot", id: "git-1", root });
@@ -410,7 +412,7 @@ test("5C reports remote Git changes and branches without sending Pi commands", {
     assert.equal(result.data.toplevel, root);
     assert.equal(result.data.readOnly, true);
     assert.ok(result.data.files.some(x => x.path === "tracked.txt" &&
-      x.worktree === "M"));
+      x.index === "M" && x.worktree === "M"));
     assert.ok(result.data.files.some(x => x.path === "new.txt" &&
       x.index === "?" && x.worktree === "?"));
     assert.ok(result.data.branches.some(x => x.name === "feature/test"));
@@ -429,10 +431,10 @@ test("5C shows tracked and untracked diffs read-only", {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-diff-"));
   try {
     const git = gitInit(root);
-    fs.writeFileSync(path.join(root, "tracked.txt"), "changed\\n");
+    fs.writeFileSync(path.join(root, "tracked.txt"), "changed\n");
     git("add", "--", "tracked.txt");
-    fs.writeFileSync(path.join(root, "tracked.txt"), "latest\\n");
-    fs.writeFileSync(path.join(root, "new.txt"), "untracked\\n");
+    fs.writeFileSync(path.join(root, "tracked.txt"), "latest\n");
+    fs.writeFileSync(path.join(root, "new.txt"), "untracked\n");
     const h = harness(root);
     for (const [id, file, expected] of [
       ["diff-tracked", "tracked.txt", "+latest"],
@@ -446,8 +448,8 @@ test("5C shows tracked and untracked diffs read-only", {
       assert.match(reply.data.patch, /diff --git/);
       assert.ok(reply.data.patch.includes(expected), reply.data.patch);
     }
-    assert.equal(fs.readFileSync(path.join(root, "tracked.txt"), "utf8"), "latest\\n");
-    assert.equal(fs.readFileSync(path.join(root, "new.txt"), "utf8"), "untracked\\n");
+    assert.equal(fs.readFileSync(path.join(root, "tracked.txt"), "utf8"), "latest\n");
+    assert.equal(fs.readFileSync(path.join(root, "new.txt"), "utf8"), "untracked\n");
     assert.equal(h.childWrites.length, 1, "Git must not leak into Pi RPC");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
