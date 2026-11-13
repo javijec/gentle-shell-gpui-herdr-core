@@ -5,12 +5,14 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent};
+use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::json;
 
 use crate::features::session::SessionView;
+use super::viewer::MdMode;
 use crate::shared::ui;
 
 pub enum RemoteFilesEvent {
@@ -52,6 +54,9 @@ pub struct RemoteFilesView {
     entries: Vec<RemoteEntry>,
     preview: Option<RemotePreview>,
     editor: Option<Entity<EditorState>>,
+    /// Markdown uses the same Edit / Split / Preview mode as FileView.
+    markdown: Option<(MdMode, Entity<TextViewState>)>,
+    _markdown_debounce: Task<()>,
     _editor_events: Option<Subscription>,
     saving: bool,
     loading: bool,
@@ -125,6 +130,8 @@ impl RemoteFilesView {
             entries: Vec::new(),
             preview: None,
             editor: None,
+            markdown: None,
+            _markdown_debounce: Task::ready(()),
             _editor_events: None,
             saving: false,
             loading: false,
@@ -240,6 +247,7 @@ impl RemoteFilesView {
         self.current = directory.clone();
         self.preview = None;
         self.editor = None;
+        self.markdown = None;
         self._editor_events = None;
         self.entries.clear();
         self.error = None;
@@ -299,6 +307,7 @@ impl RemoteFilesView {
         let generation = self.generation;
         self.preview = None;
         self.editor = None;
+        self.markdown = None;
         self._editor_events = None;
         self.error = None;
         self.loading = true;
