@@ -168,6 +168,9 @@ impl Workspace {
                     }
                 }
                 SessionEvent::OpenProviders => this.open_providers(window, cx),
+                SessionEvent::OpenRemoteDirectory(machine) => {
+                    this.open_remote_directory_picker(machine.clone(), window, cx)
+                },
                 SessionEvent::OpenScreen(screen) => {
                     this.open_screen(*screen, Some(session.clone()), window, cx)
                 }
