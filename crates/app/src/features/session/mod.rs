@@ -352,6 +352,31 @@ impl SessionView {
         }
     }
 
+    /// The read-only remote Files sidebar may request its own filesystem
+    /// commands only through the existing Herdr transport. There is never a
+    /// native Pi fallback or a newly spawned terminal for these reads.
+    pub(crate) fn remote_fs_process(&self) -> Option<std::sync::Arc<pi_rpc::RpcProcess>> {
+        if !self.is_remote_herdr() {
+            return None;
+        }
+        match self.process()? {
+            process if matches!(process.as_ref(), pi_rpc::RpcProcess::Herdr(_)) => Some(process),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn remote_fs_target(&self) -> Option<(String, String)> {
+        if !self.is_remote_herdr() {
+            return None;
+        }
+        match &self.agent_target {
+            Some(pi_rpc::AgentTarget::Remote { machine, cwd }) => {
+                Some((machine.clone(), cwd.clone()))
+            }
+            _ => None, // Legacy restored address uses Herdr terminal metadata.
+        }
+    }
+
     pub fn cwd(&self) -> &PathBuf {
         &self.cwd
     }
