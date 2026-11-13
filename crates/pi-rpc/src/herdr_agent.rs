@@ -22,6 +22,8 @@ const MAX_JSONL: usize = 8 * 1024 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOTE_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const TRANSPORT_TIMEOUT: Duration = Duration::from_secs(12);
+const REATTACH_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(45);
+const REATTACH_PROBE_INTERVAL: Duration = Duration::from_secs(4);
 type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
 
 /// Inline Node.js bridge is injected as argv via Herdr Core on JaviPi.
@@ -178,6 +180,7 @@ fn verify_transport(
     pending: &Pending,
     ready: &AtomicBool,
     probe_id: &str,
+    reattaching: bool,
 ) -> Result<()> {
     if !ready.load(Ordering::Acquire) {
         return Err(anyhow!("Herdr bridge disconnected before its transport check"));
@@ -188,10 +191,25 @@ fn verify_transport(
         let command = json!({"type": "get_state", "id": probe_id});
         let mut bytes = serde_json::to_vec(&command)?;
         bytes.push(b'\n');
-        for frame in encode_input(token, &bytes) {
-            session.input(frame);
-        }
-        let deadline = Instant::now() + TRANSPORT_TIMEOUT;
+        let frames = encode_input(token, &bytes);
+        let send = || {
+            for frame in &frames {
+                session.input(frame.clone());
+            }
+        };
+        // Herdr's first attach paint reconstructs a terminal SCREEN, not a
+        // byte-accurate stream of Pi JSONL. If it ends mid-record, the first
+        // response can be swallowed while the decoder resynchronizes.
+        // get_state is read-only and idempotent, so retries using the SAME
+        // correlation id are safe. This never calls terminal.run.
+        send();
+        let deadline = Instant::now() + if reattaching {
+            REATTACH_TRANSPORT_TIMEOUT
+        } else {
+            TRANSPORT_TIMEOUT
+        };
+        let mut next_retry = Instant::now() + REATTACH_PROBE_INTERVAL;
+        let mut attempts = 1u32;
         loop {
             match rx.try_recv() {
                 Ok(reply) if reply.success => return Ok(()),
@@ -207,10 +225,22 @@ fn verify_transport(
             if !ready.load(Ordering::Acquire) {
                 return Err(anyhow!("Herdr RPC transport disconnected during get_state"));
             }
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= deadline {
                 return Err(anyhow!(
-                    "Herdr PTY did not deliver the get_state round trip within 12 seconds"
+                    "Herdr PTY did not deliver a get_state reply after {} seconds ({} attempts, reattach={reattaching}); existing agent was NOT terminated",
+                    if reattaching {
+                        REATTACH_TRANSPORT_TIMEOUT.as_secs()
+                    } else {
+                        TRANSPORT_TIMEOUT.as_secs()
+                    },
+                    attempts,
                 ));
+            }
+            if reattaching && now >= next_retry {
+                send();
+                attempts += 1;
+                next_retry = now + REATTACH_PROBE_INTERVAL;
             }
             std::thread::sleep(Duration::from_millis(30));
         }
@@ -491,7 +521,7 @@ impl HerdrAgentProcess {
         // terminal input + decoded output before SessionView refreshes models.
         let probe_id = format!("{id_prefix}-probe");
         let verified = started.and_then(|()| verify_transport(
-            &session, &token, &pending, &ready, &probe_id,
+            &session, &token, &pending, &ready, &probe_id, reattaching,
         ));
         if let Err(error) = verified {
             // Never kill an *existing* agent just because this viewer failed
