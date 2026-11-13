@@ -96,7 +96,7 @@ impl Focusable for RemoteGitDiffView {
 }
 
 impl Render for RemoteGitDiffView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let body: AnyElement = if let Some(diff) = &self.diff {
             Diff::new(diff)
                 .header_visible(false)
