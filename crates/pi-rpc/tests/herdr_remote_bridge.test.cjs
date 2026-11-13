@@ -145,8 +145,8 @@ test("Pi4 slow-start watchdog allows 60 s and reports missing RPC output", () =>
 test("startup timeout distinguishes no RPC from unexpected stdout records", () => {
   const h = harness();
   h.child.stdout.emit("data", Buffer.from(
-    "unexpected cli banner\\n" +
-    '{"type":"agent_start"}\\n'
+    "unexpected cli banner\n" +
+    '{"type":"agent_start"}\n'
   ));
   h.fireStartupTimeout();
   assert.equal(h.killed, true);
