@@ -1,7 +1,7 @@
 //! Machines: discover the local Herdr Core's registered remote machines,
 //! inspect persistent terminal addresses, and open existing/new shell panels.
 
-mod model;
+pub(crate) mod model;
 mod view;
 
 use gpui_kit::*;
