@@ -280,7 +280,7 @@ impl Render for RemoteFilesView {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.load_directory(parent.clone(), cx)
                         }))
-                        .child(Icon::new(IconName::FolderUp).small().text_color(ui::muted()))
+                        .child(Icon::new(IconName::ChevronLeft).small().text_color(ui::muted()))
                         .child(div().text_xs().child("..")),
                 );
             }
