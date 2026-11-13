@@ -829,13 +829,9 @@ impl Workspace {
             self.panes.remove(&pane);
         }
         if self.space().tabs.is_empty() {
-            // An implicit replacement tab would start a second remote Pi.
-            // With existing agents, leave the workspace empty: the user can
-            // explicitly create a new agent from its "New agent tab" button.
-            if self.remote_agent_recovery.may_create_default_agent() {
-                let root = self.space().root.clone();
-                self.open_tab(PaneKind::Agent, root, None, None, window, cx);
-            }
+            // Machine navigation has an explicit + for new agents. Closing
+            // the last agent must not silently spawn a replacement, local
+            // or remote, which could surprise users after a disconnect.
             self.save_now(cx);
             cx.notify();
             return;
