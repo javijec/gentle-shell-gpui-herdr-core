@@ -60,6 +60,13 @@ impl SessionView {
         if !self.backend.started {
             return;
         }
+        if self.is_remote_herdr() {
+            // Providers/Settings screens run on Windows. Changing local
+            // credentials cannot authenticate the already-running JaviPi
+            // process. In particular, never restart/kill a remote agent to
+            // apply a local sign-in: it owns an independent remote auth store.
+            return;
+        }
         if self.transcript.items.is_empty() {
             self.start(window, cx);
         } else {
