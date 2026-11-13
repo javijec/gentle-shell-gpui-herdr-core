@@ -11,8 +11,14 @@ mod refs;
 mod tree;
 mod viewer;
 
-pub use tree::{FileTreeEvent, FileTreeView, init};
+pub use tree::{FileTreeEvent, FileTreeView};
 pub use viewer::FileView;
+
+/// Register both the local Files shortcuts and the remote editor shortcut.
+pub fn init(cx: &mut App) {
+    tree::init(cx);
+    RemoteFilesView::bind_keys(cx);
+}
 
 use std::path::Path;
 
