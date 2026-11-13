@@ -82,6 +82,7 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
             let path = item["path"].as_str()
                 .filter(|s| !s.is_empty() && s.len() <= 2048
                     && !s.starts_with('/') && !s.contains('\\')
+                    && !s.chars().any(char::is_control)
                     && !s.split('/').any(|p| p == "." || p == ".."))
                 .ok_or("Invalid Git status file")?;
             let index = item["index"].as_str()
@@ -100,7 +101,8 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
         .take(120)
         .map(|item| {
             let name = item["name"].as_str()
-                .filter(|s| !s.is_empty() && s.len() <= 512)
+                .filter(|s| !s.is_empty() && s.len() <= 512
+                    && !s.chars().any(char::is_control))
                 .ok_or("Invalid remote branch")?;
             let current = item["current"].as_bool()
                 .ok_or("Missing active branch state")?;
@@ -729,7 +731,7 @@ impl RemoteFilesView {
             } else {
                 if snapshot.branches.is_empty() {
                     rows.push(div().px_3().py_3().text_sm().text_color(ui::muted())
-                        .child("No local Git branches").into_any_element());
+                        .child("No Git branches").into_any_element());
                 }
                 for (index, branch) in snapshot.branches.iter().enumerate() {
                     rows.push(
@@ -755,7 +757,7 @@ impl RemoteFilesView {
                 if snapshot.branches_truncated {
                     rows.push(div().px_3().py_2().text_xs()
                         .text_color(ui::warning())
-                        .child("Showing first 120 local branches").into_any_element());
+                        .child("Showing first 120 branches").into_any_element());
                 }
             }
         }
