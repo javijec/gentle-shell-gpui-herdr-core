@@ -364,8 +364,9 @@ function runGit(directory, args, allowedDiffExit = false) {
     }, (error, stdout, stderr) => {
       if (error && !(allowedDiffExit && error.code === 1 &&
             !error.killed && !error.signal)) {
-        reject(new Error("Remote Git query failed: " +
-          Buffer.from(stderr || "").toString("utf8").slice(0, 300)));
+        const detail = Buffer.from(stderr || "").toString("utf8").trim() ||
+          (error && error.message ? error.message : "Unknown Git error");
+        reject(new Error("Remote Git query failed: " + detail.slice(0, 300)));
       } else {
         resolve(Buffer.from(stdout));
       }
