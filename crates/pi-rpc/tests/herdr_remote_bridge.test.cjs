@@ -28,6 +28,7 @@ function harness() {
   input.resume = () => {};
   input.pause = () => {};
   const calls = [];
+  const timers = [];
   const fakeProcess = {
     argv: ["node", "t123"],
     env: { PATH: "/usr/bin", HOME: "/home/dietpi" },
@@ -45,13 +46,18 @@ function harness() {
   const execute = new Function(
     "require", "process", "Buffer", "setTimeout", "clearTimeout", source
   );
-  execute(requireMock, fakeProcess, Buffer, () => 1, () => {});
+  execute(requireMock, fakeProcess, Buffer, (callback, milliseconds) => {
+    timers.push({ callback, milliseconds });
+    return timers.length;
+  }, () => {});
   return {
     stdout,
     childWrites,
     child,
     input,
     calls,
+    timers,
+    fireStartupTimeout: () => timers[0].callback(),
     get killed() { return killed; },
   };
 }
@@ -123,4 +129,30 @@ test("ignores malformed, foreign-token and oversized input lines", () => {
   h.input.emit("data", Buffer.from("GS4A1|t123|I|!!invalid!!\r"));
   h.input.emit("data", Buffer.from("z".repeat(6000) + "\r"));
   assert.equal(h.childWrites.length, before);
+});
+
+test("Pi4 slow-start watchdog allows 60 s and reports missing RPC output", () => {
+  const h = harness();
+  assert.equal(h.timers[0].milliseconds, 60000);
+  h.fireStartupTimeout();
+  assert.equal(h.killed, true);
+  const errors = Buffer.concat(readFrames(h.stdout).filter((f) =>
+    f.kind === "E").map((f) => f.payload)).toString();
+  assert.match(errors, /get_state within 60 seconds/);
+  assert.match(errors, /stdout_records=0/);
+});
+
+test("startup timeout distinguishes no RPC from unexpected stdout records", () => {
+  const h = harness();
+  h.child.stdout.emit("data", Buffer.from(
+    "unexpected cli banner\\n" +
+    '{"type":"agent_start"}\\n'
+  ));
+  h.fireStartupTimeout();
+  assert.equal(h.killed, true);
+  const errors = Buffer.concat(readFrames(h.stdout).filter((f) =>
+    f.kind === "E").map((f) => f.payload)).toString();
+  assert.match(errors, /stdout_records=2/);
+  assert.match(errors, /invalid_json=1/);
+  assert.match(errors, /last_type=agent_start/);
 });
