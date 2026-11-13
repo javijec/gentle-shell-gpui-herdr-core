@@ -457,7 +457,11 @@ impl Render for Workspace {
                         ui::appear(
                             "files-right-in",
                             div()
-                                .w(px(SIDEBAR_WIDTH))
+                                .w(px(if selected_remote {
+                                    SIDEBAR_WIDTH + 70.
+                                } else {
+                                    SIDEBAR_WIDTH
+                                }))
                                 .flex_none()
                                 .h_full()
                                 .rounded_xl()
