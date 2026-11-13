@@ -118,11 +118,14 @@ impl TerminalSession {
         cwd: PathBuf,
         argv: Vec<String>,
         on: Option<String>,
+        resume: Option<String>,
         cols: u16,
         rows: u16,
         report: impl Fn(TerminalEvent) + Send + 'static,
     ) -> Self {
-        Self::spawn_inner(cwd, None, Some(argv), on, cols, rows, report)
+        // An explicit Herdr address takes precedence and skips terminal.run:
+        // never create a second Pi process when recovering an existing agent.
+        Self::spawn_inner(cwd, resume, Some(argv), on, cols, rows, report)
     }
 
     fn spawn_inner(
