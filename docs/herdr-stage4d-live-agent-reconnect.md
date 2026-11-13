@@ -56,6 +56,9 @@ abierto**, incluso en medio de un turno.
   después de la recuperación, y puede requerir validación específica.
 - La lógica usa `get_state.isStreaming` cuando el backend lo informa para
   distinguir que un turno terminó durante la caída.
+- Cerrar una pestaña remota mientras la máquina está totalmente inaccesible
+  no garantiza que la orden `terminal.kill` llegue. No se debe afirmar que
+  el proceso fue terminado sin verificar la confirmación de Core.
 
 ## Pruebas automatizadas (en Windows)
 
@@ -94,7 +97,16 @@ node --test crates/pi-rpc/tests/herdr_remote_bridge.test.cjs
 8. Confirmá que un agente distinto (Windows Herdr o otra sesión JaviPi)
    continúa independiente. Cerrar **una pestaña** termina solamente su agente.
 9. Confirmá que salir de GPUI y volver a abrirlo mantiene la recuperación
-   4B-P, y que `GENTLE_SHELL_TERMINAL_BACKEND=local` no contacta Herdr.
+   4B-P: la pestaña reaparece una sola vez y no se reproducen eventos, diálogos
+   ni herramientas viejos del primer repintado Herdr.
+10. Cerrá una de dos pestañas remotas **conectadas** y confirmá que solo termina
+    el agente elegido; el otro conserva su dirección y responde normalmente.
+11. Elegí `GENTLE_SHELL_TERMINAL_BACKEND=local` con variables remotas aún
+    definidas. No debe abrirse ninguna conexión Herdr ni generarse otro agente
+    en JaviPi; volvé a `herdr` para comprobar que las identidades persistidas
+    se conservan.
+12. Revisá el escenario fail-closed con JaviPi no disponible: no se lanza
+    automáticamente un agente de reemplazo en Windows.
 
 **No hacer pruebas que apaguen JaviPi, eliminen sesiones, corten la energía
 o maten Core:** el objetivo es simular pérdida temporal del transporte, no
@@ -104,6 +116,10 @@ una caída del proceso del agente.
 
 Este documento describe una implementación de 4D en una rama de desarrollo.
 Las pruebas sintéticas del parser y las garantías de generación están
-agregadas. **No está validada todavía en Windows con Herdr/JaviPi ni se ha
-confirmado una ejecución de Clippy o de los tests de workspace sobre esta
-rama. No fusionar a main hasta completar la matriz.**
+agregadas. La validación local inicial y las pruebas funcionales de caídas prolongadas,
+caída durante un turno y direcciones estables fueron confirmadas por el usuario.
+No hay una ejecución CI visible para el último commit. **La corrección del primer repintado en la reconexión inicial de un agente
+guardado se incorporó después de las primeras pruebas locales reportadas.
+Se requieren de nuevo Clippy/tests en Windows sobre el commit final y una
+prueba de reinicio GPUI que confirme que no aparecen eventos viejos. No fusionar
+a main hasta cerrar estas regresiones.**
