@@ -31,13 +31,40 @@ tab treatment.
 - The native `local` backend displays This computer without making Herdr
   requests. Herdr snapshots are fetched on a background executor every 12 s
   while Herdr mode is enabled.
-- The existing Files/Changes/Branches sidebar is still accessible using the
-  Files/Machines switch button in the title bar; it occupies the *same*
-  sidebar slot rather than stealing additional horizontal space.
+- **Machines stays on the left**. **Files / Changes / Branches is a separate
+  dock on the right**, visible by default, with its own close button and
+  title-bar / Machines-footer toggles. Opening Files does not replace or
+  collapse the machine navigator. Ctrl+B collapses only Machines.
+- Files / Changes / Branches continues to operate on the **Windows workspace
+  root**, even when the selected agent runs on JaviPi. The right dock is
+  explicitly labeled `Local Windows files`, and when a remote agent is
+  selected, `Local Windows files · not remote`. It is not a remote browser.
+  Local file previews, edits, Git changes and branch actions stay local.
+  Inserting a local path into a remote agent's prompt is blocked with a
+  notification; inserting into a local agent still works.
 - The workspace chip and active pane title remain in the title bar, but
   **no tab bar** is rendered. Keyboard tab shortcuts still work.
 - Closing the final session leaves an empty workspace; it does not
   automatically launch another agent. Use + to explicitly create one.
+
+## Right-side Files dock
+
+The FileTreeView was audited: it reads directories, file previews,
+working-tree status, changes and branches through native filesystem and
+Git APIs in the **Windows GPUI process**. It is not backed by the
+selected remote Pi agent. To prevent misleading actions, the dock is
+labeled as local and never inserts a Windows path into a remote agent
+prompt.
+
+The local tree retains all current file operations, including creating,
+renaming, previewing and moving files; none of these commands are sent
+to Herdr. Real remote file browsing and editing would require an
+independently verified, permission-aware remote filesystem transport;
+this phase does not add one or silently substitute local files.
+
+The Machines pane is independent on the left, and the local Files pane
+is on the right. Each panel has its own open/close action; they can be
+visible simultaneously.
 
 ## Directories: local workspace vs remote agent
 
@@ -127,9 +154,10 @@ showing the GPUI source repository under a JaviPi agent.
   checkout. Only the verified remote branch is displayed. The branch
   is rechecked after reconnect and after regular Git refresh triggers.
   Stale responses are discarded by generation and remote session guard.
-- The **Files/Changes/Branches** sidebar and workspace chip still refer
-  to GPUI's local workspace; they are not a remote file explorer and
-  must not claim to represent remote Git.
+- The **Files/Changes/Branches dock on the right** and the workspace
+  selector still refer to GPUI's Windows project. They do **not** browse
+  or change files on JaviPi and never represent remote Git. Only the
+  agent's own composer footer displays its actual remote Git branch.
 
 ### Composer footer regression tests
 
@@ -295,10 +323,16 @@ cargo run --locked -p gentle-shell-gpui
    next snapshot and the remote + should not initiate another agent.
 5. Close just one of two agents with ×; the other remains live.
 6. Close the final agent: no replacement process is created.
-7. Test Ctrl+T, Ctrl+Shift+T, keyboard cycling, split panes and sidebar
-   collapse/expand.
-8. Toggle Machines ↔ Files; confirm file tree, Changes and Branches still
-   work, including inserting a file path into the active agent.
+7. Test Ctrl+T, Ctrl+Shift+T, keyboard cycling, split panes, and
+   toggling the left Machines panel with Ctrl+B.
+8. Confirm the right Files / Changes / Branches dock is visible separately
+   from Machines and explicitly labeled as Windows-local. Test its title-bar
+   toggle, right-panel close button and Machines-footer shortcut. Closing
+   either dock must not collapse the other. Check re-rooting when switching
+   Windows workspaces, local file preview, changes and branch actions.
+   Inserting a local file path into a local agent still works; when JaviPi is
+   selected, inserting that Windows-relative path must be blocked with a
+   clear warning and no change to the remote prompt.
 9. Restart GPUI; saved remote agents reattach exactly once and stay under the
    correct machine; no duplicate or replayed UI events.
 10. Run in native local backend; the navigator remains usable and does not
