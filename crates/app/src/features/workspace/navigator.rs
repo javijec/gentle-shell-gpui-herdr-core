@@ -194,11 +194,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if crate::features::terminal::herdr_enabled() {
-            let target = match machine {
-                Some(machine) => pi_rpc::AgentTarget::remote_for_machine(machine),
-                None => pi_rpc::AgentTarget::Local,
-            };
-            self.open_agent_on_machine(target, window, cx);
+            match machine {
+                Some(machine) => {
+                    self.open_remote_directory_picker(machine, window, cx)
+                }
+                None => self.open_agent_on_machine(
+                    pi_rpc::AgentTarget::Local, window, cx,
+                ),
+            }
         } else if machine.is_none() {
             self.on_new_tab(&NewTab, window, cx);
         }
