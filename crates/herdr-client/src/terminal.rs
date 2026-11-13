@@ -95,7 +95,7 @@ impl TerminalSession {
         rows: u16,
         report: impl Fn(TerminalEvent) + Send + 'static,
     ) -> Self {
-        Self::spawn_inner(cwd, resume, None, cols, rows, report)
+        Self::spawn_inner(cwd, resume, None, None, cols, rows, report)
     }
 
     /// Start a specific argv under Herdr Core, rather than a user's shell.
@@ -108,13 +108,31 @@ impl TerminalSession {
         rows: u16,
         report: impl Fn(TerminalEvent) + Send + 'static,
     ) -> Self {
-        Self::spawn_inner(cwd, None, Some(argv), cols, rows, report)
+        Self::spawn_inner(cwd, None, Some(argv), None, cols, rows, report)
+    }
+
+    /// Launch a managed program either here (None) or on a registered
+    /// remote machine (Some). Used by the Pi RPC backend without duplicating
+    /// the output callback's state machine.
+    pub fn spawn_program_at(
+        cwd: PathBuf,
+        argv: Vec<String>,
+        on: Option<String>,
+        resume: Option<String>,
+        cols: u16,
+        rows: u16,
+        report: impl Fn(TerminalEvent) + Send + 'static,
+    ) -> Self {
+        // An explicit Herdr address takes precedence and skips terminal.run:
+        // never create a second Pi process when recovering an existing agent.
+        Self::spawn_inner(cwd, resume, Some(argv), on, cols, rows, report)
     }
 
     fn spawn_inner(
         cwd: PathBuf,
         resume: Option<String>,
         argv: Option<Vec<String>>,
+        on: Option<String>,
         cols: u16,
         rows: u16,
         report: impl Fn(TerminalEvent) + Send + 'static,
@@ -139,7 +157,7 @@ impl TerminalSession {
                 desired: &worker_desired,
                 report: &report,
             };
-            if let Err(error) = serve(cwd, resume, argv, rx, &state)
+            if let Err(error) = serve(cwd, resume, argv, on, rx, &state)
                 && !worker_cancelled.load(Ordering::SeqCst)
             {
                 report(TerminalEvent::Failed(error.to_string()));
@@ -527,10 +545,76 @@ fn stream(
     }
 }
 
+/// Environment for an explicitly launched Pi RPC bridge. A remote bridge
+/// must not inherit Windows launcher paths or profile directories.
+fn bridge_environment(
+    on: Option<&str>,
+    get: &dyn Fn(&str) -> Option<OsString>,
+) -> Value {
+    let mut env = json!({
+        "TERM": "xterm-256color",
+        "COLORTERM": "truecolor",
+        "TERM_PROGRAM": "GentleShell",
+    });
+    if on.is_some() {
+        for (host_key, remote_key) in [
+            ("GENTLE_SHELL_HERDR_REMOTE_BIN", "GENTLE_SHELL_BIN"),
+            ("GENTLE_SHELL_HERDR_REMOTE_PATH", "PATH"),
+        ] {
+            if let Some(value) = get(host_key).filter(|s| !s.is_empty()) {
+                env[remote_key] = json!(value.to_string_lossy());
+            }
+        }
+    } else {
+        if let Some(value) = get("PATH") {
+            env["PATH"] = json!(value.to_string_lossy());
+        }
+        for key in [
+            "GENTLE_SHELL_BIN", "GENTLE_SHELL_ARGS", "GENTLE_SHELL_HOME",
+            "GENTLE_SHELL_CONFIG", "GENTLE_SHELL_USER_PI_HOME",
+            "GENTLE_PI_AGENT_HOME", "GENTLE_PI_CONFIG_HOME",
+            "GENTLE_SHELL_PI", "PI_CODING_AGENT_DIR", "HOME", "USERPROFILE",
+        ] {
+            if let Some(value) = get(key).filter(|s| !s.is_empty()) {
+                env[key] = json!(value.to_string_lossy());
+            }
+        }
+    }
+    env
+}
+
+/// A remote terminal.run must return an address owned by that machine.
+/// Reject older/incompatible Core versions that unexpectedly start locally.
+fn validate_started_address(address: &str, on: Option<&str>) -> Result<()> {
+    if let Some(machine) = on
+        && !address.starts_with(&format!("{machine}/"))
+    {
+        return Err(Error::Protocol(format!(
+            "Herdr asked to run on {machine}, but terminal.run returned {address}"
+        )));
+    }
+    Ok(())
+}
+
+/// An explicitly addressed bridge must attach, not launch a second agent.
+/// Ignore the generic terminal env override when an explicit program is used.
+fn choose_terminal_address(
+    resume: Option<String>,
+    explicit_program: bool,
+    environment_address: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    if explicit_program {
+        resume
+    } else {
+        resume.or_else(environment_address)
+    }
+}
+
 fn serve(
     cwd: PathBuf,
     resume: Option<String>,
     argv: Option<Vec<String>>,
+    on: Option<String>,
     mut rx: Receiver<Command>,
     state: &ConnectionState<'_>,
 ) -> Result<()> {
@@ -543,15 +627,11 @@ fn serve(
         .unwrap_or_else(|| OsString::from("hc"));
     // Resolve once. NEVER call terminal.run again after this point.
     // An explicit command cannot be redirected by the generic resume env var.
-    let selected = if argv.is_some() {
-        resume
-    } else {
-        resume.or_else(|| {
-            std::env::var("GENTLE_SHELL_HERDR_TERMINAL")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        })
-    };
+    let selected = choose_terminal_address(resume, argv.is_some(), || {
+        std::env::var("GENTLE_SHELL_HERDR_TERMINAL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+    });
     let address = match selected {
         Some(address) => address,
         None => {
@@ -560,6 +640,7 @@ fn serve(
             let size = *desired.lock().unwrap_or_else(|e| e.into_inner());
             let mut params = json!({
                 "cwd": cwd.to_string_lossy(),
+                "on": on.as_deref(),
                 "no_parent": true,
                 "wait": false,
                 "size": {"cols": size.cols, "rows": size.rows},
@@ -572,39 +653,26 @@ fn serve(
                 }
                 params["argv"] = json!(program);
                 params["labels"] = json!({"gentle-shell": "rpc-agent"});
-                // Core may be running with an older service environment.
-                // Only the explicitly launched local agent bridge inherits
-                // these launch paths, not ordinary user terminal sessions.
-                if let Some(path) = std::env::var_os("PATH") {
-                    params["env"]["PATH"] = json!(path.to_string_lossy());
-                }
-                // The Herdr daemon can outlive GPUI and therefore carry
-                // older environment values. Use the same non-secret launcher
-                // and profile selectors as the foreground GPUI process so
-                // Herdr agents load the same Pi configuration as local ones.
-                for name in [
-                    "GENTLE_SHELL_BIN",
-                    "GENTLE_SHELL_ARGS",
-                    "GENTLE_SHELL_HOME",
-                    "GENTLE_SHELL_CONFIG",
-                    "GENTLE_SHELL_USER_PI_HOME",
-                    "GENTLE_PI_AGENT_HOME",
-                    "GENTLE_PI_CONFIG_HOME",
-                    "GENTLE_SHELL_PI",
-                    "PI_CODING_AGENT_DIR",
-                    "HOME",
-                    "USERPROFILE",
-                ] {
-                    if let Some(value) = std::env::var_os(name) {
-                        params["env"][name] = json!(value.to_string_lossy());
-                    }
-                }
+                // Windows host PATH/HOME must NEVER leak onto an ARM64 remote.
+                // A remote Herdr Core resolves its own PATH, HOME and Pi auth;
+                // only opt-in target-specific overrides can be forwarded.
+                params["env"] = bridge_environment(
+                    on.as_deref(),
+                    &|name: &str| std::env::var_os(name),
+                );
             }
             let run = client.call("terminal.run", params)?;
-            run["address"]
+            let address = run["address"]
                 .as_str()
                 .ok_or_else(|| Error::Protocol("terminal.run returned no address".into()))?
-                .to_owned()
+                .to_owned();
+            if let Err(error) = validate_started_address(&address, on.as_deref()) {
+                // A rejected/misrouted terminal belongs to this launch;
+                // do not leave it running on Windows as an accidental fallback.
+                let _ = client.call("terminal.kill", json!({"terminal": address}));
+                return Err(error);
+            }
+            address
         }
     };
     if cancelled.load(Ordering::SeqCst) { return Ok(()); }
@@ -662,6 +730,7 @@ fn serve(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::io::Cursor;
 
     use serde_json::json;
@@ -671,9 +740,72 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        CREDIT, DATA, Command, Error, check_response, discard_offline, encode_frame,
-        read_frame, retry_delay, terminal_finished, wait_retry,
+        CREDIT, DATA, Command, Error, bridge_environment, check_response,
+        choose_terminal_address, discard_offline, encode_frame, read_frame, retry_delay,
+        terminal_finished, validate_started_address, wait_retry,
     };
+
+    #[test]
+    fn saved_rpc_address_attaches_without_new_terminal_run() {
+        assert_eq!(
+            choose_terminal_address(Some("javipi/t42".into()), true, || {
+                panic!("explicit program must ignore generic resume environment")
+            }),
+            Some("javipi/t42".into())
+        );
+        assert_eq!(
+            choose_terminal_address(None, true, || Some("wrong/t5".into())),
+            None
+        );
+        assert_eq!(
+            choose_terminal_address(None, false, || Some("t5".into())),
+            Some("t5".into())
+        );
+    }
+
+    #[test]
+    fn remote_run_must_return_a_terminal_on_the_selected_machine() {
+        assert!(validate_started_address("javipi/t8", Some("javipi")).is_ok());
+        assert!(validate_started_address("t8", None).is_ok());
+        assert!(validate_started_address("t8", Some("javipi")).is_err());
+        assert!(validate_started_address("other/t8", Some("javipi")).is_err());
+        assert!(validate_started_address("javipi-other/t8", Some("javipi")).is_err());
+    }
+
+    #[test]
+    fn remote_bridge_never_receives_windows_home_path_or_launcher_settings() {
+        let sample = |name: &str| -> Option<OsString> {
+            match name {
+                "PATH" => Some(r"C:\\Windows;C:\\tools".into()),
+                "HOME" => Some(r"C:\\Users\\javij".into()),
+                "GENTLE_SHELL_BIN" => Some(r"C:\\tools\\gentle-shell.cmd".into()),
+                "GENTLE_SHELL_ARGS" => Some("--link".into()),
+                "GENTLE_SHELL_HERDR_REMOTE_BIN" => Some("/srv/tools/bin/gentle-shell".into()),
+                _ => None,
+            }
+        };
+        let remote = bridge_environment(Some("javipi"), &sample);
+        assert!(remote.get("PATH").is_none());
+        assert!(remote.get("HOME").is_none());
+        assert!(remote.get("GENTLE_SHELL_ARGS").is_none());
+        assert_eq!(remote["GENTLE_SHELL_BIN"], "/srv/tools/bin/gentle-shell");
+        assert_eq!(remote["TERM"], "xterm-256color");
+
+        let local = bridge_environment(None, &sample);
+        assert_eq!(local["GENTLE_SHELL_ARGS"], "--link");
+        assert!(local["PATH"].as_str().unwrap().contains("Windows"));
+    }
+
+    #[test]
+    fn remote_bridge_only_uses_explicit_remote_path_override() {
+        let sample = |name: &str| -> Option<OsString> {
+            (name == "GENTLE_SHELL_HERDR_REMOTE_PATH")
+                .then(|| OsString::from("/srv/tools/npm-global/bin:/usr/bin"))
+        };
+        let env = bridge_environment(Some("javipi"), &sample);
+        assert_eq!(env["PATH"], "/srv/tools/npm-global/bin:/usr/bin");
+        assert!(env.get("USERPROFILE").is_none());
+    }
 
     #[test]
     fn final_close_is_not_retried_but_recoverable_close_is() {

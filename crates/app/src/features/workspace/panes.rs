@@ -106,11 +106,21 @@ impl Workspace {
         cwd: PathBuf,
         prompt: Option<String>,
         resume: Option<PathBuf>,
+        restored_herdr: Option<String>,
         start_now: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PaneId {
-        let session = cx.new(|cx| SessionView::new(cwd.clone(), prompt, window, cx, start_now));
+        let session = cx.new(|cx| {
+            let mut session = SessionView::new(cwd.clone(), prompt, window, cx, false);
+            if let Some(address) = restored_herdr.clone() {
+                session.restore_herdr_terminal(address);
+            }
+            session
+        });
+        if start_now {
+            session.update(cx, |s, cx| s.ensure_started(window, cx));
+        }
         if let Some(path) = resume.clone() {
             session.update(cx, |s, cx| s.resume_when_ready(path, cx));
         }
@@ -185,13 +195,16 @@ impl Workspace {
                 focus,
                 title,
                 unsaved: None,
-                terminal_address: None,
+                terminal_address: Some({
+                    let session = session.clone();
+                    Rc::new(move |cx: &App| session.read(cx).herdr_terminal())
+                }),
             },
             session: Some(session),
             cwd,
             path: None,
             session_file: resume,
-            herdr_address: None,
+            herdr_address: restored_herdr,
             title: SharedString::default(),
             running: false,
             _subscriptions: subscriptions,
@@ -289,7 +302,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<PaneId> {
         match kind {
-            PaneKind::Agent => Some(self.new_agent_pane(target, prompt, resume, true, window, cx)),
+            PaneKind::Agent => Some(self.new_agent_pane(target, prompt, resume, None, true, window, cx)),
             PaneKind::Terminal | PaneKind::File => self.new_factory_pane(kind, target, window, cx),
         }
     }
@@ -311,7 +324,9 @@ impl Workspace {
             PaneKind::Agent => {
                 let resume = saved.session.clone().filter(|p| p.exists());
                 // Started once its tab is shown (see `start_shown`).
-                Some(self.new_agent_pane(cwd, None, resume, false, window, cx))
+                Some(self.new_agent_pane(
+                    cwd, None, resume, saved.herdr_terminal.clone(), false, window, cx,
+                ))
             }
             PaneKind::Terminal => {
                 PaneFactories::get(cx).terminal.as_ref()?;
@@ -344,6 +359,98 @@ impl Workspace {
         }
     }
 
+    /// One-time recovery of agents started by older 4B builds, before agent
+    /// pane addresses were saved. This only opens new views of known live
+    /// Herdr RPC terminals; no terminal.run or second Pi agent is issued.
+    pub(super) fn recover_untracked_agents(
+        &mut self,
+        addresses: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut known: std::collections::HashSet<String> = self.panes.values()
+            .filter(|pane| pane.item.kind == PaneKind::Agent)
+            .filter_map(|pane| {
+                pane.herdr_address.clone().or_else(|| {
+                    pane.item.terminal_address.as_ref().and_then(|get| get(cx))
+                })
+            })
+            .collect();
+        // Other workspaces may not have been instantiated yet; keep their
+        // saved identities reserved to prevent duplicate recovered tabs.
+        for space in &self.spaces {
+            if let Some((tabs, _)) = &space.saved {
+                for tab in tabs {
+                    for pane in tab.layout.leaves() {
+                        if pane.kind == PaneKind::Agent
+                            && let Some(address) = pane.herdr_terminal
+                        {
+                            known.insert(address);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut first_recovered = None;
+        for address in addresses {
+            if !known.insert(address.clone()) {
+                continue;
+            }
+            let cwd = self.space().root.clone();
+            let pane = self.new_agent_pane(
+                cwd, None, None, Some(address), false, window, cx,
+            );
+            let id = self.alloc_id();
+            let space = self.space_mut();
+            if first_recovered.is_none() {
+                first_recovered = Some(space.tabs.len());
+            }
+            space.tabs.push(Tab {
+                id,
+                tree: PaneTree::Leaf(pane),
+                focused: pane,
+            });
+        }
+        if let Some(index) = first_recovered {
+            // After upgrading from 4B's address-less layout, show a recovered
+            // agent rather than starting an unwanted replacement Pi process.
+            self.space_mut().active = index;
+            self.focus_active(window, cx);
+            self.schedule_save(cx);
+            cx.notify();
+        }
+    }
+
+    /// If all live agents were already present in saved workspaces, the
+    /// recovery pass adds no tabs. Do not leave a legacy address-less pane
+    /// active: focus an existing live agent instead.
+    pub(super) fn focus_existing_remote_agent(
+        &mut self,
+        addresses: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let live: std::collections::HashSet<&str> =
+            addresses.iter().map(String::as_str).collect();
+        let existing_tab = self.space().tabs.iter().position(|tab| {
+            tab.tree.leaves().iter().any(|id| {
+                self.panes
+                    .get(id)
+                    .and_then(|pane| pane.herdr_address.as_deref())
+                    .is_some_and(|address| live.contains(address))
+            })
+        });
+        if let Some(index) = existing_tab
+            && self.space().active != index
+        {
+            self.space_mut().active = index;
+            self.focus_active(window, cx);
+            self.schedule_save(cx);
+            cx.notify();
+        }
+    }
+
     pub(super) fn open_tab(
         &mut self,
         kind: PaneKind,
@@ -368,12 +475,17 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Start the backends of the shown tab's agents: restored tabs start the
-    /// first time they are shown rather than all at launch.
+    /// Start visible restored agents only when it is safe. A live remote
+    /// agent must be reattached by its address, not replaced by an old
+    /// placeholder without a Herdr identity.
     pub(super) fn start_shown(&self, window: &mut Window, cx: &mut App) {
         let Some(tab) = self.tab() else { return };
         for id in tab.tree.leaves() {
-            if let Some(session) = self.panes.get(&id).and_then(|p| p.session.as_ref()) {
+            let Some(pane) = self.panes.get(&id) else { continue };
+            if !self.remote_agent_recovery.may_auto_start(pane.herdr_address.is_some()) {
+                continue;
+            }
+            if let Some(session) = &pane.session {
                 session.update(cx, |s, cx| s.ensure_started(window, cx));
             }
         }
@@ -618,7 +730,7 @@ impl Workspace {
         {
             tab.focused = next;
         }
-        // Dropping a session drops its PiProcess, which shuts the backend down.
+        self.shutdown_agent_pane(pane, cx);
         self.panes.remove(&pane);
         if active {
             self.focus_active(window, cx);
@@ -657,14 +769,19 @@ impl Workspace {
         }
         let tab = self.space_mut().tabs.remove(index);
         for pane in tab.tree.leaves() {
+            self.shutdown_agent_pane(pane, cx);
             self.panes.remove(&pane);
         }
         if self.space().tabs.is_empty() {
-            // Closing the last pane never closes the window (⌘Q quits):
-            // the workspace starts over with a fresh agent tab.
-            let root = self.space().root.clone();
-            self.open_tab(PaneKind::Agent, root, None, None, window, cx);
+            // An implicit replacement tab would start a second remote Pi.
+            // With existing agents, leave the workspace empty: the user can
+            // explicitly create a new agent from its "New agent tab" button.
+            if self.remote_agent_recovery.may_create_default_agent() {
+                let root = self.space().root.clone();
+                self.open_tab(PaneKind::Agent, root, None, None, window, cx);
+            }
             self.save_now(cx);
+            cx.notify();
             return;
         }
         let active = self.space().active;

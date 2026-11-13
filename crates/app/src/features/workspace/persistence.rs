@@ -41,6 +41,13 @@ impl Workspace {
             .collect()
     }
 
+    /// Tab removal is intentional agent termination, unlike GPUI exit.
+    pub(super) fn shutdown_agent_pane(&self, id: PaneId, cx: &App) {
+        if let Some(session) = self.panes.get(&id).and_then(|pane| pane.session.as_ref()) {
+            session.read(cx).shutdown_for_tab_close();
+        }
+    }
+
     // ── Persistence ─────────────────────────────────────────────────────────
 
     pub(super) fn saved_pane(&self, id: PaneId, cx: &App) -> Option<SavedPane> {
