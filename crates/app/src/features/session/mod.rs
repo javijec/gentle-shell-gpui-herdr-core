@@ -336,8 +336,8 @@ impl SessionView {
     /// Remote RPC processes have a persistent Herdr address independent of
     /// the Pi session JSONL file (which lives on JaviPi, not Windows).
     pub fn herdr_terminal(&self) -> Option<String> {
-        if let state::BackendStatus::Ready(pi_rpc::RpcProcess::Herdr(agent)) =
-            &self.backend.status
+        if let state::BackendStatus::Ready(process) = &self.backend.status
+            && let pi_rpc::RpcProcess::Herdr(agent) = process.as_ref()
         {
             return agent.address().or_else(|| self.restored_herdr.clone());
         }
