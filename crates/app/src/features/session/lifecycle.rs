@@ -274,6 +274,7 @@ impl SessionView {
         let resume = self.backend.pending_session.take();
         let launched = resume.clone();
         let restore_herdr = self.restored_herdr.clone();
+        let agent_target = self.agent_target.clone();
         self._io = cx.spawn_in(window, async move |this, cx| {
             let spawned = cx
                 .background_executor()
