@@ -1,10 +1,11 @@
-//! Read-only Linux file browser bound to one Herdr Pi agent.
-//! Unlike FileTreeView, no Windows filesystem or Git APIs are used here.
-//! Only herdr_fs_list / herdr_fs_read are sent to that agent's Node bridge.
+//! Linux Files bound to one Herdr Pi agent. Remote preview and opt-in
+//! revision-checked UTF-8 editing run through the existing injected bridge.
+//! This view never uses local Windows filesystem APIs or remote Pi bash.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::json;
@@ -23,14 +24,26 @@ struct RemoteEntry {
     kind: String,
 }
 
+struct RemotePreview {
+    path: String,
+    content: String,
+    /// Missing on old bridges: keep browsing read-only instead of inventing
+    /// a revision that could overwrite a changed remote file.
+    revision: Option<String>,
+}
+
+const MAX_EDIT_BYTES: usize = 128 * 1024;
+
 pub struct RemoteFilesView {
     session: Entity<SessionView>,
     machine: String,
     root: String,
     current: String,
     entries: Vec<RemoteEntry>,
-    /// A preview is text-only; there is deliberately no edit/save action.
-    preview: Option<(String, String)>,
+    preview: Option<RemotePreview>,
+    editor: Option<Entity<TextareaState>>,
+    _editor_events: Option<Subscription>,
+    saving: bool,
     loading: bool,
     error: Option<String>,
     truncated: bool,
@@ -67,7 +80,7 @@ fn friendly_error(error: &str) -> String {
         || low.contains("unrecognized command") || low.contains("unknown type")
         || low.contains("unknown rpc") || low.contains("not implemented")
     {
-        "This running agent has an older Herdr bridge. Open a new remote agent to enable read-only files; the existing agent is preserved.".into()
+        "This running agent has an older Herdr bridge. Open a new remote agent to enable the requested file operation; the existing agent is preserved.".into()
     } else {
         error.into()
     }
@@ -87,6 +100,9 @@ impl RemoteFilesView {
             root,
             entries: Vec::new(),
             preview: None,
+            editor: None,
+            _editor_events: None,
+            saving: false,
             loading: false,
             error: None,
             truncated: false,
@@ -133,11 +149,31 @@ impl RemoteFilesView {
         &self.session
     }
 
+    /// Navigation must not silently discard a typed edit.
+    fn can_leave_preview(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.saving {
+            self.error = Some("Save is in progress. Keep this file open.".into());
+            cx.notify();
+            return false;
+        }
+        if self.editor.as_ref().zip(self.preview.as_ref())
+            .is_some_and(|(editor, preview)| editor.read(cx).value() != preview.content)
+        {
+            self.error = Some("Unsaved remote edits. Save or Cancel before navigating.".into());
+            cx.notify();
+            return false;
+        }
+        true
+    }
+
     fn load_directory(&mut self, directory: String, cx: &mut Context<Self>) {
+        if !self.can_leave_preview(cx) { return; }
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.current = directory.clone();
         self.preview = None;
+        self.editor = None;
+        self._editor_events = None;
         self.entries.clear();
         self.error = None;
         self.truncated = false;
@@ -184,6 +220,7 @@ impl RemoteFilesView {
     }
 
     fn open(&mut self, path: String, is_directory: bool, cx: &mut Context<Self>) {
+        if !self.can_leave_preview(cx) { return; }
         if is_directory {
             self.load_directory(path, cx);
             return;
@@ -191,6 +228,8 @@ impl RemoteFilesView {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.preview = None;
+        self.editor = None;
+        self._editor_events = None;
         self.error = None;
         self.loading = true;
         let Some(process) = self.session.read(cx).remote_fs_process() else {
@@ -212,9 +251,101 @@ impl RemoteFilesView {
                 match response {
                     Ok(reply) => {
                         if let Some(content) = reply.data["content"].as_str() {
-                            this.preview = Some((path, content.to_owned()));
+                            this.preview = Some(RemotePreview {
+                                path,
+                                content: content.to_owned(),
+                                revision: reply.data["revision"].as_str()
+                                    .filter(|r| r.len() == 64
+                                        && r.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                                    .map(str::to_owned),
+                            });
                         } else {
                             this.error = Some("Invalid remote file response".into());
+                        }
+                    }
+                    Err(error) => this.error = Some(friendly_error(&error.to_string())),
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    /// Edit only a freshly read file with a server-provided revision.
+    fn start_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading || self.saving || self.editor.is_some() { return; }
+        let Some(preview) = self.preview.as_ref() else { return; };
+        if preview.revision.is_none() {
+            self.error = Some("This agent's bridge supports preview but not editing. Create a new remote agent to edit.".into());
+            cx.notify();
+            return;
+        }
+        let content = preview.content.clone();
+        let editor = cx.new(|cx| TextareaState::new(window, cx).auto_grow(8, 30));
+        editor.update(cx, |input, cx| {
+            input.set_value(content, window, cx);
+            input.focus(window, cx);
+        });
+        self._editor_events = Some(cx.subscribe(&editor,
+            |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event { cx.notify(); }
+            }));
+        self.editor = Some(editor);
+        self.error = None;
+        cx.notify();
+    }
+
+    fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        if self.saving { return; }
+        self.editor = None;
+        self._editor_events = None;
+        self.error = None;
+        cx.notify();
+    }
+
+    fn save_edit(&mut self, cx: &mut Context<Self>) {
+        if self.saving || self.loading { return; }
+        let (Some(preview), Some(editor)) = (&self.preview, &self.editor) else { return };
+        let Some(revision) = preview.revision.clone() else { return };
+        let text = editor.read(cx).value().to_string();
+        if text.as_bytes().len() > MAX_EDIT_BYTES || text.contains('\0') {
+            self.error = Some("Only UTF-8 text up to 128 KiB can be saved.".into());
+            cx.notify();
+            return;
+        }
+        if text == preview.content {
+            self.cancel_edit(cx);
+            return;
+        }
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.error = Some("Remote agent disconnected; the draft has not been saved.".into());
+            cx.notify();
+            return;
+        };
+        let path = preview.path.clone();
+        let generation = self.generation;
+        self.saving = true;
+        self.error = None;
+        let response = process.request(json!({
+            "type": "herdr_fs_write", "root": self.root,
+            "path": path, "content": text, "expectedRevision": revision,
+        }));
+        cx.spawn(async move |this, cx| {
+            let result = response.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation { return; }
+                this.saving = false;
+                match result {
+                    Ok(reply) => {
+                        if let Some(new_revision) = reply.data["revision"].as_str() {
+                            this.preview = Some(RemotePreview {
+                                path, content: text, revision: Some(new_revision.into()),
+                            });
+                            this.editor = None;
+                            this._editor_events = None;
+                            this.error = None;
+                        } else {
+                            this.error = Some("Save response had no revision; reload before editing again.".into());
                         }
                     }
                     Err(error) => this.error = Some(friendly_error(&error.to_string())),
