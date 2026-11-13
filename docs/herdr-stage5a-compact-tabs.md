@@ -199,6 +199,62 @@ collect these timings before adjusting the safe startup ceilings.
 5. Confirm reconnection after a long outage still works: no replayed
    mutating commands, no stale viewer events or duplicate terminals.
 
+## Model picker: remote versus local catalogs and authentication
+
+The model picker in each SessionView uses **that session's** Pi RPC process:
+
+- `get_state` supplies the currently selected model.
+- `get_available_models` supplies available model/provider choices.
+- `set_model { provider, modelId }` changes the model in the same
+  local or remote Pi process, never in a different agent.
+
+A remote Herdr session forwards those commands to the Pi process on
+JaviPi (or the selected remote machine), using **its remote credentials**.
+Local/native and Herdr-local sessions use the credentials of the
+Windows process. The model-picker menu now identifies the source as
+`Models from This computer` or `Models from javipi`.
+
+**Sign-in behavior:** The app's Providers screen is implemented on
+Windows and operates on local authentication files. It cannot log into
+a remote Gentle Shell instance. The model picker therefore offers a
+local `Sign in to a provider` only for local agents. For remote agents,
+it explains that provider credentials belong to the remote machine and
+provides `Refresh models from remote agent`. This makes a read-only
+`get_available_models` request over the existing Pi RPC process,
+without starting or terminating an agent. A remote agent may still
+need a deliberate restart if its running Pi process caches credentials;
+the refresh button does not pretend to authenticate it.
+
+**Remote-process safety:** A successful local provider login or a change
+to Windows Settings previously called `reload_models` on all sessions,
+which might restart running remote agents. It now affects only local
+sessions: remote sessions are left running and retain their current
+model, conversation, and Herdr terminal address. A remote catalog is
+refreshed by that agent's explicit Refresh control or normal
+`refresh_state` on reconnect. Stale model responses from an older
+backend/reconnection generation are ignored, and old menu choices are
+cleared before a new catalog is requested.
+
+### Model source regression tests (Windows + JaviPi)
+
+1. With different providers/auth installed on Windows versus JaviPi,
+   select the local agent: the picker says `Models from This computer`
+   and shows only models reported by its local Pi process.
+2. Select a JaviPi agent: it says `Models from javipi` and lists the
+   models reported by the remote Pi process, not a union of both.
+3. Select a remote model. Verify a `set_model` RPC updates **only**
+   that remote agent; switching back to the local agent keeps the
+   local selection unchanged.
+4. In the JaviPi picker, there must be **no** button that claims to
+   sign into providers on Windows. The **Refresh models** button
+   must refresh without creating a new `javipi/tN` or restarting Pi.
+5. Change Windows provider credentials in Providers. JaviPi agents
+   must remain alive and unchanged; their selected models and
+   addresses must not be replaced.
+6. During a JaviPi disconnect/reconnect, the picker must not show
+   stale local models; once recovered, it should query the same
+   remote process again.
+
 ## Scope
 
 This is a presentation/navigation change. The internal `Tab` / `Pane`
