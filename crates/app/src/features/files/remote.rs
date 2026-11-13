@@ -4,7 +4,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{Editor, EditorState, InputEvent};
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -33,6 +33,10 @@ struct RemotePreview {
 }
 
 const MAX_EDIT_BYTES: usize = 128 * 1024;
+const CONTEXT: &str = "GentleRemoteFileView";
+const SAVE_HINT: &str = if cfg!(target_os = "macos") { "⌘S" } else { "Ctrl+S" };
+
+actions!(herdr_file_view, [Save]);
 
 pub struct RemoteFilesView {
     session: Entity<SessionView>,
@@ -41,7 +45,7 @@ pub struct RemoteFilesView {
     current: String,
     entries: Vec<RemoteEntry>,
     preview: Option<RemotePreview>,
-    editor: Option<Entity<TextareaState>>,
+    editor: Option<Entity<EditorState>>,
     _editor_events: Option<Subscription>,
     saving: bool,
     loading: bool,
@@ -87,6 +91,17 @@ fn friendly_error(error: &str) -> String {
 }
 
 impl RemoteFilesView {
+    /// Use the same save shortcut as local FileView, scoped to the
+    /// remote editor's focused UI. The action always saves through Herdr.
+    pub fn bind_keys(cx: &mut App) {
+        let key = if cfg!(target_os = "macos") { "cmd-s" } else { "ctrl-s" };
+        cx.bind_keys([KeyBinding::new(key, Save, Some(CONTEXT))]);
+    }
+
+    fn save_shortcut(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
+        self.save_edit(cx);
+    }
+
     pub fn new(
         session: Entity<SessionView>,
         machine: String,
@@ -164,7 +179,7 @@ impl RemoteFilesView {
             return false;
         }
         if self.editor.as_ref().zip(self.preview.as_ref())
-            .is_some_and(|(editor, preview)| editor.read(cx).value() != preview.content)
+            .is_some_and(|(editor, preview)| editor.read(cx).text().to_string() != preview.content)
         {
             self.error = Some("Unsaved remote edits. Save or Cancel before navigating.".into());
             cx.notify();
@@ -293,11 +308,11 @@ impl RemoteFilesView {
             return;
         }
         let content = preview.content.clone();
-        let editor = cx.new(|cx| TextareaState::new(window, cx).auto_grow(8, 30));
-        editor.update(cx, |input, cx| {
-            input.set_value(content, window, cx);
-            input.focus(window, cx);
-        });
+        // Use the exact EditorState constructor that local FileView uses:
+        // syntax highlighting by extension, line numbers and undo.
+        let file = std::path::Path::new(&preview.path);
+        let editor = cx.new(|cx| super::source_editor(file, content, window, cx));
+        editor.update(cx, |input, cx| input.focus(window, cx));
         self._editor_events = Some(cx.subscribe(&editor,
             |_, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event { cx.notify(); }
@@ -319,7 +334,7 @@ impl RemoteFilesView {
         if self.saving || self.loading { return; }
         let (Some(preview), Some(editor)) = (&self.preview, &self.editor) else { return };
         let Some(revision) = preview.revision.clone() else { return };
-        let text = editor.read(cx).value().to_string();
+        let text = editor.read(cx).text().to_string();
         if text.len() > MAX_EDIT_BYTES || text.contains('\0') {
             self.error = Some("Only UTF-8 text up to 128 KiB can be saved.".into());
             cx.notify();
@@ -388,7 +403,7 @@ impl Render for RemoteFilesView {
             let truncated = preview.content.lines().count() > rows.len();
              let can_edit = preview.revision.is_some() && self.root != "/";
             let dirty = self.editor.as_ref().is_some_and(|editor| {
-                editor.read(cx).value() != preview.content
+                editor.read(cx).text().to_string() != preview.content
             });
             content = content.child(
                 h_flex()
@@ -420,7 +435,11 @@ impl Render for RemoteFilesView {
                     h_flex().px_2().gap_2().items_center()
                         .child(
                             Button::new("remote-files-save")
-                                .primary().small().label(if self.saving { "Saving…" } else { "Save" })
+                                .primary().small().label(if self.saving {
+                                    "Saving…".to_owned()
+                                } else {
+                                    format!("Save · {SAVE_HINT}")
+                                })
                                 .disabled(!dirty || self.saving)
                                 .on_click(cx.listener(|this, _, _, cx| this.save_edit(cx))),
                         )
@@ -434,10 +453,15 @@ impl Render for RemoteFilesView {
                         .child(div().text_xs().text_color(ui::muted())
                             .child(if dirty { "Unsaved changes" } else { "Unchanged" }))
                 ).child(
-                    div().px_2().py_2().min_h(px(220.))
+                    div().px_2().py_2().h(px(360.)).w_full().overflow_hidden()
                         .rounded_md().border_1().border_color(ui::border())
-                        .font_family(ui::MONO).text_size(px(12.))
-                        .child(Textarea::new(editor).appearance(false).disabled(self.saving))
+                        .child(
+                            Editor::new(editor)
+                                .appearance(false)
+                                .font_family(ui::MONO)
+                                .text_size(px(12.5))
+                                .size_full()
+                        )
                 );
             } else {
                 content = content
@@ -528,6 +552,8 @@ impl Render for RemoteFilesView {
         }
 
         v_flex()
+            .key_context(CONTEXT)
+            .on_action(cx.listener(Self::save_shortcut))
             .size_full()
             .min_h_0()
             .child(
