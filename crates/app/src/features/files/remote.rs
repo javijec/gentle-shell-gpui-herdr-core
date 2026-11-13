@@ -458,6 +458,7 @@ impl Render for RemoteFilesView {
                         .child(
                             Editor::new(editor)
                                 .appearance(false)
+                                .disabled(self.saving)
                                 .font_family(ui::MONO)
                                 .text_size(px(12.5))
                                 .size_full()
