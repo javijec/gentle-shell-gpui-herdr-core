@@ -91,7 +91,8 @@ pub const SIDEBAR_WIDTH: f32 = 260.;
 pub enum WorkspaceEvent {
     /// The shown workspace changed; its root folder.
     RootChanged(PathBuf),
-    /// The left sidebar was shown or hidden.
+    /// The right local Files dock was shown or hidden. Its owner uses
+    /// this notification to pause directory and Git polling while hidden.
     SidebarToggled(bool),
 }
 
@@ -350,7 +351,7 @@ pub struct Workspace {
     overlay: Option<(Overlay, Subscription)>,
     sidebar: Option<AnyView>,
     sidebar_visible: bool,
-    /// Files is an alternate sidebar mode, not an additional tab strip.
+    /// Independent right-side Windows Files / Changes / Branches dock.
     files_sidebar_open: bool,
     /// Registered remote machines; discovered off the GPUI render thread.
     machine_snapshot: Option<machine_model::Snapshot>,
@@ -480,10 +481,10 @@ impl Workspace {
             },
             overlay: None,
             sidebar: None,
-            // The new machine navigator replaces tabs, and must be visible
-            // on first launch regardless of the former Files sidebar state.
+            // Machines and local Files have separate dock positions.
+            // Default to showing both without restoring the old tab strip.
             sidebar_visible: true,
-            files_sidebar_open: false,
+            files_sidebar_open: true,
             machine_snapshot: None,
             machine_error: None,
             collapsed_machines: std::collections::HashSet::new(),
@@ -674,7 +675,7 @@ impl Workspace {
         });
     }
 
-    /// Put `view` in the left sidebar slot (cmd-b toggles it).
+    /// Put the local Files/Changes/Branches view in the right dock.
     pub fn set_sidebar(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.sidebar = Some(view);
         cx.notify();
