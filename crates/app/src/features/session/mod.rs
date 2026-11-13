@@ -264,6 +264,7 @@ impl SessionView {
             session_name: None,
             session_file: None,
             restored_herdr: None,
+            agent_target: None,
             title: None,
             active_shell: None,
             banner: crate::shared::banner::read_config(&pi_rpc::resolve_homes().config),
