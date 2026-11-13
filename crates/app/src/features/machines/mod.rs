@@ -10,6 +10,9 @@ pub enum MachinesEvent {
     Close,
     /// Attach the existing Herdr terminal address in a new GPUI tab.
     OpenTerminal(String),
+    /// Explicitly launch a Pi agent on the local computer (None) or a
+    /// connected registered remote machine (Some). Nothing auto-spawns.
+    NewAgent(Option<String>),
 }
 
 pub struct MachinesView {
@@ -74,6 +77,26 @@ impl MachinesView {
             snapshot.terminals.iter().any(|t| t.address == address && t.live())
         }) {
             cx.emit(MachinesEvent::OpenTerminal(address));
+        }
+    }
+
+    /// 4C: the machine picker only emits an explicit new-agent choice.
+    /// The workspace owns the tab and enforces isolation from other agents.
+    fn new_agent(&mut self, machine: Option<String>, cx: &mut Context<Self>) {
+        if !crate::features::terminal::herdr_enabled() || self.busy {
+            return;
+        }
+        let available = match machine.as_deref() {
+            None => true,
+            Some(name) => self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.machines.iter().any(|m| m.name == name && m.connected())
+            }),
+        };
+        if available {
+            cx.emit(MachinesEvent::NewAgent(machine));
+        } else {
+            self.error = Some("This machine is not connected; agent not launched".into());
+            cx.notify();
         }
     }
 
