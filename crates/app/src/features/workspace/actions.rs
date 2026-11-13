@@ -132,13 +132,24 @@ impl Workspace {
 
     pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
-        cx.emit(WorkspaceEvent::SidebarToggled(self.sidebar_visible));
+        cx.emit(WorkspaceEvent::SidebarToggled(
+            self.sidebar_visible && self.files_sidebar_open,
+        ));
         self.schedule_save(cx);
         cx.notify();
     }
 
+    /// The embedded file tree is only visible in Files mode; the machines
+    /// navigator owns the same sidebar slot by default.
     pub fn sidebar_visible(&self) -> bool {
-        self.sidebar_visible
+        self.sidebar_visible && self.files_sidebar_open
+    }
+
+    pub(super) fn toggle_sidebar_mode(&mut self, cx: &mut Context<Self>) {
+        self.files_sidebar_open = !self.files_sidebar_open;
+        self.sidebar_visible = true;
+        cx.emit(WorkspaceEvent::SidebarToggled(self.files_sidebar_open));
+        cx.notify();
     }
 
     pub(super) fn on_open_providers(
