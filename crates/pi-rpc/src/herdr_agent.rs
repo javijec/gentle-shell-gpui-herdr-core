@@ -353,20 +353,30 @@ impl IncomingState {
         }
     }
 
+    /// A new viewer starts with a screen repaint, not a byte-accurate
+    /// continuation of the old PTY stream. Never splice two generations.
+    fn reset_stream(&mut self, token: &str) {
+        self.wire = Decoder::new(token.to_owned());
+        self.jsonl.clear();
+    }
+
     /// The outer stream can split a frame anywhere; a Pi record can itself
     /// span hundreds of frames. Echoed input ('I') is never Pi output.
+    /// While reattaching, only correlated RPC responses are safe to handle:
+    /// a terminal repaint may contain old UI and stream events.
     fn consume(
         &mut self,
         bytes: &[u8],
         pending: &Pending,
         events: &async_channel::Sender<Incoming>,
+        accept_events: bool,
     ) -> (bool, Option<Option<i32>>) {
         let mut ready = false;
         let mut exited = None;
         for frame in self.wire.push(bytes) {
             match frame.kind {
                 'R' => ready = true,
-                'X' => {
+                'X' if accept_events => {
                     exited = Some(String::from_utf8_lossy(&frame.payload).parse::<i32>().ok());
                 }
                 'E' => {
@@ -374,7 +384,9 @@ impl IncomingState {
                     if self.stderr_tail.len() < 4096 {
                         self.stderr_tail.push_str(&line);
                     }
-                    let _ = events.try_send(Incoming::Stderr(line));
+                    if accept_events {
+                        let _ = events.try_send(Incoming::Stderr(line));
+                    }
                 }
                 'O' => {
                     for b in frame.payload {
@@ -387,7 +399,7 @@ impl IncomingState {
                         }
                         self.jsonl.push(b);
                         if b == b'\n' {
-                            dispatch_record(&self.jsonl, pending, events);
+                            dispatch_record(&self.jsonl, pending, events, accept_events);
                             self.jsonl.clear();
                         }
                     }
@@ -403,13 +415,14 @@ fn dispatch_record(
     line: &[u8],
     pending: &Pending,
     events: &async_channel::Sender<Incoming>,
+    accept_events: bool,
 ) {
     let incoming = match parse_record(line) {
         Ok(Record::Response(response)) => {
             let sender = response.id.as_ref().and_then(|id| pending.lock().unwrap().remove(id));
             if let Some(sender) = sender {
                 let _ = sender.try_send(response);
-            } else if !response.success {
+            } else if accept_events && !response.success {
                 let _ = events.try_send(Incoming::Stderr(format!(
                     "{} failed: {}",
                     response.command,
@@ -423,7 +436,9 @@ fn dispatch_record(
         Ok(Record::Empty) => return,
         Err(error) => Incoming::Stderr(format!("unparseable Herdr Pi JSONL: {error}")),
     };
-    let _ = events.try_send(incoming);
+    if accept_events {
+        let _ = events.try_send(incoming);
+    }
 }
 
 /// Owns one Herdr-managed Pi bridge; killing it never stops Herdr Core.
@@ -913,7 +928,7 @@ mod tests {
         );
         let framed = encode("test", 'O', jsonl.as_bytes()).concat();
         for chunk in framed.chunks(19) {
-            parser.consume(chunk, &pending, &events);
+            parser.consume(chunk, &pending, &events, true);
         }
         match rx.try_recv().unwrap() {
             Incoming::Event(event) => assert_eq!(event["value"], "hello"),
@@ -931,7 +946,7 @@ mod tests {
         let (events, rx) = async_channel::unbounded();
         let mut parser = IncomingState::new("test".into());
         let echo = encode("test", 'I', b"{\"type\":\"message_update\"}\n").concat();
-        parser.consume(&echo, &pending, &events);
+        parser.consume(&echo, &pending, &events, true);
         assert!(rx.try_recv().is_err());
     }
 
@@ -945,12 +960,12 @@ mod tests {
         pending.lock().unwrap().insert("reconnect-probe".into(), reply_tx);
         let (events, _) = async_channel::unbounded();
         let mut parser = IncomingState::new("test".into());
-        parser.consume(&encode("test", 'O', b"unfinished-old-jsonl").concat(), &pending, &events);
+        parser.consume(&encode("test", 'O', b"unfinished-old-jsonl").concat(), &pending, &events, true);
         let reply = b"{\"type\":\"response\",\"id\":\"reconnect-probe\",\"command\":\"get_state\",\"success\":true,\"data\":{}}\n";
         let frames = encode("test", 'O', reply).concat();
-        parser.consume(&frames, &pending, &events);
+        parser.consume(&frames, &pending, &events, true);
         assert!(reply_rx.try_recv().is_err());
-        parser.consume(&frames, &pending, &events);
+        parser.consume(&frames, &pending, &events, true);
         assert!(reply_rx.try_recv().unwrap().success);
     }
 
@@ -965,7 +980,7 @@ mod tests {
         let mut input = json.to_vec();
         input.push(b'\n');
         for chunk in encode("test", 'O', &input).concat().chunks(11) {
-            parser.consume(chunk, &pending, &events);
+            parser.consume(chunk, &pending, &events, true);
         }
         let response = reply_rx.try_recv().unwrap();
         assert_eq!(response.data["ready"], true);
