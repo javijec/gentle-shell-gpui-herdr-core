@@ -26,6 +26,13 @@ impl Workspace {
             })
     }
 
+    /// The Files dock is a Windows filesystem view. Relative paths from it
+    /// must not be inserted as though they belonged to a Linux remote agent.
+    pub fn active_agent_is_remote(&self, cx: &App) -> bool {
+        self.active_session()
+            .is_some_and(|session| session.read(cx).is_remote_herdr())
+    }
+
     /// Start [`Self::active_session`]'s backend when a screen opens on it: it
     /// can sit in a tab not shown yet (when the shown tab has no agent).
     pub(super) fn start_active_session(&self, window: &mut Window, cx: &mut App) {

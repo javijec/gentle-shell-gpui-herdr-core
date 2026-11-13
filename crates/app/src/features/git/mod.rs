@@ -17,9 +17,12 @@ pub use changes::{
     commit, discard, last_commit_message, push, stage, stage_all, staged_diff, stash_push, unstage,
     unstage_all, work_tree,
 };
-pub use gentle_core::git::refs::{RefEntry, RefsSnapshot};
+pub use gentle_core::git::refs::{RefEntry, RefsSnapshot, Worktree};
 pub use gentle_core::git::status::{EntryKind, GitSnapshot, StatusEntry, WorkTree};
-pub use refs::{StashAction, checkout_remote, refs_snapshot, stash};
+pub use refs::{
+    StashAction, add_worktree, checkout_remote, prune_worktrees, refs_snapshot, remove_worktree,
+    stash,
+};
 pub use snapshot::snapshot;
 
 fn git(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -40,6 +43,19 @@ pub fn toplevel(cwd: &Path) -> Option<PathBuf> {
     let top = git(cwd, &["rev-parse", "--show-toplevel"])?;
     let top = top.trim();
     (!top.is_empty()).then(|| PathBuf::from(top))
+}
+
+/// The shortened path of the repository when `root` is a folder inside a
+/// larger one (its top level is above it); `None` when `root` is the top level.
+pub fn repository_path(root: &Path, toplevel: &Path) -> Option<String> {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let home = dirs::home_dir();
+    gentle_core::git::repo::nested_repository(
+        &root.to_string_lossy(),
+        &toplevel.to_string_lossy(),
+        home.as_deref().map(|h| h.to_string_lossy()).as_deref(),
+        cfg!(any(windows, target_os = "macos")),
+    )
 }
 
 /// Run `git` for its effect. The error is git's own message; credentials
@@ -149,7 +165,43 @@ mod tests {
         stash(&top, StashAction::Pop, &refs.stashes[0].name).unwrap();
         assert_eq!(work_tree(&top).unwrap().entries[0].path, "new.txt");
         assert!(push(&top).unwrap_err().contains("no remote"));
+        stash_push(&top, "parked again").unwrap();
 
+        // Worktrees: beside the repository, even when made from a linked one.
+        let feature = add_worktree(&top, "feature/x", false).unwrap();
+        let siblings = top.with_file_name(format!(
+            "{}.worktrees",
+            top.file_name().unwrap().to_string_lossy()
+        ));
+        assert_eq!(feature, siblings.join("feature-x"));
+        let fix = add_worktree(&feature, "fix", true).unwrap();
+        assert_eq!(fix, siblings.join("fix"));
+        let refs = refs_snapshot(&top).unwrap();
+        assert_eq!(refs.worktrees.len(), 2);
+        assert!(refs.branches.iter().any(|b| b.name == "fix"));
+        // A branch checked out elsewhere can't get a second worktree.
+        assert!(add_worktree(&top, "fix", false).is_err());
+        // Changes of its own keep a worktree; without them it goes, its
+        // branch stays.
+        std::fs::write(fix.join("wip.txt"), "x\n").unwrap();
+        assert!(remove_worktree(&top, &fix).is_err());
+        std::fs::remove_file(fix.join("wip.txt")).unwrap();
+        remove_worktree(&top, &fix).unwrap();
+        assert!(!fix.exists());
+        assert!(
+            refs_snapshot(&top)
+                .unwrap()
+                .branches
+                .iter()
+                .any(|b| b.name == "fix")
+        );
+        // A folder deleted by hand is prunable until pruned.
+        std::fs::remove_dir_all(&feature).unwrap();
+        assert!(refs_snapshot(&top).unwrap().worktrees[0].prunable);
+        prune_worktrees(&top).unwrap();
+        assert!(refs_snapshot(&top).unwrap().worktrees.is_empty());
+
+        let _ = std::fs::remove_dir_all(&siblings);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

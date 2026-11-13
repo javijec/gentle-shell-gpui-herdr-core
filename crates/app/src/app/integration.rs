@@ -106,7 +106,7 @@ pub fn attach_sidebar(
         cx: &mut App,
     ) -> Subscription {
         let tree = cx.new(|cx| FileTreeView::new(root, window, cx));
-        let shown = workspace.read(cx).sidebar_visible();
+        let shown = workspace.read(cx).files_sidebar_visible();
         tree.update(cx, |tree, cx| tree.set_visible(shown, cx));
         let target = workspace.downgrade();
         window
@@ -120,17 +120,31 @@ pub fn attach_sidebar(
                         workspace.open_file_in_tab(path.clone(), window, cx)
                     }
                     FileTreeEvent::OpenDiff(path) => workspace.open_diff(path.clone(), window, cx),
+                    FileTreeEvent::OpenAgent(folder) => {
+                        workspace.open_agent_tab(folder.clone(), window, cx)
+                    }
                     FileTreeEvent::InsertPath(text) => {
-                        if !workspace.insert_into_composer(text, window, cx) {
+                        if workspace.active_agent_is_remote(cx) {
+                            // Files/Changes/Branches are from Windows, even
+                            // while the selected conversation lives on JaviPi.
+                            // Inserting a Windows-relative path would silently
+                            // reference a different filesystem on Linux.
                             window.push_notification(
                                 Notification::info(
-                                    "Open an agent to insert paths into its prompt.",
+                                    "Files shows this computer's project. Local paths cannot be inserted into a remote agent. Use the remote agent's Linux path instead.",
+                                ),
+                                cx,
+                            );
+                        } else if !workspace.insert_into_composer(text, window, cx) {
+                            window.push_notification(
+                                Notification::info(
+                                    "Open a local agent to insert paths into its prompt.",
                                 ),
                                 cx,
                             );
                         }
                     }
-                    FileTreeEvent::Collapse => workspace.toggle_sidebar(cx),
+                    FileTreeEvent::Collapse => workspace.toggle_files_panel(cx),
                 });
             })
             .detach();

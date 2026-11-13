@@ -16,8 +16,23 @@ impl Render for Workspace {
         {
             tab.focused = inside;
         }
-        let sidebar = self.sidebar.clone().filter(|_| self.sidebar_visible);
-        let has_sidebar = self.sidebar.is_some();
+        // The two docks are independent: Machines lives on the left, while
+        // the existing native FileTreeView always occupies the right.
+        self.sync_remote_files(window, cx);
+        let selected_remote = self.active_session().is_some_and(|session| {
+            session.read(cx).is_remote_herdr()
+        });
+        let files: Option<AnyView> = if self.files_sidebar_open {
+            if selected_remote {
+                self.remote_files.as_ref().map(|view| view.clone().into())
+            } else {
+                self.sidebar.clone()
+            }
+        } else {
+            None
+        };
+        let navigator_visible = self.sidebar_visible;
+        let has_sidebar = true;
         // Below this the screen buttons fold into one overflow menu.
         let narrow = window.viewport_size().width < px(900.);
         // Native web views would cover a screen opened over them; device
@@ -32,9 +47,9 @@ impl Render for Workspace {
         // the root moves in place and asks for the next frame, so the element
         // tree (and every element's state) stays the same.
         let (shake_x, shake_y) = match self.surge {
-            Some((_, started)) => {
+            Some((_, started, level)) => {
                 window.request_animation_frame();
-                crate::shared::surge::shake_at(started.elapsed())
+                crate::shared::surge::shake_at(started.elapsed(), level)
             }
             None => (0., 0.),
         };
@@ -57,6 +72,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_new_agent_pane))
             .on_action(cx.listener(Self::on_new_terminal_pane))
             .on_action(cx.listener(Self::on_close_pane))
+            .on_action(cx.listener(Self::on_reopen_closed))
             .on_action(cx.listener(Self::on_focus_next_pane))
             .on_action(cx.listener(Self::on_focus_prev_pane))
             .on_action(cx.listener(Self::on_toggle_sidebar))
@@ -88,13 +104,25 @@ impl Render for Workspace {
                                 h_flex()
                                     .gap_2()
                                     .flex_1()
-                                    // Width 0: the tabs take what the buttons leave.
+                                    // The machine/agent tree owns navigation:
+                                    // no second tab strip in the title bar.
                                     .w_0()
                                     .min_w_0()
                                     .overflow_hidden()
                                     .child(self.render_workspace_chip(cx))
                                     .child(div().flex_none().w(px(1.)).h(px(14.)).bg(ui::border()))
-                                    .child(self.render_tabs(cx)),
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .max_w(px(340.))
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(ui::muted())
+                                            // Workspace chip is a Windows-local project.
+                                            // This label shows where the selected agent
+                                            // actually runs: machine + runtime CWD.
+                                            .child(self.active_runtime_label()),
+                                    ),
                             )
                             .child(
                                 h_flex()
@@ -134,19 +162,48 @@ impl Render for Workspace {
                                                     this.on_split_down(&SplitDown, window, cx)
                                                 })),
                                         )
-                                        .child(
-                                            Button::new("title-close-pane")
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(Icon::new(IconName::X))
-                                                .tooltip(format!(
-                                                    "Close pane ({})",
-                                                    if mac { "⌘W" } else { "Ctrl+W" }
-                                                ))
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.on_close_pane(&ClosePane, window, cx)
-                                                })),
-                                        )
+                                        .child({
+                                            // Names the pane it closes; hovering it
+                                            // marks that pane (see `render_pane`).
+                                            let target = self
+                                                .focused_pane()
+                                                .map(|id| self.pane_title(id))
+                                                .unwrap_or_default();
+                                            let hover = cx.entity().downgrade();
+                                            // The hover is the wrapper's: the button's
+                                            // tooltip already takes its own `on_hover`,
+                                            // and GPUI allows one per element.
+                                            div()
+                                                .id("title-close-pane-hover")
+                                                .on_hover(move |hovered, _, cx| {
+                                                    let hovered = *hovered;
+                                                    let _ = hover.update(cx, |this, cx| {
+                                                        if this.close_hover != hovered {
+                                                            this.close_hover = hovered;
+                                                            cx.notify();
+                                                        }
+                                                    });
+                                                })
+                                                .child(
+                                                    Button::new("title-close-pane")
+                                                        .ghost()
+                                                        .xsmall()
+                                                        .icon(Icon::new(IconName::X))
+                                                        .tooltip(format!(
+                                                            "Close \u{201c}{}\u{201d} ({})",
+                                                            target.trim_end_matches(" •"),
+                                                            if mac { "⌘W" } else { "Ctrl+W" }
+                                                        ))
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.close_hover = false;
+                                                                this.on_close_pane(
+                                                                    &ClosePane, window, cx,
+                                                                )
+                                                            },
+                                                        )),
+                                                )
+                                        })
                                         .child(div().w(px(1.)).h(px(14.)).mx_1().bg(ui::border()))
                                     })
                                     .when_some(
@@ -358,6 +415,24 @@ impl Render for Workspace {
                                     })
                                     .when(has_sidebar, |d| {
                                         d.child(
+                                            Button::new("switch-sidebar-mode")
+                                                .ghost()
+                                                .xsmall()
+                                                .icon(Icon::new(if self.files_sidebar_open {
+                                                    IconName::FolderOpen
+                                                } else {
+                                                    IconName::Folder
+                                                }))
+                                                .tooltip(if self.files_sidebar_open {
+                                                    "Hide local Windows Files (right)"
+                                                } else {
+                                                    "Show local Windows Files (right)"
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.toggle_sidebar_mode(cx)
+                                                })),
+                                        )
+                                        .child(
                                             Button::new("toggle-sidebar")
                                                 .ghost()
                                                 .xsmall()
@@ -366,7 +441,7 @@ impl Render for Workspace {
                                                 } else {
                                                     IconName::PanelLeftOpen
                                                 }))
-                                                .tooltip("Toggle sidebar (⌘B)")
+                                                .tooltip("Toggle Machines (Ctrl+B)")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.toggle_sidebar(cx)
                                                 })),
@@ -382,21 +457,23 @@ impl Render for Workspace {
                     .px_1p5()
                     .pb_1p5()
                     .gap_1p5()
-                    .children(sidebar.map(|view| {
-                        ui::appear(
-                            "sidebar-in",
-                            div()
-                                .w(px(SIDEBAR_WIDTH))
-                                .flex_none()
-                                .h_full()
-                                .rounded_xl()
-                                .bg(ui::panel())
-                                .border_1()
-                                .border_color(gpui_kit::transparent_black())
-                                .overflow_hidden()
-                                .child(view.cached(StyleRefinement::default().size_full())),
+                    .when(navigator_visible, |row| {
+                        row.child(
+                            ui::appear(
+                                "machine-navigator-in",
+                                div()
+                                    .w(px(SIDEBAR_WIDTH))
+                                    .flex_none()
+                                    .h_full()
+                                    .rounded_xl()
+                                    .bg(ui::panel())
+                                    .border_1()
+                                    .border_color(gpui_kit::transparent_black())
+                                    .overflow_hidden()
+                                    .child(self.render_machine_navigator(cx)),
+                            ),
                         )
-                    }))
+                    })
                     .child(
                         div()
                             .flex()
@@ -405,7 +482,69 @@ impl Render for Workspace {
                             .h_full()
                             .child(self.render_body(window, cx)),
                     )
-                    .when(devices_docked, |row| row.child(self.devices.clone())),
+                    .when(devices_docked, |row| row.child(self.devices.clone()))
+                    .children(files.map(|view| {
+                        ui::appear(
+                            "files-right-in",
+                            div()
+                                .w(px(if selected_remote {
+                                    SIDEBAR_WIDTH + 70.
+                                } else {
+                                    SIDEBAR_WIDTH
+                                }))
+                                .flex_none()
+                                .h_full()
+                                .rounded_xl()
+                                .bg(ui::panel())
+                                .border_1()
+                                .border_color(gpui_kit::transparent_black())
+                                .overflow_hidden()
+                                .child(
+                                    v_flex()
+                                        .size_full()
+                                        .min_h_0()
+                                        .child(
+                                            h_flex()
+                                                .h(px(27.))
+                                                .flex_none()
+                                                .px_3()
+                                                .gap_2()
+                                                .border_b_1()
+                                                .border_color(ui::border())
+                                                .child(
+                                                    Icon::new(IconName::Folder)
+                                                        .xsmall()
+                                                        .text_color(ui::muted()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .text_color(if selected_remote {
+                                                            ui::warning()
+                                                        } else {
+                                                            ui::muted()
+                                                        })
+                                                        .child(if selected_remote {
+                                                            "Remote Linux files · read-only"
+                                                        } else {
+                                                            "Local Windows files"
+                                                        }),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_h_0()
+                                                .child(view.cached(
+                                                    StyleRefinement::default().size_full(),
+                                                )),
+                                        ),
+                                ),
+                        )
+                    })),
             )
             .children(self.stages.iter().filter_map(Stage::element))
             .when(devices_floating, |root| root.child(self.devices.clone()))
@@ -413,6 +552,7 @@ impl Render for Workspace {
                 Overlay::Providers(view) => view.clone().into_any_element(),
                 Overlay::Sessions(view) => view.clone().into_any_element(),
                 Overlay::Machines(view) => view.clone().into_any_element(),
+                Overlay::RemoteDirectory(view) => view.clone().into_any_element(),
                 Overlay::Palette(view) => view.clone().into_any_element(),
                 Overlay::Usage(view) => view.clone().into_any_element(),
                 Overlay::Memory(view) => view.clone().into_any_element(),
@@ -421,8 +561,11 @@ impl Render for Workspace {
                 Overlay::Onboarding(view) => view.clone().into_any_element(),
                 Overlay::Welcome(view) => view.clone().into_any_element(),
             }))
-            .when_some(self.surge, |root, (run, _)| {
-                root.child(crate::shared::surge::overlay(run))
+            .when_some(self.surge, |root, (run, _, level)| {
+                root.child(crate::shared::surge::overlay(run, level))
+            })
+            .when_some(crate::features::hydration::playing(cx), |root, run| {
+                root.child(crate::features::hydration::overlay(run, cx))
             })
     }
 }

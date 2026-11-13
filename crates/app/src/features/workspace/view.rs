@@ -14,6 +14,33 @@ impl Workspace {
             .any(|id| self.panes.get(id).is_some_and(|p| p.running))
     }
 
+    /// What the agents of `space` do. A workspace not shown yet since launch
+    /// has no panes, so it counts as idle.
+    pub(super) fn space_activity(&self, space: &Space) -> Activity {
+        let mut activity = Activity::default();
+        for id in space.tabs.iter().flat_map(|tab| tab.tree.leaves()) {
+            match self.panes.get(&id) {
+                Some(pane) if pane.needs_you => activity.needs_you += 1,
+                Some(pane) if pane.running => activity.working += 1,
+                _ => {}
+            }
+        }
+        activity
+    }
+
+    /// What the agents of the other workspaces do, for the workspace chip.
+    fn elsewhere_activity(&self) -> Activity {
+        let mut total = Activity::default();
+        for (index, space) in self.spaces.iter().enumerate() {
+            if index != self.current {
+                let activity = self.space_activity(space);
+                total.working += activity.working;
+                total.needs_you += activity.needs_you;
+            }
+        }
+        total
+    }
+
     pub(super) fn pane_title(&self, id: PaneId) -> SharedString {
         self.panes
             .get(&id)
@@ -29,6 +56,21 @@ impl Workspace {
             .find(|c| c.is_alphanumeric())
             .map(|c| c.to_uppercase().collect::<String>())
             .unwrap_or_else(|| "·".into());
+        // Agents in the other workspaces: a dot here, details in the switcher.
+        let elsewhere = self.elsewhere_activity();
+        let (tip, dot) = if elsewhere.needs_you > 0 {
+            (
+                "Switch workspace · an agent in another one needs you",
+                Some(ui::warning()),
+            )
+        } else if elsewhere.working > 0 {
+            (
+                "Switch workspace · agents are working in another one",
+                Some(ui::accent()),
+            )
+        } else {
+            ("Switch workspace", None)
+        };
         h_flex()
             .id("workspace-chip")
             .h(px(TITLE_ITEM))
@@ -42,7 +84,7 @@ impl Workspace {
             .text_size(px(12.5))
             .cursor_pointer()
             .hover(|s| s.bg(ui::surface_hover().opacity(0.6)))
-            .tooltip(|window, cx| Tooltip::new("Switch workspace").build(window, cx))
+            .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
             // Keep clicks on the chip from turning into window drags: `occlude`
             // hides the title bar's drag area from Windows' hit test, and
             // stopping the mouse-down keeps TitleBar from starting a move.
@@ -76,259 +118,13 @@ impl Workspace {
                     .text_color(ui::fg())
                     .child(name),
             )
+            .when_some(dot, |d, color| {
+                d.child(div().size(px(6.)).flex_none().rounded_full().bg(color))
+            })
             .child(
                 Icon::new(IconName::ChevronDown)
                     .xsmall()
                     .text_color(ui::faint()),
-            )
-    }
-
-    pub(super) fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let space = self.space();
-        let weak = cx.entity().downgrade();
-        h_flex()
-            .gap(px(2.))
-            .min_w_0()
-            .children(space.tabs.iter().enumerate().map(|(i, tab)| {
-                let active = i == space.active;
-                let running = self.tab_running(tab);
-                let kind = self
-                    .panes
-                    .get(&tab.focused)
-                    .map(|p| p.item.kind)
-                    .unwrap_or(PaneKind::Agent);
-                let count = tab.tree.len();
-                let agent_machine = self.panes.get(&tab.focused)
-                    .filter(|pane| pane.item.kind == PaneKind::Agent)
-                    .and_then(|pane| {
-                        pane.agent_target.as_ref()
-                            .map(|target| target.machine_label().to_string())
-                            .or_else(|| pane.herdr_address.as_deref()
-                                .and_then(|address| address.split_once('/'))
-                                .map(|(name, _)| name.to_owned()))
-                    });
-                let icon_color = if active { ui::petal() } else { ui::faint() };
-                let item = h_flex()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .id(("tab", tab.id))
-                    .group("tab")
-                    .h(px(TITLE_ITEM))
-                    .pl(px(10.))
-                    .pr(px(4.))
-                    .gap(px(7.))
-                    .rounded(px(8.))
-                    .text_size(px(12.5))
-                    .cursor_pointer()
-                    .relative()
-                    // The fill alone marks the active tab, like Tern; the petal
-                    // icon carries the accent.
-                    .when(active, |this| {
-                        this.bg(ui::surface_hover().opacity(0.7))
-                            .text_color(ui::fg())
-                    })
-                    .when(!active, |this| {
-                        this.text_color(ui::muted())
-                            .hover(|s| s.bg(ui::surface_hover().opacity(0.6)).text_color(ui::fg()))
-                    })
-                    // Keep clicks on tabs from turning into window drags (see the
-                    // workspace chip).
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    // A double-click on an agent tab renames its session.
-                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                        if event.click_count() >= 2 {
-                            this.start_tab_rename(i, window, cx);
-                        } else {
-                            this.activate(i, window, cx);
-                        }
-                    }))
-                    .child(
-                        div()
-                            .size(px(14.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(if running {
-                                ui::pulse(div().size(px(7.)).rounded_full().bg(ui::accent()))
-                                    .into_any_element()
-                            } else if kind == PaneKind::Agent {
-                                div()
-                                    .text_size(px(13.))
-                                    .line_height(relative(1.))
-                                    .text_color(icon_color)
-                                    .child("❀")
-                                    .into_any_element()
-                            } else {
-                                Icon::new(kind.icon())
-                                    .small()
-                                    .text_color(icon_color)
-                                    .into_any_element()
-                            }),
-                    )
-                    .child(
-                        match self.renaming.as_ref().filter(|r| r.pane == tab.focused) {
-                            Some(rename) => div()
-                                .w(px(160.))
-                                .h(px(20.))
-                                .px_1()
-                                .flex()
-                                .items_center()
-                                .rounded(px(5.))
-                                .bg(ui::well())
-                                // Clicks in the field edit it rather than the tab.
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_action(cx.listener(Self::cancel_tab_rename))
-                                .child(Input::new(&rename.input).appearance(false).xsmall())
-                                .into_any_element(),
-                            None => div()
-                                .min_w_0()
-                                .max_w(px(180.))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .when(active, |d| d.font_weight(FontWeight::MEDIUM))
-                                .child(self.pane_title(tab.focused))
-                                .into_any_element(),
-                        },
-                    )
-                    .when_some(agent_machine, |d, machine| {
-                        d.child(
-                            div()
-                                .flex_none()
-                                .max_w(px(105.))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .rounded(px(5.))
-                                .px(px(5.))
-                                .bg(ui::surface_hover().opacity(0.8))
-                                .text_size(px(10.))
-                                .text_color(ui::muted())
-                                .child(machine),
-                        )
-                    })
-                    .when(count > 1, |d| {
-                        d.child(
-                            div()
-                                .h(px(16.))
-                                .min_w(px(16.))
-                                .px(px(4.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(5.))
-                                .bg(ui::surface_hover().opacity(0.7))
-                                .text_size(px(10.))
-                                .line_height(relative(1.))
-                                .text_color(ui::muted())
-                                .child(count.to_string()),
-                        )
-                    })
-                    .child(
-                        div()
-                            .id(("close-tab", tab.id))
-                            .size(px(18.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(5.))
-                            .text_color(ui::faint())
-                            .invisible()
-                            .group_hover("tab", |s| s.visible())
-                            .hover(|s| s.bg(ui::surface_hover()).text_color(ui::fg()))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.close_tab(i, window, cx);
-                            }))
-                            .child(Icon::new(IconName::X).xsmall()),
-                    );
-                // Tabs shrink (titles end in …) so the title bar's buttons
-                // keep their place in a narrow window.
-                ui::appear(("tab-in", tab.id), div().flex().min_w_0().child(item))
-            }))
-            .child(
-                div()
-                    .flex_none()
-                    .ml(px(2.))
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(title_button("new-tab", IconName::Plus).dropdown_menu(
-                        move |menu, _, _| {
-                            let item = |icon: IconName,
-                                        label: &'static str,
-                                        detail: &'static str,
-                                        keys: &'static str| {
-                                PopupMenuItem::element(move |_, _| {
-                                    menu_row(icon, label, detail, keys)
-                                })
-                            };
-                            let (agent, on_machine, terminal) =
-                                (weak.clone(), weak.clone(), weak.clone());
-                            let menu = menu.min_w(px(260.))
-                                .item(
-                                    item(
-                                        IconName::Bot,
-                                        "Agent tab",
-                                        "Gentle Shell in this folder",
-                                        if cfg!(target_os = "macos") {
-                                            "⌘T"
-                                        } else {
-                                            "Ctrl+T"
-                                        },
-                                    )
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            let _ = agent.update(cx, |this, cx| {
-                                                this.on_new_tab(&NewTab, window, cx)
-                                            });
-                                        },
-                                    ),
-                                );
-                            let menu = if crate::features::terminal::herdr_enabled() {
-                                menu.item(
-                                    item(
-                                        IconName::Bot,
-                                        "Agent on a machine...",
-                                        "Select this computer or a Herdr machine",
-                                        "",
-                                    )
-                                    .on_click(move |_, window, cx| {
-                                        let _ = on_machine.update(cx, |this, cx| {
-                                            this.open_machines(window, cx)
-                                        });
-                                    }),
-                                )
-                            } else {
-                                menu
-                            };
-                            menu
-                                .item(
-                                    item(
-                                        IconName::SquareTerminal,
-                                        "Terminal tab",
-                                        "A shell in this folder",
-                                        if cfg!(target_os = "macos") {
-                                            "⌘⇧T"
-                                        } else {
-                                            "Ctrl+Shift+T"
-                                        },
-                                    )
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            let _ = terminal.update(cx, |this, cx| {
-                                                this.on_new_terminal_tab(
-                                                    &NewTerminalTab,
-                                                    window,
-                                                    cx,
-                                                )
-                                            });
-                                        },
-                                    ),
-                                )
-                        },
-                    )),
             )
     }
 
@@ -462,6 +258,9 @@ impl Workspace {
         };
         let tiled = tab.tree.len() > 1;
         let focused = tiled && tab.focused == id;
+        // The title bar's close button is hovered and this pane is what it
+        // closes.
+        let closing = self.close_hover && tab.focused == id;
         let title = pane.title.clone();
         let body = div()
             .id(("pane", id))
@@ -476,7 +275,9 @@ impl Workspace {
             // Panes read as glass on their own; only a split's focused pane gets
             // an edge. The width stays so focus changes don't shift content.
             .border_1()
-            .border_color(if focused {
+            .border_color(if closing {
+                ui::danger()
+            } else if focused {
                 ui::petal().opacity(0.45)
             } else {
                 gpui_kit::transparent_black()
@@ -541,7 +342,10 @@ impl Workspace {
                 self.drop_hint
                     .filter(|(pane, _)| *pane == id && cx.has_active_drag())
                     .map(|(_, zone)| drop_overlay(zone)),
-            );
+            )
+            .when(closing, |d| {
+                d.child(div().absolute().inset_0().bg(ui::danger().opacity(0.08)))
+            });
         // The grip: a pill straddling the pane's top edge (outside the
         // clipped body); drag it onto another pane's edge to move the pane
         // there, or onto its middle to swap the two.
@@ -611,13 +415,13 @@ impl Workspace {
                 .gap_3()
                 .text_sm()
                 .text_color(ui::muted())
-                .child("No tabs in this workspace")
+                .child("No agents or panels selected")
                 .child(
                     Button::new("empty-new-tab")
                         .primary()
                         .small()
                         .icon(Icon::new(IconName::Plus))
-                        .label("New agent tab")
+                        .label("New local agent")
                         .on_click(
                             cx.listener(|this, _, window, cx| this.on_new_tab(&NewTab, window, cx)),
                         ),
@@ -629,11 +433,6 @@ impl Workspace {
 
 /// Height of the title bar's pills, tabs and buttons.
 pub(super) const TITLE_ITEM: f32 = 28.;
-
-/// A quiet square icon button for the title bar.
-pub(super) fn title_button(id: &'static str, icon: IconName) -> Button {
-    Button::new(id).ghost().xsmall().icon(Icon::new(icon))
-}
 
 /// A stable hue per workspace name, for its letter badge.
 pub(super) fn avatar_color(name: &str) -> Hsla {

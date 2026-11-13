@@ -113,7 +113,7 @@ impl Render for ProvidersView {
                                 .truncate()
                                 .text_xs()
                                 .text_color(ui::muted())
-                                .child("Credentials go to Gentle Shell's auth.json, like /login."),
+                                .child("This computer · Windows credentials only. Remote agents keep separate sign-ins."),
                         )
                         .child(
                             Button::new("providers-close")

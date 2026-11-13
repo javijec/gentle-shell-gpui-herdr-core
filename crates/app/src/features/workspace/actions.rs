@@ -99,6 +99,15 @@ impl Workspace {
         }
     }
 
+    pub(super) fn on_reopen_closed(
+        &mut self,
+        _: &ReopenClosed,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reopen_closed(window, cx);
+    }
+
     pub(super) fn on_focus_next_pane(
         &mut self,
         _: &FocusNextPane,
@@ -130,15 +139,30 @@ impl Workspace {
         self.toggle_sidebar(cx);
     }
 
+    /// Ctrl+B controls the left Machines navigator only. The right-hand
+    /// Files dock is independent and keeps its tree subscriptions alive.
     pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
-        cx.emit(WorkspaceEvent::SidebarToggled(self.sidebar_visible));
         self.schedule_save(cx);
         cx.notify();
     }
 
-    pub fn sidebar_visible(&self) -> bool {
-        self.sidebar_visible
+    /// Used by the file-tree owner to control filesystem polling. Files is
+    /// its own right dock and is no longer coupled to the Machines sidebar.
+    pub fn files_sidebar_visible(&self) -> bool {
+        self.files_sidebar_open
+    }
+
+    /// Files / Changes / Branches live on the right. This action never
+    /// collapses the machine tree on the opposite side.
+    pub fn toggle_files_panel(&mut self, cx: &mut Context<Self>) {
+        self.files_sidebar_open = !self.files_sidebar_open;
+        cx.emit(WorkspaceEvent::SidebarToggled(self.files_sidebar_open));
+        cx.notify();
+    }
+
+    pub(super) fn toggle_sidebar_mode(&mut self, cx: &mut Context<Self>) {
+        self.toggle_files_panel(cx);
     }
 
     pub(super) fn on_open_providers(

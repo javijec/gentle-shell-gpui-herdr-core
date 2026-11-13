@@ -28,17 +28,7 @@ impl Workspace {
             .active_session()
             .map(|t| t.read(cx).commands())
             .unwrap_or_default();
-        let workspaces = self
-            .spaces
-            .iter()
-            .enumerate()
-            .map(|(index, space)| WorkspaceRow {
-                index,
-                name: space.name.clone(),
-                tabs: space.tab_count(),
-                current: index == self.current,
-            })
-            .collect();
+        let workspaces = self.workspace_rows();
         let input = PaletteInput {
             commands,
             workspaces,
@@ -63,6 +53,21 @@ impl Workspace {
         );
         self.overlay = Some((Overlay::Palette(view), subscription));
         cx.notify();
+    }
+
+    /// Every workspace as the switcher lists it, with what its agents do.
+    pub(super) fn workspace_rows(&self) -> Vec<WorkspaceRow> {
+        self.spaces
+            .iter()
+            .enumerate()
+            .map(|(index, space)| WorkspaceRow {
+                index,
+                name: space.name.clone(),
+                tabs: space.tab_count(),
+                current: index == self.current,
+                activity: self.space_activity(space),
+            })
+            .collect()
     }
 
     pub(super) fn run_palette_action(
@@ -91,6 +96,7 @@ impl Workspace {
             PaletteAction::NewAgentPane => self.split_with_kind(PaneKind::Agent, window, cx),
             PaletteAction::NewTerminalPane => self.split_with_kind(PaneKind::Terminal, window, cx),
             PaletteAction::ClosePane => self.on_close_pane(&ClosePane, window, cx),
+            PaletteAction::ReopenClosed => self.reopen_closed(window, cx),
             PaletteAction::ToggleSidebar => self.toggle_sidebar(cx),
             PaletteAction::Agents => {
                 if let Some(tab) = tab {
@@ -131,18 +137,20 @@ impl Workspace {
         }
     }
 
-    /// Play the max-effort surge over the window; choosing max again
-    /// restarts it.
-    pub(super) fn play_surge(&mut self, cx: &mut Context<Self>) {
+    /// Play an effort level's surge over the window; another change
+    /// restarts it at the new level.
+    pub(super) fn play_surge(
+        &mut self,
+        level: crate::shared::surge::Level,
+        cx: &mut Context<Self>,
+    ) {
         self.surge_runs += 1;
         let run = self.surge_runs;
-        self.surge = Some((run, std::time::Instant::now()));
+        self.surge = Some((run, std::time::Instant::now(), level));
         self._surge_end = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(crate::shared::surge::DURATION)
-                .await;
+            cx.background_executor().timer(level.duration()).await;
             let _ = this.update(cx, |this, cx| {
-                if this.surge.is_some_and(|(playing, _)| playing == run) {
+                if this.surge.is_some_and(|(playing, _, _)| playing == run) {
                     this.surge = None;
                     cx.notify();
                 }
@@ -196,6 +204,59 @@ impl Workspace {
         }
     }
 
+    /// Pick a Linux working directory before creating a remote agent. No
+    /// remote terminal is started while the picker is open or cancelled.
+    pub(super) fn open_remote_directory_picker(
+        &mut self,
+        machine: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !crate::features::terminal::herdr_enabled() {
+            return;
+        }
+        if self.machine_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.machines.iter().any(|item| {
+                item.name == machine && !item.connected()
+            })
+        }) {
+            window.push_notification(Notification::info(
+                format!("{machine} is disconnected. No agent was started."),
+            ), cx);
+            return;
+        }
+        // Use Herdr's known terminal directories only as shortcuts: they
+        // are not a complete remote filesystem listing.
+        let snapshot = self.machine_snapshot.clone();
+        let view = cx.new(|cx| RemoteDirectoryPicker::new(
+            machine, snapshot, window, cx,
+        ));
+        let subscription = cx.subscribe_in(
+            &view,
+            window,
+            |this, _, event: &RemoteDirectoryEvent, window, cx| match event {
+                RemoteDirectoryEvent::Close => this.close_overlay(window, cx),
+                RemoteDirectoryEvent::Launch { machine, cwd } => {
+                    // Defense in depth: the picker already validated the
+                    // path, but the workspace is the final launch boundary.
+                    let target = pi_rpc::AgentTarget::remote_with_cwd(
+                        machine.clone(), cwd.clone(),
+                    );
+                    this.close_overlay(window, cx);
+                    match target {
+                        Ok(target) => this.open_agent_on_machine(target, window, cx),
+                        Err(error) => window.push_notification(
+                            Notification::info(format!("Invalid remote directory: {error}")),
+                            cx,
+                        ),
+                    }
+                }
+            },
+        );
+        self.overlay = Some((Overlay::RemoteDirectory(view), subscription));
+        cx.notify();
+    }
+
     /// Herdr machine and terminal browser (all discovery/actions off the UI thread).
     pub(super) fn open_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !crate::features::terminal::herdr_enabled() {
@@ -217,12 +278,16 @@ impl Workspace {
                     this.open_herdr_terminal(address, window, cx);
                 }
                 MachinesEvent::NewAgent(machine) => {
-                    let target = match machine {
-                        Some(name) => pi_rpc::AgentTarget::remote_for_machine(name.clone()),
-                        None => pi_rpc::AgentTarget::Local,
-                    };
+                    let machine = machine.clone();
                     this.close_overlay(window, cx);
-                    this.open_agent_on_machine(target, window, cx);
+                    match machine {
+                        Some(machine) => {
+                            this.open_remote_directory_picker(machine, window, cx)
+                        }
+                        None => this.open_agent_on_machine(
+                            pi_rpc::AgentTarget::Local, window, cx,
+                        ),
+                    }
                 }
             },
         );

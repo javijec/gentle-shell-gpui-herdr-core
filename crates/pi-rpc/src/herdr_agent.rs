@@ -24,6 +24,17 @@ const REMOTE_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const TRANSPORT_TIMEOUT: Duration = Duration::from_secs(12);
 const REATTACH_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(45);
 const REATTACH_PROBE_INTERVAL: Duration = Duration::from_secs(4);
+const REATTACH_FAST_PROBE_INTERVAL: Duration = Duration::from_millis(1200);
+
+fn reattach_probe_delay(attempts: u32) -> Duration {
+    // Old VT repaints can swallow the first get_state frame. Retry quickly
+    // while the viewer becomes live, then back off to avoid flooding Pi4.
+    if attempts < 4 {
+        REATTACH_FAST_PROBE_INTERVAL
+    } else {
+        REATTACH_PROBE_INTERVAL
+    }
+}
 type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
 
 /// Inline Node.js bridge is injected as argv via Herdr Core on JaviPi.
@@ -59,6 +70,17 @@ impl AgentTarget {
             "/"
         };
         Self::Remote { machine, cwd: cwd.to_owned() }
+    }
+
+    /// Create a remote target from a user-selected Linux directory.
+    /// Validate before opening a pane so bad Windows/traversal paths never
+    /// create even a provisional remote agent.
+    pub fn remote_with_cwd(machine: String, cwd: String) -> Result<Self> {
+        let cwd = cwd.trim();
+        anyhow::ensure!(!cwd.is_empty() && cwd.len() <= 2048,
+            "Remote directory must be 1–2048 characters");
+        validate_remote_target(Some(&machine), Some(cwd), None)?;
+        Ok(Self::Remote { machine, cwd: cwd.to_owned() })
     }
 }
 
@@ -211,10 +233,28 @@ fn core_client() -> Result<HerdrClient> {
     HerdrClient::connect_with_executable(executable).map_err(Into::into)
 }
 
-fn inspect_existing(address: &str) -> Result<String> {
+/// Restore a recorded Herdr agent. Local agents are intentionally stopped
+/// on GPUI quit, unlike remote agents; a confirmed exited local bridge may
+/// start fresh using its saved local session. A dead remote address must
+/// *never* silently create a replacement remote agent.
+fn inspect_existing(address: &str) -> Result<Option<String>> {
     let mut client = core_client()?;
     let record = client.call("terminal.get", json!({"terminal": address}))?;
-    token_for_terminal(&record, address)
+    inspect_saved_terminal(&record, address)
+}
+
+fn inspect_saved_terminal(record: &Value, address: &str) -> Result<Option<String>> {
+    // Only auto-replace a terminal we can identify as OUR dead local Pi
+    // bridge. An unknown record, foreign terminal, transport error, or remote
+    // agent keeps its original fail-closed behavior.
+    if !address.contains('/')
+        && record["address"] == address
+        && record["labels"]["gentle-shell"] == "rpc-agent"
+        && record["state"].as_str().is_some_and(|state| state != "live")
+    {
+        return Ok(None);
+    }
+    token_for_terminal(record, address).map(Some)
 }
 
 impl HerdrAgentProcess {
@@ -286,7 +326,7 @@ fn verify_transport(
         } else {
             TRANSPORT_TIMEOUT
         };
-        let mut next_retry = Instant::now() + REATTACH_PROBE_INTERVAL;
+        let mut next_retry = Instant::now() + reattach_probe_delay(1);
         let mut attempts = 1u32;
         loop {
             match rx.try_recv() {
@@ -318,7 +358,7 @@ fn verify_transport(
             if reattaching && now >= next_retry {
                 send();
                 attempts += 1;
-                next_retry = now + REATTACH_PROBE_INTERVAL;
+                next_retry = now + reattach_probe_delay(attempts);
             }
             std::thread::sleep(Duration::from_millis(30));
         }
@@ -489,8 +529,16 @@ impl HerdrAgentProcess {
     ) -> Result<(Arc<Self>, async_channel::Receiver<Incoming>)> {
         // Inspect the existing terminal before attaching: a stale or foreign
         // address must fail closed instead of launching another Pi agent.
-        let existing_token = existing.map(inspect_existing).transpose()?;
-        let remote = if existing.is_some() {
+        let startup_clock = Instant::now();
+        let inspected = existing.map(inspect_existing).transpose()?;
+        let inspected_at = Instant::now();
+        let local_ended = existing.is_some() && inspected.as_ref().is_some_and(Option::is_none);
+        // A dead local agent's saved address is not a live reattachment
+        // target. Preserve its local-only intent even if legacy global
+        // REMOTE_MACHINE variables were left set in PowerShell.
+        let existing = existing.filter(|_| !local_ended);
+        let existing_token = inspected.flatten();
+        let remote = if existing.is_some() || local_ended {
             None
         } else {
             RemoteTarget::from_agent_target(target)?
@@ -757,12 +805,24 @@ impl HerdrAgentProcess {
                 startup_timeout.as_secs(),
             )),
         };
+        let attached_at = Instant::now();
         // Bridge READY is insufficient: test a real RPC command through
         // terminal input + decoded output before SessionView refreshes models.
         let probe_id = format!("{id_prefix}-probe");
         let verified = started.and_then(|()| verify_transport(
             &session, &token, &pending, &ready, &probe_id, reattaching,
         ));
+        if remote_start && startup_clock.elapsed() >= Duration::from_secs(2) {
+            // Stage-specific diagnostics rather than guessing that a slow
+            // JaviPi connect was caused by the UI, SSH, Pi startup, or repaint.
+            eprintln!(
+                "gentle-shell-gpui: Herdr remote startup reattach={} inspect={}ms attach_or_ready={}ms rpc_probe={}ms",
+                reattaching,
+                inspected_at.duration_since(startup_clock).as_millis(),
+                attached_at.duration_since(inspected_at).as_millis(),
+                attached_at.elapsed().as_millis(),
+            );
+        }
         if let Err(error) = verified {
             allow_reconnect.store(false, Ordering::Release);
             // Never kill an *existing* agent just because this viewer failed
@@ -916,11 +976,45 @@ mod tests {
 
     use super::{
         Incoming, IncomingState, Pending, REMOTE_BRIDGE_JS, recoverable_addresses,
-        token_for_terminal, validate_remote_target, select_legacy_remote_target,
+        token_for_terminal, inspect_saved_terminal, validate_remote_target, select_legacy_remote_target,
         accept_stream_events, can_finish_reconnect, AgentTarget, RemoteTarget,
     };
     use crate::herdr_wire::encode;
     use serde_json::json;
+
+    #[test]
+    fn recovered_probe_retries_early_then_backs_off() {
+        use super::{reattach_probe_delay, REATTACH_FAST_PROBE_INTERVAL, REATTACH_PROBE_INTERVAL};
+        assert_eq!(reattach_probe_delay(1), REATTACH_FAST_PROBE_INTERVAL);
+        assert_eq!(reattach_probe_delay(2), REATTACH_FAST_PROBE_INTERVAL);
+        assert_eq!(reattach_probe_delay(3), REATTACH_FAST_PROBE_INTERVAL);
+        assert_eq!(reattach_probe_delay(4), REATTACH_PROBE_INTERVAL);
+    }
+
+    #[test]
+    fn stopped_local_bridge_restarts_but_stopped_remote_fails_closed() {
+        let dead_local = json!({
+            "address": "t18",
+            "state": "exited",
+            "labels": {"gentle-shell": "rpc-agent"}
+        });
+        assert_eq!(inspect_saved_terminal(&dead_local, "t18").unwrap(), None);
+
+        let dead_remote = json!({
+            "address": "javipi/t9",
+            "state": "exited",
+            "labels": {"gentle-shell": "rpc-agent"}
+        });
+        assert!(inspect_saved_terminal(&dead_remote, "javipi/t9").is_err());
+
+        let foreign = json!({
+            "address": "t18",
+            "state": "exited",
+            "labels": {"gentle-shell": "other"}
+        });
+        assert!(inspect_saved_terminal(&foreign, "t18").is_err());
+        assert!(inspect_saved_terminal(&dead_local, "t19").is_err());
+    }
 
     #[test]
     fn ctrl_t_defaults_to_local_when_only_stale_4b_remote_options_remain() {
@@ -948,6 +1042,32 @@ mod tests {
         // Once a machine is set, malformed settings still fail closed.
         assert!(select_legacy_remote_target(Some("javipi"), Some(r"C:\\bad"), None).is_err());
         assert!(select_legacy_remote_target(Some(""), None, None).is_err());
+    }
+
+    #[test]
+    fn custom_remote_working_directory_requires_valid_linux_path() {
+        assert_eq!(
+            AgentTarget::remote_with_cwd(
+                "javipi".into(), " /srv/workspaces/PoeTradePlus2 ".into()
+            ).unwrap(),
+            AgentTarget::Remote {
+                machine: "javipi".into(),
+                cwd: "/srv/workspaces/PoeTradePlus2".into(),
+            },
+        );
+        for path in ["", "relative/project", r"C:\\Programacion\\project",
+                     "/srv/../private", "/srv/./project", "/tmp/with\\backslash",
+                     "/tmp/with\\nline"] {
+            assert!(AgentTarget::remote_with_cwd("javipi".into(), path.into()).is_err(),
+                "accepted {path:?}");
+        }
+        assert!(AgentTarget::remote_with_cwd("bad/name".into(), "/srv".into()).is_err());
+        assert_eq!(
+            AgentTarget::remote_with_cwd("buildbox".into(), "/".into()).unwrap(),
+            AgentTarget::Remote {
+                machine: "buildbox".into(), cwd: "/".into()
+            }
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
 use pi_rpc::{HerdrAgentProcess, PiProcess, RpcProcess};
 
-use super::SessionView;
+use super::{SessionEvent, SessionView};
 use super::state::BackendStatus;
 use super::view;
 use gentle_core::transcript::{NoticeLevel, Transcript};
@@ -60,6 +60,13 @@ impl SessionView {
         if !self.backend.started {
             return;
         }
+        if self.is_remote_herdr() {
+            // Providers/Settings screens run on Windows. Changing local
+            // credentials cannot authenticate the already-running JaviPi
+            // process. In particular, never restart/kill a remote agent to
+            // apply a local sign-in: it owns an independent remote auth store.
+            return;
+        }
         if self.transcript.items.is_empty() {
             self.start(window, cx);
         } else {
@@ -97,6 +104,26 @@ impl SessionView {
 
     /// The folder button: pick a folder and [`Self::change_cwd`] to it.
     pub(super) fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_remote_herdr() {
+            // The native folder dialog would select a Windows path. Route
+            // remote navigation through the Linux directory picker instead.
+            // Selecting a new project creates a separate remote agent and
+            // never migrates or terminates this existing agent.
+            let machine = match &self.agent_target {
+                Some(pi_rpc::AgentTarget::Remote { machine, .. }) => Some(machine.clone()),
+                _ => self.herdr_terminal().as_deref()
+                    .and_then(|address| address.split_once('/'))
+                    .map(|(machine, _)| machine.to_owned()),
+            };
+            if let Some(machine) = machine {
+                cx.emit(SessionEvent::OpenRemoteDirectory(machine));
+            } else {
+                window.push_notification(Notification::info(
+                    "Remote machine unknown. Reopen the Machines panel to select a directory."
+                ), cx);
+            }
+            return;
+        }
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -314,6 +341,10 @@ impl SessionView {
                             this.session_file = Some(path);
                         }
                         this.refresh_state(cx);
+                        // A remote Git query must run only after Pi RPC is
+                        // ready. The initial refresh during start() deliberately
+                        // does not execute Windows Git for an unknown target.
+                        this.refresh_git(cx);
                         // Kept until the switch lands, so the window saves this
                         // path rather than the blank session it replaces.
                         if let Some(path) = this.backend.pending_session.clone() {

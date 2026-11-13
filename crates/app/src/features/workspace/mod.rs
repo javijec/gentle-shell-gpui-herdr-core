@@ -18,13 +18,16 @@ use gpui_kit::component::{Icon, Sizable as _, TitleBar, WindowExt as _, h_flex, 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::features::files::FileTreeView;
-use crate::features::machines::{MachinesEvent, MachinesView};
+use crate::features::files::{FileTreeView, RemoteFilesEvent, RemoteFilesView};
+use crate::features::machines::{
+    model as machine_model, MachinesEvent, MachinesView,
+    RemoteDirectoryEvent, RemoteDirectoryPicker,
+};
 use crate::features::memory::{MemoryEvent, MemoryView};
 use crate::features::notices::{self, Notices};
 use crate::features::onboarding::{OnboardingEvent, OnboardingView, Probe};
 use crate::features::palette::{
-    Category, PaletteAction, PaletteEvent, PaletteInput, PaletteView, WorkspaceRow,
+    Activity, Category, PaletteAction, PaletteEvent, PaletteInput, PaletteView, WorkspaceRow,
 };
 use crate::features::profiles::{ModelChoice, ProfilesEvent, ProfilesView};
 use crate::features::providers::{ProvidersEvent, ProvidersView};
@@ -39,7 +42,10 @@ use crate::shared::ui;
 use gentle_core::commands::Screen;
 
 mod actions;
+mod closed;
 mod layout;
+mod navigator;
+mod remote_files;
 mod overlays;
 mod panes;
 mod persistence;
@@ -69,6 +75,7 @@ actions!(
         NewAgentPane,
         NewTerminalPane,
         ClosePane,
+        ReopenClosed,
         FocusNextPane,
         FocusPrevPane,
         ToggleSidebar,
@@ -87,7 +94,8 @@ pub const SIDEBAR_WIDTH: f32 = 260.;
 pub enum WorkspaceEvent {
     /// The shown workspace changed; its root folder.
     RootChanged(PathBuf),
-    /// The left sidebar was shown or hidden.
+    /// The right local Files dock was shown or hidden. Its owner uses
+    /// this notification to pause directory and Git polling while hidden.
     SidebarToggled(bool),
 }
 
@@ -96,6 +104,7 @@ enum Overlay {
     Providers(Entity<ProvidersView>),
     Sessions(Entity<SessionsView>),
     Machines(Entity<MachinesView>),
+    RemoteDirectory(Entity<RemoteDirectoryPicker>),
     Palette(Entity<PaletteView>),
     Usage(Entity<UsageView>),
     Memory(Entity<MemoryView>),
@@ -125,6 +134,7 @@ struct Pane {
     /// refresh it on `SessionEvent::ChromeChanged`, everything on the title poll.
     title: SharedString,
     running: bool,
+    needs_you: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -170,20 +180,22 @@ impl Pane {
     /// Re-read the title and busy state; whether either changed.
     fn sync_chrome(&mut self, cx: &App) -> bool {
         let title = (self.item.title)(cx);
-        let running = self
-            .session
-            .as_ref()
-            .is_some_and(|s| s.read(cx).is_running());
+        let (running, needs_you) = self.session.as_ref().map_or((false, false), |s| {
+            let session = s.read(cx);
+            (session.is_running(), session.needs_you())
+        });
         let reported = self.item.terminal_address.as_ref().and_then(|get| get(cx));
         let address = retained_herdr_address(
             reported,
             self.herdr_address.clone(),
             crate::features::terminal::herdr_enabled(),
         );
-        let changed = title != self.title || running != self.running || address != self.herdr_address;
+        let changed = title != self.title || running != self.running
+            || needs_you != self.needs_you || address != self.herdr_address;
         self.herdr_address = address;
         self.title = title;
         self.running = running;
+        self.needs_you = needs_you;
         changed
     }
 }
@@ -344,7 +356,16 @@ pub struct Workspace {
     remote_agent_recovery: RemoteAgentRecovery,
     overlay: Option<(Overlay, Subscription)>,
     sidebar: Option<AnyView>,
+    remote_files: Option<Entity<RemoteFilesView>>,
+    _remote_files_events: Option<Subscription>,
     sidebar_visible: bool,
+    /// Independent right-side Windows Files / Changes / Branches dock.
+    files_sidebar_open: bool,
+    /// Registered remote machines; discovered off the GPUI render thread.
+    machine_snapshot: Option<machine_model::Snapshot>,
+    machine_error: Option<String>,
+    collapsed_machines: std::collections::HashSet<String>,
+    _machine_poll: Task<()>,
     save_task: Option<Task<()>>,
     /// Re-reads every pane's title and busy state once a second (non-agent
     /// views can't be observed through `AnyView`), redrawing only on change.
@@ -355,7 +376,7 @@ pub struct Workspace {
     renaming: Option<TabRename>,
     /// The max-effort surge playing over the window (its run number and when
     /// it started), and the timer that clears it.
-    surge: Option<(u64, std::time::Instant)>,
+    surge: Option<(u64, std::time::Instant, crate::shared::surge::Level)>,
     surge_runs: u64,
     _surge_end: Option<Task<()>>,
     /// Web and device stages, in creation order: shown ones float and tile,
@@ -368,6 +389,8 @@ pub struct Workspace {
     /// While a pane is dragged: the pane under the pointer and where it would
     /// land there.
     drop_hint: Option<(PaneId, DropZone)>,
+    closed: Vec<closed::Closed>,
+    close_hover: bool,
     /// gentle-stream, behind the title bar's ♪ button.
     music: Entity<Music>,
     /// Simulators and emulators, docked at the right or floating.
@@ -437,6 +460,7 @@ impl Workspace {
             }),
             // The title-bar update pill follows this app's own update state.
             cx.observe_global::<crate::features::app_update::AppUpdate>(|_, cx| cx.notify()),
+            cx.observe_global::<crate::features::hydration::Hydration>(|_, cx| cx.notify()),
             // Keep a multi-stage grid filling the window as it resizes. A
             // lone card keeps whatever size the user gave it.
             cx.observe_window_bounds(window, |this, window, cx| {
@@ -468,7 +492,16 @@ impl Workspace {
             },
             overlay: None,
             sidebar: None,
-            sidebar_visible: saved.sidebar,
+            remote_files: None,
+            _remote_files_events: None,
+            // Machines and local Files have separate dock positions.
+            // Default to showing both without restoring the old tab strip.
+            sidebar_visible: true,
+            files_sidebar_open: true,
+            machine_snapshot: None,
+            machine_error: None,
+            collapsed_machines: std::collections::HashSet::new(),
+            _machine_poll: Task::ready(()),
             save_task: None,
             notices: cx.new(|_| Notices::default()),
             renaming: None,
@@ -478,6 +511,8 @@ impl Workspace {
             next_stage: 1,
             resume_welcome: None,
             drop_hint: None,
+            closed: Vec::new(),
+            close_hover: false,
             music,
             devices,
             _surge_end: None,
@@ -557,6 +592,30 @@ impl Workspace {
         } else {
             this.start_shown(window, cx);
         }
+        if discover_remote {
+            this._machine_poll = cx.spawn(async move |this, cx| {
+                loop {
+                    // Herdr discovery is blocking; always run it outside the
+                    // foreground thread and never connect from native mode.
+                    let result = cx.background_executor().spawn(async {
+                        machine_model::discover()
+                    }).await;
+                    if this.update(cx, |this, cx| {
+                        match result {
+                            Ok(snapshot) => {
+                                this.machine_snapshot = Some(snapshot);
+                                this.machine_error = None;
+                            }
+                            Err(error) => this.machine_error = Some(error),
+                        }
+                        cx.notify();
+                    }).is_err() {
+                        break;
+                    }
+                    cx.background_executor().timer(Duration::from_secs(12)).await;
+                }
+            });
+        }
         this.schedule_save(cx);
         // First run: the welcome screen, from the very first frame (it looks
         // at the machine itself while its banner writes in), so the chat
@@ -631,7 +690,12 @@ impl Workspace {
         });
     }
 
-    /// Put `view` in the left sidebar slot (cmd-b toggles it).
+    /// Open an agent tab in a local worktree folder.
+    pub fn open_agent_tab(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_tab(PaneKind::Agent, folder, None, None, window, cx);
+    }
+
+    /// Put the local Files/Changes/Branches view in the right dock.
     pub fn set_sidebar(&mut self, view: AnyView, cx: &mut Context<Self>) {
         self.sidebar = Some(view);
         cx.notify();
@@ -675,6 +739,7 @@ impl Workspace {
             agent_target: None,
             title: SharedString::default(),
             running: false,
+            needs_you: false,
             _subscriptions: Vec::new(),
         };
         pane.sync_chrome(cx);

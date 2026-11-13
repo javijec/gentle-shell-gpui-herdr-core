@@ -22,6 +22,19 @@ const GIT_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 /// Stderr lines kept for an exited backend.
 const STDERR_LINES: usize = 40;
 
+/// A Git status query on a remote Pi process is advisory. Show only a
+/// successful branch/short-HEAD result; never fall back to Windows Git.
+fn remote_git_branch(data: &Value) -> Option<String> {
+    if data["exitCode"].as_i64() != Some(0) {
+        return None;
+    }
+    data["output"].as_str()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty() && branch.len() <= 256
+            && !branch.chars().any(char::is_control))
+        .map(str::to_owned)
+}
+
 impl SessionView {
     /// A turn can end while Herdr is disconnected, including during the
     /// read-only reattach probe. Poll get_state until that turn settles;
@@ -98,6 +111,10 @@ impl SessionView {
                 // the transcript and running turn; never mark it Exited.
                 self.recovery_snapshot_pending = false;
                 self.recovery_generation = self.recovery_generation.wrapping_add(1);
+                if self.is_remote_herdr() {
+                    self.git.seq = self.git.seq.wrapping_add(1);
+                    self.git.remote_branch = None;
+                }
                 self.transcript.notice(
                     NoticeLevel::Warning,
                     format!("Herdr connection interrupted ({reason}). The agent may still be running; commands will not be replayed automatically."),
@@ -114,6 +131,7 @@ impl SessionView {
                 // snapshot at agent_settled to restore missed stream deltas.
                 self.recovery_snapshot_pending = true;
                 self.refresh_state(cx);
+                self.refresh_git(cx);
                 self.monitor_recovered_turn(cx);
             }
             Incoming::Stderr(line) => {
@@ -234,6 +252,7 @@ impl SessionView {
                         .await;
                     let _ = this.update(cx, |this, cx| {
                         this.extension.dialogs.retain(|d| d.id != id);
+                        this.sync_chrome(cx);
                         cx.notify();
                     });
                 })
@@ -373,21 +392,77 @@ impl SessionView {
                 .notice(NoticeLevel::Error, format!("{error:#}"));
         }
         self.prepare_dialog(window, cx);
+        self.sync_chrome(cx);
         cx.notify();
     }
 
     pub(super) fn refresh_git(&mut self, cx: &mut Context<Self>) {
         self.git.seq += 1;
+        let seq = self.git.seq;
         self.git.at = Some(Instant::now());
+        // Every remote agent has its own Linux working tree. Never ask the
+        // Windows git executable about a remote agent's local GPUI cwd.
+        if self.is_remote_herdr() {
+            self.git.snapshot = None;
+            self.git.repository = None;
+            self.git.remote_branch = None;
+            // A read-only Pi RPC bash call runs in the selected remote agent's
+            // original process and does not spawn or reattach any terminals.
+            if self.process().is_some() {
+                self.request(
+                    json!({
+                        "type": "bash",
+                        "command": "git symbolic-ref --quiet --short HEAD || git rev-parse --short HEAD",
+                        "excludeFromContext": true
+                    }),
+                    cx,
+                    move |this, result, cx| {
+                        // The selected session or network generation may have
+                        // changed while Git was responding.
+                        if this.git.seq != seq || !this.is_remote_herdr() {
+                            return;
+                        }
+                        this.git.remote_branch = result.ok()
+                            .and_then(|data| remote_git_branch(&data));
+                        cx.notify();
+                    },
+                );
+            }
+            cx.notify();
+            return;
+        }
+
+        self.git.remote_branch = None;
+        self.git.snapshot = None;
+        self.git.repository = None;
+        // A restored 4B Herdr address may not be assigned yet. Waiting for
+        // attach is safer than briefly showing Windows Git as remote Git.
+        if crate::features::terminal::herdr_enabled()
+            && self.agent_target.is_none()
+            && self.herdr_terminal().is_none()
+        {
+            cx.notify();
+            return;
+        }
         let cwd = self.cwd.clone();
         cx.spawn(async move |this, cx| {
-            let snapshot = cx
+            let (snapshot, repository) = cx
                 .background_executor()
-                .spawn(async move { git::snapshot(&cwd) })
+                .spawn(async move {
+                    let snapshot = git::snapshot(&cwd);
+                    let repository = snapshot
+                        .as_ref()
+                        .and_then(|_| git::toplevel(&cwd))
+                        .and_then(|top| git::repository_path(&cwd, &top));
+                    (snapshot, repository)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.git.snapshot = snapshot;
-                cx.notify();
+                if this.git.seq == seq && !this.is_remote_herdr() {
+                    this.git.snapshot = snapshot;
+                    this.git.repository = repository;
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -630,5 +705,23 @@ mod tests {
         activity.tool_started(&json!({"toolName": "unknown_tool", "args": {}}));
         assert_eq!(activity.phase, Some("exploring"));
         assert!(activity.job_commands.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod remote_git_branch_tests {
+    use super::remote_git_branch;
+    use serde_json::json;
+
+    #[test]
+    fn does_not_show_windows_branch_when_remote_query_fails() {
+        assert_eq!(remote_git_branch(&json!({
+            "exitCode": 0, "output": "feature/javipi-work\n"
+        })).as_deref(), Some("feature/javipi-work"));
+        assert_eq!(remote_git_branch(&json!({
+            "exitCode": 128, "output": "fatal: not a git repository"
+        })), None);
+        assert_eq!(remote_git_branch(&json!({"exitCode": 0, "output": ""})), None);
+        assert_eq!(remote_git_branch(&json!({"exitCode": 0, "output": "bad\nbranch"})), None);
     }
 }

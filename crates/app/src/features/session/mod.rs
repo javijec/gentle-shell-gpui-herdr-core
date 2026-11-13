@@ -32,6 +32,9 @@ pub const CONTEXT: &str = "GentleSession";
 /// Requests a tab makes of its window.
 pub enum SessionEvent {
     OpenProviders,
+    /// The footer folder button of a remote agent: select a Linux project
+    /// for a new agent without migrating or killing this running process.
+    OpenRemoteDirectory(String),
     /// An extension's `notify`, for the window's notification center.
     /// Warnings and errors are also toasted by the tab itself.
     Notice {
@@ -46,8 +49,9 @@ pub enum SessionEvent {
     /// A Gentle Shell command whose UI is terminal-only was run (typed or
     /// from the palette): open the app's own screen for it instead.
     OpenScreen(gentle_core::commands::Screen),
-    /// The thinking level was set to `max`: the window plays its surge.
-    MaxEffort,
+    /// The thinking level was set (and the backend took it): the window
+    /// plays that level's surge.
+    Effort(String),
     /// Gentle Design's canvas opened, refreshed or stopped: the window keeps
     /// it in its instance tray (or reloads the card already showing it).
     DesignCanvas(crate::features::browser::CanvasNotice),
@@ -70,6 +74,7 @@ pub enum SessionEvent {
 struct Chrome {
     title: String,
     running: bool,
+    needs_you: bool,
     session_file: Option<PathBuf>,
     models: u64,
 }
@@ -297,7 +302,81 @@ impl SessionView {
         self.session_name
             .clone()
             .or_else(|| self.title.clone())
-            .unwrap_or_else(|| ui::split_path(&self.cwd).1)
+            .unwrap_or_else(|| {
+                // A saved remote target does not change the runtime when
+                // the user explicitly chose the native/local backend.
+                if !crate::features::terminal::herdr_enabled() {
+                    ui::split_path(&self.cwd).1
+                } else {
+                    match &self.agent_target {
+                    // The local workspace CWD is only where the Windows GUI
+                    // lives. Remote Pi runs in its *Linux* target CWD.
+                    Some(pi_rpc::AgentTarget::Remote { cwd, .. }) => cwd
+                        .rsplit('/')
+                        .find(|part| !part.is_empty())
+                        .unwrap_or("Remote agent")
+                        .to_owned(),
+                    // Legacy 4B sessions may have only a persisted Herdr
+                    // address. Do not present a Windows folder as their CWD.
+                    _ if self
+                        .herdr_terminal()
+                        .as_deref()
+                        .is_some_and(|address| address.contains('/')) =>
+                    {
+                        "Remote agent".into()
+                    }
+                    _ => ui::split_path(&self.cwd).1,
+                    }
+                }
+            })
+    }
+
+    /// True only when this viewer points at a Herdr agent on another
+    /// computer. A saved remote target does not make native mode remote.
+    pub(crate) fn is_remote_herdr(&self) -> bool {
+        if !crate::features::terminal::herdr_enabled() {
+            return false;
+        }
+        match &self.agent_target {
+            Some(pi_rpc::AgentTarget::Local) => false,
+            Some(pi_rpc::AgentTarget::Remote { .. }) => true,
+            None => self.herdr_terminal().as_deref()
+                .is_some_and(|address| address.contains('/')),
+        }
+    }
+
+    /// The launch directory belongs to the remote machine and is never a
+    /// Windows workspace path. Legacy 4B restores can lack this metadata.
+    pub(super) fn remote_cwd(&self) -> Option<&str> {
+        match &self.agent_target {
+            Some(pi_rpc::AgentTarget::Remote { cwd, .. }) if self.is_remote_herdr() => Some(cwd),
+            _ => None,
+        }
+    }
+
+    /// The read-only remote Files sidebar may request its own filesystem
+    /// commands only through the existing Herdr transport. There is never a
+    /// native Pi fallback or a newly spawned terminal for these reads.
+    pub(crate) fn remote_fs_process(&self) -> Option<std::sync::Arc<pi_rpc::RpcProcess>> {
+        if !self.is_remote_herdr() {
+            return None;
+        }
+        match self.process()? {
+            process if matches!(process.as_ref(), pi_rpc::RpcProcess::Herdr(_)) => Some(process),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn remote_fs_target(&self) -> Option<(String, String)> {
+        if !self.is_remote_herdr() {
+            return None;
+        }
+        match &self.agent_target {
+            Some(pi_rpc::AgentTarget::Remote { machine, cwd }) => {
+                Some((machine.clone(), cwd.clone()))
+            }
+            _ => None, // Legacy restored address uses Herdr terminal metadata.
+        }
     }
 
     pub fn cwd(&self) -> &PathBuf {
@@ -306,6 +385,11 @@ impl SessionView {
 
     pub fn is_running(&self) -> bool {
         self.transcript.running
+    }
+
+    /// A dialog (a question, a confirmation) waits for an answer.
+    pub fn needs_you(&self) -> bool {
+        !self.extension.dialogs.is_empty()
     }
 
     pub fn composer(&self) -> Entity<TextareaState> {
@@ -385,6 +469,7 @@ impl SessionView {
         let chrome = Chrome {
             title: self.title(),
             running: self.is_running(),
+            needs_you: self.needs_you(),
             session_file: self.session_file(),
             models: self.models.rev,
         };

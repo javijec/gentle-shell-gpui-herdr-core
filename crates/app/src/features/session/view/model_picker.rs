@@ -10,7 +10,7 @@ use gpui_kit::*;
 
 use super::NARROW;
 use crate::features::session::SessionView;
-use crate::features::session::state::ModelInfo;
+use crate::features::session::state::{BackendStatus, ModelInfo};
 use crate::shared::ui;
 use gentle_core::transcript::format_tokens;
 
@@ -118,6 +118,20 @@ impl SessionView {
 
     pub(super) fn render_model_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.entity().downgrade();
+        let remote = self.is_remote_herdr();
+        // Catalogs come from get_available_models on the selected agent.
+        // A restored 4B agent may have only a Herdr terminal address.
+        let model_machine = if remote {
+            match &self.agent_target {
+                Some(pi_rpc::AgentTarget::Remote { machine, .. }) => machine.clone(),
+                _ => self.herdr_terminal()
+                    .and_then(|address| address.split_once('/')
+                        .map(|(machine, _)| machine.to_owned()))
+                    .unwrap_or_else(|| "remote machine".into()),
+            }
+        } else {
+            "This computer".into()
+        };
         let busy = self.busy();
         let label = self
             .models
@@ -154,6 +168,8 @@ impl SessionView {
         let current = self.models.current.clone();
         let search = self.model_search.clone();
         let has_any = !self.models.available.is_empty();
+        let loading_models = models_loading(self.models.loaded, &self.backend.status);
+        let (empty_message, show_sign_in) = model_picker_empty_state(loading_models, has_any);
         let content_weak = weak.clone();
         let scroll = self.live.model_scroll.clone();
 
@@ -251,14 +267,17 @@ impl SessionView {
                             .py_4()
                             .text_size(px(12.))
                             .text_color(ui::faint())
-                            .child(if has_any {
-                                "No models match."
+                            .child(if remote && loading_models {
+                                "Loading models from agent…"
+                            } else if remote && !has_any {
+                                "No models returned by this remote agent."
                             } else {
-                                "No models yet. Sign in to a provider."
+                                empty_message
                             }),
                     );
                 }
                 let sign_in = weak.clone();
+                let refresh = weak.clone();
                 let content = v_flex()
                     .w_full()
                     .font_family(cx.theme().font_family.clone())
@@ -276,9 +295,19 @@ impl SessionView {
                                 .child(div().flex_1().child(Input::new(&search).appearance(false))),
                         ),
                     )
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .px_3()
+                            .py_1()
+                            .text_xs()
+                            .text_color(ui::muted())
+                            .child(Icon::new(IconName::Layers).xsmall())
+                            .child(format!("Models from {model_machine}")),
+                    )
                     .child(list)
                     .child(
-                        div().p(px(6.)).child(
+                        div().p(px(6.)).when(!remote && show_sign_in, |row| row.child(
                             Button::new("picker-sign-in")
                                 .ghost()
                                 .small()
@@ -297,7 +326,30 @@ impl SessionView {
                                         );
                                     });
                                 }),
-                        ),
+                        ))
+                        .when(remote, |row| row.child(
+                            v_flex()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(ui::muted())
+                                        .child("Provider sign-ins for this agent are configured on its remote machine, not in Windows."),
+                                )
+                                .child(
+                                    Button::new("picker-refresh-remote-models")
+                                        .ghost()
+                                        .small()
+                                        .w_full()
+                                        .icon(Icon::new(IconName::RefreshCw))
+                                        .label("Refresh models from remote agent")
+                                        .on_click(move |_, _, cx| {
+                                            let _ = refresh.update(cx, |this, cx| {
+                                                this.refresh_available_models(cx)
+                                            });
+                                        }),
+                                ),
+                        )),
                     );
                 ui::island(cx)
                     .w_full()
@@ -322,4 +374,60 @@ fn provider_color(provider: &str) -> Hsla {
         .bytes()
         .fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize));
     palette[hash % palette.len()]
+}
+
+fn models_loading(loaded: bool, status: &BackendStatus) -> bool {
+    !loaded && matches!(status, BackendStatus::Starting | BackendStatus::Ready(_))
+}
+
+fn model_picker_empty_state(loading: bool, has_any: bool) -> (&'static str, bool) {
+    if has_any {
+        ("No models match.", true)
+    } else if loading {
+        ("Loading models…", false)
+    } else {
+        ("No models yet. Sign in to a provider.", true)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::{model_picker_empty_state, models_loading};
+    use crate::features::session::state::BackendStatus;
+
+    #[test]
+    fn model_picker_empty_state_loading() {
+        assert_eq!(
+            model_picker_empty_state(true, false),
+            ("Loading models…", false)
+        );
+    }
+
+    #[test]
+    fn model_picker_empty_state_preserves_loaded_and_search_states() {
+        assert_eq!(
+            model_picker_empty_state(false, false),
+            ("No models yet. Sign in to a provider.", true)
+        );
+        for loading in [false, true] {
+            assert_eq!(
+                model_picker_empty_state(loading, true),
+                ("No models match.", true)
+            );
+        }
+    }
+
+    #[test]
+    fn models_loading_only_while_the_backend_can_still_answer() {
+        assert!(models_loading(false, &BackendStatus::Starting));
+        assert!(!models_loading(true, &BackendStatus::Starting));
+        // A backend that never answers must not leave the picker loading.
+        assert!(!models_loading(
+            false,
+            &BackendStatus::Failed("not installed".into())
+        ));
+        assert!(!models_loading(false, &BackendStatus::Exited(Some(1))));
+        assert!(!models_loading(false, &BackendStatus::Exited(None)));
+    }
 }

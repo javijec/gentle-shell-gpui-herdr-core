@@ -121,8 +121,103 @@ agent.stderr.on("data", (chunk) => {
   emit("E", chunk);
 });
 
+
+// Read-only, same-process remote filesystem RPC. These commands are
+// intercepted before Pi sees them: no visible bash/tool transcript, no
+// extra Herdr terminal, no SSH, and no filesystem writes.
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const { TextDecoder } = require("node:util");
+const MAX_REMOTE_FILE = 128 * 1024;
+const MAX_REMOTE_ENTRIES = 500;
+
+function validLinuxPath(value) {
+  return typeof value === "string" && value.length > 0 &&
+    value.length <= 2048 && value.startsWith("/") && !value.includes("\\") &&
+    !/[\x00-\x1f\x7f]/.test(value) &&
+    !value.split("/").some((part) => part === ".." || part === ".");
+}
+
+function within(root, candidate) {
+  return candidate === root || (root === "/"
+    ? candidate.startsWith("/") : candidate.startsWith(root + "/"));
+}
+
+async function safeRemotePath(root, candidate) {
+  if (!validLinuxPath(root) || !validLinuxPath(candidate)) {
+    throw new Error("Invalid absolute Linux path");
+  }
+  const actualRoot = await fs.realpath(root);
+  const runtimeRoot = await fs.realpath(process.cwd());
+  if (actualRoot !== runtimeRoot) {
+    throw new Error("The requested root does not match this agent's working directory");
+  }
+  // Both lexical and resolved boundaries: reject .., traversals and
+  // symlinks escaping the agent's original working directory.
+  if (!within(path.posix.normalize(root), path.posix.normalize(candidate))) {
+    throw new Error("The requested path is outside the agent's directory");
+  }
+  const actual = await fs.realpath(candidate);
+  if (!within(actualRoot, actual)) {
+    throw new Error("The requested path resolves outside the agent's directory");
+  }
+  const details = await fs.lstat(candidate);
+  if (details.isSymbolicLink()) {
+    throw new Error("Symlinks are not opened by the read-only remote browser");
+  }
+  return candidate;
+}
+
+async function remoteFilesRequest(req) {
+  const command = req.type;
+  const response = (success, data, error) => emit("O", JSON.stringify({
+    type: "response", command, id: req.id, success,
+    ...(success ? { data } : { error }),
+  }) + "\n");
+  try {
+    if (typeof req.id !== "string" || req.id.length > 128) {
+      throw new Error("Missing request identifier");
+    }
+    if (!["herdr_fs_list", "herdr_fs_read"].includes(command)) {
+      throw new Error("Unsupported filesystem operation");
+    }
+    const selected = await safeRemotePath(req.root, req.path);
+    if (command === "herdr_fs_list") {
+      const entries = await fs.readdir(selected, { withFileTypes: true });
+      const sorted = entries
+        .map((entry) => ({
+          name: entry.name,
+          kind: entry.isDirectory() ? "directory" :
+            entry.isSymbolicLink() ? "symlink" : entry.isFile() ? "file" : "other",
+        }))
+        .sort((a, b) => (a.kind === "directory" ? 0 : 1) -
+                         (b.kind === "directory" ? 0 : 1) ||
+                         a.name.localeCompare(b.name));
+      response(true, {
+        path: selected, entries: sorted.slice(0, MAX_REMOTE_ENTRIES),
+        truncated: sorted.length > MAX_REMOTE_ENTRIES,
+      });
+    } else {
+      const stat = await fs.stat(selected);
+      if (!stat.isFile()) throw new Error("Not a regular file");
+      if (stat.size > MAX_REMOTE_FILE) {
+        throw new Error("File exceeds the 128 KiB read-only preview limit");
+      }
+      const bytes = await fs.readFile(selected);
+      if (bytes.length > MAX_REMOTE_FILE || bytes.includes(0)) {
+        throw new Error("Binary files and files over 128 KiB cannot be previewed");
+      }
+      const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      response(true, { path: selected, content, size: bytes.length });
+    }
+  } catch (error) {
+    response(false, null, error && error.message ? error.message : "Filesystem query failed");
+  }
+}
+
 // The PTY is line-buffered: GPUI submits each encoded input frame with CR.
 // Accept CR, LF and CRLF, echo/control-character noise and stream splits.
+let rpcInput = [];
 let inputBuffer = [];
 let discard = false;
 function inputLine() {
@@ -137,7 +232,29 @@ function inputLine() {
   const payload = Buffer.from(encoded, "base64");
   if (payload.length > MAX_FRAME || stopped) return;
   if (!agent.stdin.destroyed && !agent.stdin.writableEnded) {
-    agent.stdin.write(payload);
+    // A serialized Pi RPC request can span many framed chunks. Assemble
+    // complete newline-delimited JSON before choosing the private fs
+    // handler or forwarding the original request unchanged to Pi.
+    for (const byte of payload) {
+      if (rpcInput.length >= MAX_JSONL) {
+        rpcInput = [];
+        fail("Pi RPC input record exceeds 8 MiB");
+        return;
+      }
+      rpcInput.push(byte);
+      if (byte === 10) {
+        const requestLine = Buffer.from(rpcInput);
+        rpcInput = [];
+        let request = null;
+        try { request = JSON.parse(requestLine.toString("utf8")); } catch {}
+        if (request && (request.type === "herdr_fs_list" ||
+                        request.type === "herdr_fs_read")) {
+          void remoteFilesRequest(request);
+        } else {
+          agent.stdin.write(requestLine);
+        }
+      }
+    }
   }
 }
 

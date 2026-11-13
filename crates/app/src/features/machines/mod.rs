@@ -1,8 +1,11 @@
 //! Machines: discover the local Herdr Core's registered remote machines,
 //! inspect persistent terminal addresses, and open existing/new shell panels.
 
-mod model;
+pub(crate) mod model;
+mod directory_picker;
 mod view;
+
+pub use directory_picker::{RemoteDirectoryEvent, RemoteDirectoryPicker};
 
 use gpui_kit::*;
 

@@ -13,20 +13,21 @@ impl Workspace {
         space.tabs.get(space.active)
     }
 
-    /// Open the inline name field on tab `index` when its focused pane is an
-    /// agent; terminal and file tabs keep their titles.
+    /// Rename the agent owned by a navigator row. Split-pane tabs can focus
+    /// a file or terminal, so locate the agent instead of using tab.focused.
     pub(super) fn start_tab_rename(
         &mut self,
         index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane) = self.space().tabs.get(index).map(|t| t.focused) else {
+        let Some(pane) = self.space().tabs.get(index).and_then(|tab| {
+            tab.tree.leaves().into_iter().find(|id| {
+                self.panes.get(id).is_some_and(|pane| pane.session.is_some())
+            })
+        }) else {
             return;
         };
-        if self.panes.get(&pane).is_none_or(|p| p.session.is_none()) {
-            return;
-        }
         self.finish_tab_rename(false, window, cx);
         let title = self.pane_title(pane).to_string();
         let len = title.len();
