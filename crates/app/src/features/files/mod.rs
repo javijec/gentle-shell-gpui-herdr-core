@@ -103,6 +103,7 @@ fn language(path: &Path) -> (Option<&'static str>, &'static str) {
         (_, "py" | "pyi") => ("python", "Python"),
         (_, "go") => ("go", "Go"),
         (_, "sh" | "bash" | "zsh") => ("bash", "Shell"),
+        (_, "ps1" | "psm1" | "psd1") => ("powershell", "PowerShell"),
         (_, "yaml" | "yml") => ("yaml", "YAML"),
         (_, "html" | "htm") => ("html", "HTML"),
         (_, "css" | "scss") => ("css", "CSS"),
@@ -154,6 +155,8 @@ mod tests {
     #[test]
     fn languages_and_sizes() {
         assert_eq!(language(Path::new("src/main.rs")), (Some("rust"), "Rust"));
+        assert_eq!(language(Path::new("prepare-boot.ps1")),
+            (Some("powershell"), "PowerShell"));
         assert_eq!(language(Path::new("Cargo.lock")), (Some("toml"), "TOML"));
         assert_eq!(language(Path::new("LICENSE")), (None, "Plain text"));
         assert_eq!(human_size(12), "12 B");
