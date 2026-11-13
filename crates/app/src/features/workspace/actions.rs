@@ -130,24 +130,22 @@ impl Workspace {
         self.toggle_sidebar(cx);
     }
 
+    /// Ctrl+B controls the left Machines navigator only. The right-hand
+    /// Files dock is independent and keeps its tree subscriptions alive.
     pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
-        cx.emit(WorkspaceEvent::SidebarToggled(
-            self.sidebar_visible && self.files_sidebar_open,
-        ));
         self.schedule_save(cx);
         cx.notify();
     }
 
-    /// The embedded file tree is only visible in Files mode; the machines
-    /// navigator owns the same sidebar slot by default.
+    /// Used by the file-tree owner to control filesystem polling. Files is
+    /// its own right dock and is no longer coupled to the Machines sidebar.
     pub fn sidebar_visible(&self) -> bool {
-        self.sidebar_visible && self.files_sidebar_open
+        self.files_sidebar_open
     }
 
     pub(super) fn toggle_sidebar_mode(&mut self, cx: &mut Context<Self>) {
         self.files_sidebar_open = !self.files_sidebar_open;
-        self.sidebar_visible = true;
         cx.emit(WorkspaceEvent::SidebarToggled(self.files_sidebar_open));
         cx.notify();
     }
