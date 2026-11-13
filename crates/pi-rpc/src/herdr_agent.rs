@@ -149,9 +149,15 @@ pub fn discover_live_remote_agents() -> Result<Vec<String>> {
     };
     let mut client = core_client()?;
     let list = client.list_terminals()?;
-    let mut agents: Vec<(u64, String)> = list.terminals.iter().filter_map(|record| {
+    Ok(recoverable_addresses(&list.terminals, &target.machine))
+}
+
+/// Pure discovery filter: never recover foreign terminals, dead processes or
+/// agents owned by a different machine. Stable order is their creation time.
+fn recoverable_addresses(records: &[Value], machine: &str) -> Vec<String> {
+    let mut agents: Vec<(u64, String)> = records.iter().filter_map(|record| {
         let address = record["address"].as_str()?;
-        if !address.starts_with(&format!("{}/", target.machine)) {
+        if address.split_once('/').map(|(prefix, _)| prefix) != Some(machine) {
             return None;
         }
         token_for_terminal(record, address).ok()?;
@@ -160,7 +166,8 @@ pub fn discover_live_remote_agents() -> Result<Vec<String>> {
     }).collect();
     agents.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     agents.dedup_by(|a, b| a.1 == b.1);
-    Ok(agents.into_iter().map(|(_, address)| address).collect())
+    agents.into_iter().map(|(_, address)| address).collect()
+}
 }
 
 /// Verify both directions of Herdr's PTY, not just the bridge's child-pipe
@@ -606,8 +613,12 @@ impl Drop for HerdrAgentProcess {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{Incoming, IncomingState, Pending, REMOTE_BRIDGE_JS, validate_remote_target};
+    use super::{
+        Incoming, IncomingState, Pending, REMOTE_BRIDGE_JS, recoverable_addresses,
+        token_for_terminal, validate_remote_target,
+    };
     use crate::herdr_wire::encode;
+    use serde_json::json;
 
     #[test]
     fn remote_target_needs_no_bridge_install_or_rust_compilation() {
@@ -633,6 +644,50 @@ mod tests {
         assert_eq!(
             validate_remote_target(Some("raspi4"), Some("/srv/my-project"), Some("/usr/bin/node"))
                 .unwrap().unwrap().node, "/usr/bin/node"
+        );
+    }
+
+    #[test]
+    fn recovery_accepts_only_live_owned_bridge_and_extracts_original_token() {
+        let remote = json!({
+            "address": "javipi/t42", "state": "live",
+            "labels": {"gentle-shell": "rpc-agent"},
+            "argv": ["node", "--eval",
+                "const name='GS4A1|'; const probe='gs4a-startup';", "p123abc"],
+            "created_ms": 7
+        });
+        let local = json!({
+            "address": "t4", "state": "live",
+            "labels": {"gentle-shell": "rpc-agent"},
+            "argv": ["C:/app/gentle-shell-gpui.exe", "--herdr-agent-bridge", "p0001"],
+        });
+        assert_eq!(token_for_terminal(&remote, "javipi/t42").unwrap(), "p123abc");
+        assert_eq!(token_for_terminal(&local, "t4").unwrap(), "p0001");
+        assert!(token_for_terminal(&remote, "javipi/t99").is_err());
+        assert!(token_for_terminal(&json!({"address":"javipi/t42","state":"live",
+            "labels":{"gentle-shell":"rpc-agent"},
+            "argv":["bash","-c","echo hello"]}), "javipi/t42").is_err());
+    }
+
+    #[test]
+    fn recovered_addresses_are_machine_scoped_and_deterministic() {
+        let make = |address: &str, state: &str, time: u64| {
+            json!({"address":address,"state":state,
+                "labels":{"gentle-shell":"rpc-agent"},
+                "created_ms":time,
+                "argv":["node","--eval","GS4A1| gs4a-startup", "p123abc"]})
+        };
+        let candidates = vec![
+            make("javipi/t5", "live", 50),
+            make("other/t4", "live", 10),
+            make("javipi/t3", "finished", 5),
+            make("javipi/t1", "live", 1),
+            make("javipi/t33", "live", 60),
+            json!({"address":"javipi/t2","state":"live","labels":{"gentle-shell":"other"}}),
+        ];
+        assert_eq!(
+            recoverable_addresses(&candidates, "javipi"),
+            vec!["javipi/t1", "javipi/t5", "javipi/t33"]
         );
     }
 
