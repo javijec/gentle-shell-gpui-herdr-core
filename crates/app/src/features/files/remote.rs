@@ -315,7 +315,7 @@ impl RemoteFilesView {
         let (Some(preview), Some(editor)) = (&self.preview, &self.editor) else { return };
         let Some(revision) = preview.revision.clone() else { return };
         let text = editor.read(cx).value().to_string();
-        if text.as_bytes().len() > MAX_EDIT_BYTES || text.contains('\0') {
+        if text.len() > MAX_EDIT_BYTES || text.contains('\0') {
             self.error = Some("Only UTF-8 text up to 128 KiB can be saved.".into());
             cx.notify();
             return;
