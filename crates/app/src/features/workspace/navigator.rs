@@ -70,6 +70,40 @@ fn session_directory(
 }
 
 impl Workspace {
+    /// Machine and runtime path for the selected agent, shown separately
+    /// from the Windows workspace name in the title bar.
+    pub(super) fn active_runtime_label(&self) -> String {
+        let Some(tab) = self.tab() else {
+            return "No agent selected".into();
+        };
+        let primary = tab.tree.leaves().into_iter()
+            .find(|id| self.panes.get(id).is_some_and(|pane| {
+                pane.item.kind == PaneKind::Agent
+            }))
+            .unwrap_or(tab.focused);
+        let Some(pane) = self.panes.get(&primary) else {
+            return "No agent selected".into();
+        };
+        let herdr = crate::features::terminal::herdr_enabled();
+        let machine = if herdr {
+            machine_key(pane.agent_target.as_ref(), pane.herdr_address.as_deref())
+                .unwrap_or_else(|| "This computer".into())
+        } else {
+            "This computer".into()
+        };
+        let directory = if herdr {
+            session_directory(
+                pane.agent_target.as_ref(),
+                pane.herdr_address.as_deref(),
+                &pane.cwd,
+                self.machine_snapshot.as_ref(),
+            )
+        } else {
+            Some(pane.cwd.display().to_string())
+        };
+        format!("{machine} · {}", directory.unwrap_or_else(|| "remote cwd unavailable".into()))
+    }
+
     fn navigator_groups(&self) -> Vec<NavigatorMachine> {
         let mut groups = vec![NavigatorMachine {
             key: "local".into(),
@@ -101,10 +135,15 @@ impl Workspace {
                 }))
                 .unwrap_or(tab.focused);
             let Some(pane) = self.panes.get(&primary) else { continue };
-            let key = machine_key(
-                pane.agent_target.as_ref(),
-                pane.herdr_address.as_deref(),
-            ).unwrap_or_else(|| "local".into());
+            let herdr = crate::features::terminal::herdr_enabled();
+            let key = if herdr {
+                machine_key(
+                    pane.agent_target.as_ref(),
+                    pane.herdr_address.as_deref(),
+                ).unwrap_or_else(|| "local".into())
+            } else {
+                "local".into()
+            };
             if !groups.iter().any(|group| group.key == key) {
                 // Keep recovered sessions visible while the machine-list RPC
                 // is temporarily unavailable. This does not assert online.
@@ -122,12 +161,16 @@ impl Workspace {
                         if title.is_empty() { "Agent".into() } else { title }
                     },
                     address: pane.herdr_address.clone(),
-                    directory: session_directory(
-                        pane.agent_target.as_ref(),
-                        pane.herdr_address.as_deref(),
-                        &pane.cwd,
-                        self.machine_snapshot.as_ref(),
-                    ),
+                    directory: if herdr {
+                        session_directory(
+                            pane.agent_target.as_ref(),
+                            pane.herdr_address.as_deref(),
+                            &pane.cwd,
+                            self.machine_snapshot.as_ref(),
+                        )
+                    } else {
+                        Some(pane.cwd.display().to_string())
+                    },
                     icon: pane.item.kind.icon(),
                     running: self.tab_running(tab),
                     pane_count: tab.tree.len(),
