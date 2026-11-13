@@ -209,7 +209,7 @@ impl RemoteFilesView {
 
     pub fn has_unsaved(&self, cx: &App) -> bool {
         self.saving || self.editor.as_ref().zip(self.preview.as_ref()).is_some_and(
-            |(editor, preview)| editor.read(cx).text().to_string() != preview.content
+            |(editor, preview)| *editor.read(cx).text() != preview.content
         )
     }
 
@@ -232,7 +232,7 @@ impl RemoteFilesView {
             return false;
         }
         if self.editor.as_ref().zip(self.preview.as_ref())
-            .is_some_and(|(editor, preview)| editor.read(cx).text().to_string() != preview.content)
+            .is_some_and(|(editor, preview)| *editor.read(cx).text() != preview.content)
         {
             self.error = Some("Unsaved remote edits. Save or Cancel before navigating.".into());
             cx.notify();
@@ -525,7 +525,7 @@ impl Render for RemoteFilesView {
             let truncated = preview.content.lines().count() > rows.len();
              let can_edit = preview.revision.is_some() && self.root != "/";
             let dirty = self.editor.as_ref().is_some_and(|editor| {
-                editor.read(cx).text().to_string() != preview.content
+                *editor.read(cx).text() != preview.content
             });
             content = content.child(
                 h_flex()
