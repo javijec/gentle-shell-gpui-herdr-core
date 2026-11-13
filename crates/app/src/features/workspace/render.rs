@@ -105,10 +105,10 @@ impl Render for Workspace {
                                             .truncate()
                                             .text_xs()
                                             .text_color(ui::muted())
-                                            .child(self.tab().map_or_else(
-                                                || "No session selected".to_string(),
-                                                |tab| self.pane_title(tab.focused).to_string(),
-                                            )),
+                                            // Workspace chip is a Windows-local project.
+                                            // This label shows where the selected agent
+                                            // actually runs: machine + runtime CWD.
+                                            .child(self.active_runtime_label()),
                                     ),
                             )
                             .child(
