@@ -222,10 +222,28 @@ fn core_client() -> Result<HerdrClient> {
     HerdrClient::connect_with_executable(executable).map_err(Into::into)
 }
 
-fn inspect_existing(address: &str) -> Result<String> {
+/// Restore a recorded Herdr agent. Local agents are intentionally stopped
+/// on GPUI quit, unlike remote agents; a confirmed exited local bridge may
+/// start fresh using its saved local session. A dead remote address must
+/// *never* silently create a replacement remote agent.
+fn inspect_existing(address: &str) -> Result<Option<String>> {
     let mut client = core_client()?;
     let record = client.call("terminal.get", json!({"terminal": address}))?;
-    token_for_terminal(&record, address)
+    inspect_saved_terminal(&record, address)
+}
+
+fn inspect_saved_terminal(record: &Value, address: &str) -> Result<Option<String>> {
+    // Only auto-replace a terminal we can identify as OUR dead local Pi
+    // bridge. An unknown record, foreign terminal, transport error, or remote
+    // agent keeps its original fail-closed behavior.
+    if !address.contains('/')
+        && record["address"] == address
+        && record["labels"]["gentle-shell"] == "rpc-agent"
+        && record["state"].as_str().is_some_and(|state| state != "live")
+    {
+        return Ok(None);
+    }
+    token_for_terminal(record, address).map(Some)
 }
 
 impl HerdrAgentProcess {
@@ -500,8 +518,14 @@ impl HerdrAgentProcess {
     ) -> Result<(Arc<Self>, async_channel::Receiver<Incoming>)> {
         // Inspect the existing terminal before attaching: a stale or foreign
         // address must fail closed instead of launching another Pi agent.
-        let existing_token = existing.map(inspect_existing).transpose()?;
-        let remote = if existing.is_some() {
+        let inspected = existing.map(inspect_existing).transpose()?;
+        let local_ended = existing.is_some() && inspected.as_ref().is_some_and(Option::is_none);
+        // A dead local agent's saved address is not a live reattachment
+        // target. Preserve its local-only intent even if legacy global
+        // REMOTE_MACHINE variables were left set in PowerShell.
+        let existing = existing.filter(|_| !local_ended);
+        let existing_token = inspected.flatten();
+        let remote = if existing.is_some() || local_ended {
             None
         } else {
             RemoteTarget::from_agent_target(target)?
@@ -927,11 +951,36 @@ mod tests {
 
     use super::{
         Incoming, IncomingState, Pending, REMOTE_BRIDGE_JS, recoverable_addresses,
-        token_for_terminal, validate_remote_target, select_legacy_remote_target,
+        token_for_terminal, inspect_saved_terminal, validate_remote_target, select_legacy_remote_target,
         accept_stream_events, can_finish_reconnect, AgentTarget, RemoteTarget,
     };
     use crate::herdr_wire::encode;
     use serde_json::json;
+
+    #[test]
+    fn stopped_local_bridge_restarts_but_stopped_remote_fails_closed() {
+        let dead_local = json!({
+            "address": "t18",
+            "state": "exited",
+            "labels": {"gentle-shell": "rpc-agent"}
+        });
+        assert_eq!(inspect_saved_terminal(&dead_local, "t18").unwrap(), None);
+
+        let dead_remote = json!({
+            "address": "javipi/t9",
+            "state": "exited",
+            "labels": {"gentle-shell": "rpc-agent"}
+        });
+        assert!(inspect_saved_terminal(&dead_remote, "javipi/t9").is_err());
+
+        let foreign = json!({
+            "address": "t18",
+            "state": "exited",
+            "labels": {"gentle-shell": "other"}
+        });
+        assert!(inspect_saved_terminal(&foreign, "t18").is_err());
+        assert!(inspect_saved_terminal(&dead_local, "t19").is_err());
+    }
 
     #[test]
     fn ctrl_t_defaults_to_local_when_only_stale_4b_remote_options_remain() {
