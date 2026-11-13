@@ -12,7 +12,7 @@ const source = fs.readFileSync(
   path.join(__dirname, "../src/herdr_remote_bridge.cjs"), "utf8"
 );
 
-function harness() {
+function harness(cwd = "/srv/workspaces/JaviPi") {
   const stdout = [];
   const childWrites = [];
   let killed = false;
@@ -32,7 +32,7 @@ function harness() {
   const fakeProcess = {
     argv: ["node", "t123"],
     env: { PATH: "/usr/bin", HOME: "/home/dietpi" },
-    cwd: () => "/srv/workspaces/JaviPi",
+    cwd: () => cwd,
     stdout: { write: (value) => stdout.push(value) },
     stderr: { write: () => {} },
     stdin: input,
@@ -40,8 +40,13 @@ function harness() {
     exit: (code) => { throw Error("unexpected exit: " + code); },
   };
   const requireMock = (name) => {
-    assert.equal(name, "node:child_process");
-    return { spawn: (...args) => { calls.push(args); return child; } };
+    if (name === "node:child_process") {
+      return { spawn: (...args) => { calls.push(args); return child; } };
+    }
+    // The remote Files extension only requires Node built-ins and
+    // performs no I/O until it receives a specific read-only request.
+    assert.ok(["node:fs/promises", "node:path", "node:util"].includes(name));
+    return require(name);
   };
   const execute = new Function(
     "require", "process", "Buffer", "setTimeout", "clearTimeout", source
@@ -155,4 +160,76 @@ test("startup timeout distinguishes no RPC from unexpected stdout records", () =
   assert.match(errors, /stdout_records=2/);
   assert.match(errors, /invalid_json=1/);
   assert.match(errors, /last_type=agent_start/);
+});
+
+function rpcInput(h, value) {
+  const bytes = Buffer.from(JSON.stringify(value) + "\n");
+  for (let i = 0; i < bytes.length; i += 96) {
+    const chunk = bytes.subarray(i, i + 96).toString("base64");
+    h.input.emit("data", Buffer.from("GS4A1|t123|I|" + chunk + "\r"));
+  }
+}
+
+async function fsReply(h, id) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const stream = Buffer.concat(readFrames(h.stdout)
+      .filter((frame) => frame.kind === "O")
+      .map((frame) => frame.payload)).toString();
+    const records = stream.split("\n").filter(Boolean);
+    const found = records.map((line) => JSON.parse(line))
+      .find((record) => record.id === id);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Remote FS response timed out");
+}
+
+test("read-only remote file operations use existing bridge and never call Pi bash", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-remote-tree-"));
+  try {
+    fs.mkdirSync(path.join(root, "src"));
+    fs.writeFileSync(path.join(root, "src", "hello.txt"), "hola desde javipi\n");
+    fs.writeFileSync(path.join(root, "blob.dat"), Buffer.from([0, 1, 2]));
+    const h = harness(root);
+    const initialCalls = h.childWrites.length;
+
+    rpcInput(h, { type: "herdr_fs_list", id: "fs-1", root, path: root });
+    const listing = await fsReply(h, "fs-1");
+    assert.equal(listing.success, true);
+    assert.ok(listing.data.entries.some((x) => x.name === "src" && x.kind === "directory"));
+    assert.equal(h.childWrites.length, initialCalls, "fs query must not go to Pi RPC");
+
+    rpcInput(h, { type: "herdr_fs_read", id: "fs-2",
+      root, path: path.join(root, "src", "hello.txt") });
+    const preview = await fsReply(h, "fs-2");
+    assert.equal(preview.success, true);
+    assert.equal(preview.data.content, "hola desde javipi\n");
+    assert.equal(h.childWrites.length, initialCalls, "preview must not invoke shell");
+
+    rpcInput(h, { type: "herdr_fs_read", id: "fs-3",
+      root, path: path.join(root, "blob.dat") });
+    assert.equal((await fsReply(h, "fs-3")).success, false);
+
+    rpcInput(h, { type: "herdr_fs_list", id: "fs-4",
+      root, path: path.dirname(root) });
+    assert.equal((await fsReply(h, "fs-4")).success, false);
+    assert.equal(h.childWrites.length, initialCalls);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("read-only remote browser rejects invalid root and Windows paths", async () => {
+  const h = harness();
+  const before = h.childWrites.length;
+  rpcInput(h, { type: "herdr_fs_list", id: "fs-bad1",
+    root: "C:\\Users\\wrong", path: "/srv/workspaces/JaviPi" });
+  assert.equal((await fsReply(h, "fs-bad1")).success, false);
+  rpcInput(h, { type: "herdr_fs_list", id: "fs-bad2",
+    root: "/srv/../workspaces", path: "/srv/../workspaces" });
+  assert.equal((await fsReply(h, "fs-bad2")).success, false);
+  assert.equal(h.childWrites.length, before);
 });
