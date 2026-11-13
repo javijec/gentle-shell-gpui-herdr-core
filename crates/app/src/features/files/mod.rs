@@ -36,7 +36,7 @@ fn source_editor(
     path: &Path,
     text: String,
     window: &mut Window,
-    cx: &mut App,
+    cx: &mut gpui_kit::Context<EditorState>,
 ) -> EditorState {
     let state = EditorState::new(window, cx)
         .line_number(true)
