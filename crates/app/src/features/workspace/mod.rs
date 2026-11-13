@@ -116,8 +116,11 @@ enum Overlay {
 
 struct Pane {
     item: PaneItem,
-    /// Set for agent panes.
+    /// Set for agent panes. Closing such a pane can shut down its agent.
     session: Option<Entity<SessionView>>,
+    /// A remote file pane only borrows the owning agent; closing the file
+    /// must never terminate that remote session.
+    linked_session: Option<Entity<SessionView>>,
     /// Folder of a terminal; parent folder of a file.
     cwd: PathBuf,
     /// The file a file pane shows.
@@ -357,6 +360,9 @@ pub struct Workspace {
     overlay: Option<(Overlay, Subscription)>,
     sidebar: Option<AnyView>,
     remote_files: Option<Entity<RemoteFilesView>>,
+    /// In-memory remote editors tied to individual agents. Switching Machines
+    /// must not silently discard a draft or redirect it to another agent.
+    remote_file_drafts: Vec<Entity<RemoteFilesView>>,
     _remote_files_events: Option<Subscription>,
     sidebar_visible: bool,
     /// Independent right-side Windows Files / Changes / Branches dock.
@@ -493,6 +499,7 @@ impl Workspace {
             overlay: None,
             sidebar: None,
             remote_files: None,
+            remote_file_drafts: Vec::new(),
             _remote_files_events: None,
             // Machines and local Files have separate dock positions.
             // Default to showing both without restoring the old tab strip.
@@ -732,6 +739,7 @@ impl Workspace {
         let mut pane = Pane {
             item,
             session: None,
+            linked_session: None,
             cwd,
             path: Some(path),
             session_file: None,

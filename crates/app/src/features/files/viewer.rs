@@ -93,7 +93,7 @@ pub struct FileView {
 
 /// How a Markdown pane shows its buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MdMode {
+pub(super) enum MdMode {
     Edit,
     Split,
     Preview,
@@ -101,19 +101,23 @@ enum MdMode {
 
 impl MdMode {
     /// In header order.
-    const ALL: [MdMode; 3] = [MdMode::Edit, MdMode::Split, MdMode::Preview];
-    const LABELS: [&'static str; 3] = ["Edit", "Split", "Preview"];
+    pub(super) const ALL: [MdMode; 3] = [MdMode::Edit, MdMode::Split, MdMode::Preview];
+    pub(super) const LABELS: [&'static str; 3] = ["Edit", "Split", "Preview"];
 
     /// The mode last picked this session, which new Markdown panes open in.
-    fn last() -> Self {
+    pub(super) fn last() -> Self {
         Self::ALL
             .get(usize::from(LAST_MD_MODE.load(Ordering::Relaxed)))
             .copied()
             .unwrap_or(MdMode::Preview)
     }
 
-    fn index(self) -> usize {
+    pub(super) fn index(self) -> usize {
         Self::ALL.iter().position(|m| *m == self).unwrap_or(0)
+    }
+
+    pub(super) fn remember(self) {
+        LAST_MD_MODE.store(self.index() as u8, Ordering::Relaxed);
     }
 }
 
@@ -187,19 +191,9 @@ impl FileView {
             Ok((text, size)) => {
                 meta.size = Some(size);
                 meta.lines = Some(line_count(&text));
-                let token = language(&path).0;
                 let preview =
                     is_markdown(&path).then(|| cx.new(|cx| TextViewState::markdown(&text, cx)));
-                let editor = cx.new(|cx| {
-                    let state = EditorState::new(window, cx)
-                        .line_number(true)
-                        .soft_wrap(false);
-                    match token {
-                        Some(lang) => state.language(lang),
-                        None => state,
-                    }
-                    .default_value(text)
-                });
+                let editor = cx.new(|cx| super::source_editor(&path, text, window, cx));
                 let edit = Editing {
                     saved: editor.read(cx).text().clone(),
                     dirty: stamp.is_none(),
@@ -569,7 +563,7 @@ impl FileView {
         let Some(md) = self.markdown.as_mut() else {
             return;
         };
-        LAST_MD_MODE.store(mode.index() as u8, Ordering::Relaxed);
+        mode.remember();
         if md.mode == mode {
             return;
         }

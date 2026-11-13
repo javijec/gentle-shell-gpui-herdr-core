@@ -11,15 +11,42 @@ mod refs;
 mod tree;
 mod viewer;
 
-pub use tree::{FileTreeEvent, FileTreeView, init};
+pub use tree::{FileTreeEvent, FileTreeView};
 pub use viewer::FileView;
+
+/// Register both the local Files shortcuts and the remote editor shortcut.
+pub fn init(cx: &mut App) {
+    tree::init(cx);
+    RemoteFilesView::bind_keys(cx);
+}
 
 use std::path::Path;
 
-use gpui_kit::Hsla;
+use gpui_kit::component::input::EditorState;
+use gpui_kit::{App, Hsla, Window};
 use gpui_kit::assets::IconName;
 
 use crate::shared::ui;
+
+/// The same syntax-aware editing engine for native Windows files and
+/// remote Linux files. Storage and save semantics stay with each backend.
+/// `EditorState` gives both file sources line numbers, syntax highlighting,
+/// cursor/selection/undo and the same wrapping behavior.
+fn source_editor(
+    path: &Path,
+    text: String,
+    window: &mut Window,
+    cx: &mut gpui_kit::Context<EditorState>,
+) -> EditorState {
+    let state = EditorState::new(window, cx)
+        .line_number(true)
+        .soft_wrap(false);
+    match language(path).0 {
+        Some(lang) => state.language(lang),
+        None => state,
+    }
+    .default_value(text)
+}
 
 /// The icon and tint for a file name in the tree.
 fn file_icon(name: &str) -> (IconName, Hsla) {
@@ -76,6 +103,7 @@ fn language(path: &Path) -> (Option<&'static str>, &'static str) {
         (_, "py" | "pyi") => ("python", "Python"),
         (_, "go") => ("go", "Go"),
         (_, "sh" | "bash" | "zsh") => ("bash", "Shell"),
+        (_, "ps1" | "psm1" | "psd1") => ("powershell", "PowerShell"),
         (_, "yaml" | "yml") => ("yaml", "YAML"),
         (_, "html" | "htm") => ("html", "HTML"),
         (_, "css" | "scss") => ("css", "CSS"),
@@ -127,6 +155,8 @@ mod tests {
     #[test]
     fn languages_and_sizes() {
         assert_eq!(language(Path::new("src/main.rs")), (Some("rust"), "Rust"));
+        assert_eq!(language(Path::new("prepare-boot.ps1")),
+            (Some("powershell"), "PowerShell"));
         assert_eq!(language(Path::new("Cargo.lock")), (Some("toml"), "TOML"));
         assert_eq!(language(Path::new("LICENSE")), (None, "Plain text"));
         assert_eq!(human_size(12), "12 B");
