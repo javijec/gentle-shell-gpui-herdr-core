@@ -1,8 +1,8 @@
-//! Pi RPC over a Herdr-managed local terminal.
+//! Pi RPC over a Herdr-managed terminal (local or remote).
 //!
-//! The child GPUI binary enters --herdr-agent-bridge mode. A tagged base64
-//! line protocol carries JSONL over the PTY; regular Pi protocol records
-//! never pass directly through terminal emulation. Remote hosts are 4B.
+//! Local agents use the GPUI Rust bridge. Remote agents run a small,
+//! dependency-free inline Node.js bridge using Herdr terminal.run argv;
+//! no extra binaries or compilation are needed on JaviPi.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,16 +23,20 @@ const TRANSPORT_TIMEOUT: Duration = Duration::from_secs(12);
 const TRANSPORT_PROBE_ID: &str = "gs4a-transport-probe";
 type SessionReference = Arc<Mutex<Option<Weak<TerminalSession>>>>;
 
+/// Inline Node.js bridge is injected as argv via Herdr Core on JaviPi.
+/// This contains no host secrets and does not create remote files.
+const REMOTE_BRIDGE_JS: &str = include_str!("herdr_remote_bridge.cjs");
+
 /// Stage 4B opt-in machine selection until the per-tab UI is added in 4C.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoteTarget {
     machine: String,
     cwd: PathBuf,
-    bridge: String,
+    node: String,
 }
 
 fn remote_absolute_path(value: &str) -> bool {
-    // Evaluated on Windows, even though this path belongs to Linux ARM64.
+    // This is evaluated on Windows, though it refers to a Linux filesystem.
     value.starts_with('/')
         && !value.contains('\\')
         && !value.chars().any(char::is_control)
@@ -42,11 +46,11 @@ fn remote_absolute_path(value: &str) -> bool {
 fn validate_remote_target(
     machine: Option<&str>,
     cwd: Option<&str>,
-    bridge: Option<&str>,
+    node: Option<&str>,
 ) -> Result<Option<RemoteTarget>> {
     let Some(machine) = machine else {
-        anyhow::ensure!(cwd.is_none() && bridge.is_none(),
-            "Remote CWD/bridge is set without GENTLE_SHELL_HERDR_AGENT_MACHINE");
+        anyhow::ensure!(cwd.is_none() && node.is_none(),
+            "Remote options require GENTLE_SHELL_HERDR_AGENT_MACHINE");
         return Ok(None);
     };
     anyhow::ensure!(
@@ -54,20 +58,25 @@ fn validate_remote_target(
             && machine.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
         "Invalid GENTLE_SHELL_HERDR_AGENT_MACHINE: use the exact registered Herdr machine name"
     );
-    let cwd = cwd.ok_or_else(|| anyhow!(
-        "Set GENTLE_SHELL_HERDR_REMOTE_CWD to the JaviPi workspace, e.g. /srv/workspaces/JaviPi"
-    ))?;
-    let bridge = bridge.ok_or_else(|| anyhow!(
-        "Set GENTLE_SHELL_HERDR_REMOTE_BRIDGE to the absolute Linux ARM64 bridge executable path"
-    ))?;
+
+    // Safe default for JaviPi. Override for other Linux machines in 4B.
+    let cwd = cwd.unwrap_or("/srv/workspaces/JaviPi");
     anyhow::ensure!(remote_absolute_path(cwd),
         "GENTLE_SHELL_HERDR_REMOTE_CWD must be an absolute Linux path without . or ..");
-    anyhow::ensure!(remote_absolute_path(bridge) && bridge != "/",
-        "GENTLE_SHELL_HERDR_REMOTE_BRIDGE must be an absolute Linux executable path");
+
+    // Node is already a Gentle Shell runtime dependency. No other remote
+    // software, Rust build or installation is required.
+    let node = node.unwrap_or("node");
+    anyhow::ensure!(
+        node == "node" || node == "nodejs"
+            || (remote_absolute_path(node) && node != "/"),
+        "GENTLE_SHELL_HERDR_REMOTE_NODE must be node, nodejs, or an absolute Linux path"
+    );
+
     Ok(Some(RemoteTarget {
         machine: machine.to_string(),
         cwd: PathBuf::from(cwd),
-        bridge: bridge.to_string(),
+        node: node.to_string(),
     }))
 }
 
@@ -82,11 +91,10 @@ impl RemoteTarget {
         };
         let machine = read("GENTLE_SHELL_HERDR_AGENT_MACHINE")?;
         let cwd = read("GENTLE_SHELL_HERDR_REMOTE_CWD")?;
-        let bridge = read("GENTLE_SHELL_HERDR_REMOTE_BRIDGE")?;
-        validate_remote_target(machine.as_deref(), cwd.as_deref(), bridge.as_deref())
+        let node = read("GENTLE_SHELL_HERDR_REMOTE_NODE")?;
+        validate_remote_target(machine.as_deref(), cwd.as_deref(), node.as_deref())
     }
 }
-
 
 /// Verify both directions of Herdr's PTY, not just the bridge's child-pipe
 /// handshake. On Windows a terminal may display READY but never deliver input.
@@ -263,7 +271,12 @@ impl HerdrAgentProcess {
                 "Cannot resume a Windows-local session on a remote machine in 4B; open a new agent tab");
             (
                 remote.cwd,
-                vec![remote.bridge, token.clone()],
+                vec![
+                    remote.node,
+                    "--eval".into(),
+                    REMOTE_BRIDGE_JS.into(),
+                    token.clone(),
+                ],
                 Some(remote.machine),
             )
         } else {
@@ -475,31 +488,34 @@ impl Drop for HerdrAgentProcess {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{Incoming, IncomingState, Pending, validate_remote_target};
+    use super::{Incoming, IncomingState, Pending, REMOTE_BRIDGE_JS, validate_remote_target};
     use crate::herdr_wire::encode;
 
     #[test]
-    fn valid_remote_target_has_linux_paths_and_exact_machine_name() {
-        let target = validate_remote_target(
-            Some("javipi"),
-            Some("/srv/workspaces/JaviPi"),
-            Some("/home/dietpi/.local/bin/gentle-shell-herdr-bridge"),
-        ).unwrap().unwrap();
+    fn remote_target_needs_no_bridge_install_or_rust_compilation() {
+        let target = validate_remote_target(Some("javipi"), None, None).unwrap().unwrap();
         assert_eq!(target.machine, "javipi");
         assert_eq!(target.cwd.to_str(), Some("/srv/workspaces/JaviPi"));
-        assert_eq!(target.bridge, "/home/dietpi/.local/bin/gentle-shell-herdr-bridge");
+        assert_eq!(target.node, "node");
+        assert!(REMOTE_BRIDGE_JS.contains("require(\"node:child_process\")"));
+        assert!(REMOTE_BRIDGE_JS.contains("GS4A1|"));
+        assert!(REMOTE_BRIDGE_JS.contains("gs4a-startup"));
         assert_eq!(validate_remote_target(None, None, None).unwrap(), None);
     }
 
     #[test]
-    fn remote_selection_fails_closed_on_missing_or_windows_paths() {
-        assert!(validate_remote_target(Some("javipi"), None, Some("/bin/bridge")).is_err());
-        assert!(validate_remote_target(Some("javipi"), Some("/srv/JaviPi"), None).is_err());
-        assert!(validate_remote_target(Some("bad/name"), Some("/srv"), Some("/bin/bridge")).is_err());
-        assert!(validate_remote_target(Some("javipi"), Some(r"D:\\Programacion"), Some("/bin/bridge")).is_err());
-        assert!(validate_remote_target(Some("javipi"), Some("/srv/../tmp"), Some("/bin/bridge")).is_err());
-        assert!(validate_remote_target(Some("javipi"), Some("/srv/JaviPi"), Some("bridge")).is_err());
+    fn remote_selection_rejects_windows_paths_and_partial_config() {
+        assert!(validate_remote_target(Some("bad/name"), None, None).is_err());
+        assert!(validate_remote_target(Some("javipi"), Some(r"D:\\Programacion"), None).is_err());
+        assert!(validate_remote_target(Some("javipi"), Some("/srv/../tmp"), None).is_err());
+        assert!(validate_remote_target(Some("javipi"), None, Some("sh -c")).is_err());
+        assert!(validate_remote_target(Some("javipi"), None, Some(r"C:\\node.exe")).is_err());
         assert!(validate_remote_target(None, Some("/srv/JaviPi"), None).is_err());
+        assert!(validate_remote_target(None, None, Some("node")).is_err());
+        assert_eq!(
+            validate_remote_target(Some("raspi4"), Some("/srv/my-project"), Some("/usr/bin/node"))
+                .unwrap().unwrap().node, "/usr/bin/node"
+        );
     }
 
     #[test]
