@@ -297,7 +297,27 @@ impl SessionView {
         self.session_name
             .clone()
             .or_else(|| self.title.clone())
-            .unwrap_or_else(|| ui::split_path(&self.cwd).1)
+            .unwrap_or_else(|| {
+                match &self.agent_target {
+                    // The local workspace CWD is only where the Windows GUI
+                    // lives. Remote Pi runs in its *Linux* target CWD.
+                    Some(pi_rpc::AgentTarget::Remote { cwd, .. }) => cwd
+                        .rsplit('/')
+                        .find(|part| !part.is_empty())
+                        .unwrap_or("Remote agent")
+                        .to_owned(),
+                    // Legacy 4B sessions may have only a persisted Herdr
+                    // address. Do not present a Windows folder as their CWD.
+                    _ if self
+                        .herdr_terminal()
+                        .as_deref()
+                        .is_some_and(|address| address.contains('/')) =>
+                    {
+                        "Remote agent".into()
+                    }
+                    _ => ui::split_path(&self.cwd).1,
+                }
+            })
     }
 
     pub fn cwd(&self) -> &PathBuf {
