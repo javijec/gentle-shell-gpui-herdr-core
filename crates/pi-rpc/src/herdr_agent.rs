@@ -645,7 +645,12 @@ impl HerdrAgentProcess {
                         let _ = events.try_send(Incoming::Exited(code));
                     }
                 }
-                TerminalEvent::Retrying(error) | TerminalEvent::NeedsReconnect(error) => {
+                disconnected @ (TerminalEvent::Retrying(_) | TerminalEvent::NeedsReconnect(_)) => {
+                    let (error, exhausted) = match disconnected {
+                        TerminalEvent::Retrying(error) => (error, false),
+                        TerminalEvent::NeedsReconnect(error) => (error, true),
+                        _ => unreachable!(),
+                    };
                     transport_up.store(false, Ordering::Release);
                     reconnect_epoch.fetch_add(1, Ordering::AcqRel);
                     *last_failure.lock().unwrap() = Some(error.clone());
@@ -658,7 +663,7 @@ impl HerdrAgentProcess {
                     } else if !lost_notice.swap(true, Ordering::AcqRel) {
                         let _ = events.try_send(Incoming::ConnectionLost(error.clone()));
                     }
-                    if matches!(event, TerminalEvent::NeedsReconnect(_)) {
+                    if exhausted {
                         // TerminalSession pauses after bounded retries. Drive
                         // its manual-retry entry point in the background, so
                         // agents eventually recover after longer outages too.
