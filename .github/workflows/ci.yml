@@ -57,3 +57,5 @@ jobs:
           key: apt-${{ runner.arch }}-${{ env.ImageOS }}-v1
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Remote Herdr bridge regression tests
+        run: node --test crates/pi-rpc/tests/herdr_remote_bridge.test.cjs
