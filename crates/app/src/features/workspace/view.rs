@@ -109,7 +109,7 @@ impl Workspace {
                     });
                 // Herdr-style numeric tabs. Keep the full identity in the
                 // tooltip: no conversation or machine name is discarded.
-                let mut details = format!("Tab {} — {}", i + 1, self.pane_title(tab.focused));
+                let mut details = format!("Tab {} — {}", i + 1, self.pane_title(tab.focused).to_string());
                 if let Some(machine) = machine {
                     details.push_str(&format!(" · {machine}"));
                 }
@@ -125,7 +125,7 @@ impl Workspace {
                     .group("tab")
                     .flex_none()
                     .h(px(TITLE_ITEM))
-                    .w(px(if renaming.is_some() { 210. } else { 84. }))
+                    .w(px(if renaming.is_some() { 232. } else { 84. }))
                     .px(px(8.))
                     .gap(px(7.))
                     .rounded(px(7.))
@@ -195,7 +195,7 @@ impl Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .font_weight(if active {
-                                    FontWeight::SEMIBOLD
+                                    FontWeight::BOLD
                                 } else {
                                     FontWeight::MEDIUM
                                 })
