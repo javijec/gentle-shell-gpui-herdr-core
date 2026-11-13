@@ -97,6 +97,22 @@ impl SessionView {
 
     /// The folder button: pick a folder and [`Self::change_cwd`] to it.
     pub(super) fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_remote_herdr() {
+            // A native Windows chooser cannot navigate or change the cwd of
+            // a running Linux agent. Do not restart or migrate its process.
+            if let Some(cwd) = self.remote_cwd() {
+                let cwd = cwd.to_owned();
+                cx.write_to_clipboard(ClipboardItem::new_string(cwd.clone()));
+                window.push_notification(Notification::info(format!(
+                    "Remote directory copied: {cwd}. Use the + beside its machine to start a different agent in another directory."
+                )), cx);
+            } else {
+                window.push_notification(Notification::info(
+                    "This restored remote agent has no saved directory. Use its shell to run pwd; use the machine + to start an agent in another project."
+                ), cx);
+            }
+            return;
+        }
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -314,6 +330,10 @@ impl SessionView {
                             this.session_file = Some(path);
                         }
                         this.refresh_state(cx);
+                        // A remote Git query must run only after Pi RPC is
+                        // ready. The initial refresh during start() deliberately
+                        // does not execute Windows Git for an unknown target.
+                        this.refresh_git(cx);
                         // Kept until the switch lands, so the window saves this
                         // path rather than the blank session it replaces.
                         if let Some(path) = this.backend.pending_session.clone() {
