@@ -347,7 +347,22 @@ impl SessionView {
     }
 
     pub(super) fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (prefix, leaf) = ui::split_path(&self.cwd);
+        let remote = self.is_remote_herdr();
+        // Remote Linux paths are not Windows workspace paths. Display the
+        // per-agent Linux launch cwd; legacy remote sessions without one
+        // must not inherit the local project name.
+        let (prefix, leaf) = if remote {
+            match self.remote_cwd() {
+                Some("/") => (String::new(), "/".to_string()),
+                Some(path) => match path.rsplit_once('/') {
+                    Some((parent, leaf)) => (format!("{parent}/"), leaf.to_owned()),
+                    None => (String::new(), path.to_owned()),
+                },
+                None => (String::new(), "remote cwd unknown".into()),
+            }
+        } else {
+            ui::split_path(&self.cwd)
+        };
         let empty = self.composer.read(cx).value().trim().is_empty() && self.attachments.is_empty();
         let busy = self.busy();
         let ready = self.backend.is_ready();
@@ -379,31 +394,41 @@ impl SessionView {
                 .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
         };
 
-        let git = self.git.snapshot.as_ref().map(|git| {
-            h_flex()
-                .flex_shrink_0()
-                .gap_1()
-                .text_size(px(12.))
-                .child(
-                    Icon::new(IconName::GitBranch)
-                        .xsmall()
-                        .text_color(ui::champagne()),
-                )
-                .child(
-                    div()
+        let git: Option<AnyElement> = if remote {
+            self.git.remote_branch.as_ref().map(|branch| {
+                h_flex()
+                    .flex_shrink_0()
+                    .gap_1()
+                    .text_size(px(12.))
+                    .child(Icon::new(IconName::GitBranch)
+                        .xsmall().text_color(ui::champagne()))
+                    .child(div()
                         .font_family(ui::MONO)
                         .text_color(ui::champagne())
-                        .child(git.branch.clone().unwrap_or_else(|| "detached".into())),
-                )
-                .when(!git.files.is_empty(), |this| {
-                    this.child(
-                        div()
+                        .child(branch.clone()))
+                    .into_any_element()
+            })
+        } else {
+            self.git.snapshot.as_ref().map(|git| {
+                h_flex()
+                    .flex_shrink_0()
+                    .gap_1()
+                    .text_size(px(12.))
+                    .child(Icon::new(IconName::GitBranch)
+                        .xsmall().text_color(ui::champagne()))
+                    .child(div()
+                        .font_family(ui::MONO)
+                        .text_color(ui::champagne())
+                        .child(git.branch.clone().unwrap_or_else(|| "detached".into())))
+                    .when(!git.files.is_empty(), |this| {
+                        this.child(div()
                             .font_family(ui::MONO)
                             .text_color(ui::muted())
-                            .child(format!("±{}", git.files.len())),
-                    )
-                })
-        });
+                            .child(format!("±{}", git.files.len())))
+                    })
+                    .into_any_element()
+            })
+        };
 
         let width = self.pane_width.get();
         let narrow = width < NARROW;
@@ -448,7 +473,13 @@ impl SessionView {
                         .text_size(px(12.))
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .tooltip(|window, cx| Tooltip::new("Open another folder").build(window, cx))
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(if remote {
+                                "Copy remote Linux directory (new projects: use machine +)"
+                            } else {
+                                "Open another folder"
+                            }).build(window, cx)
+                        })
                         .on_click(cx.listener(|this, _, window, cx| this.choose_folder(window, cx)))
                         .child(Icon::new(IconName::Folder).xsmall().text_color(ui::faint()))
                         .child(
