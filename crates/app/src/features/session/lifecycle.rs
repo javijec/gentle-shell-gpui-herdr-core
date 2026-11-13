@@ -245,6 +245,7 @@ impl SessionView {
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.shutdown_backend();
+        self.recovery_snapshot_pending = false;
         self.backend.started = true;
         self.backend.status = BackendStatus::Starting;
         self.models.loaded = false;
