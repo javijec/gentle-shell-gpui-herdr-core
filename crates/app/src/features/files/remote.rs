@@ -81,7 +81,7 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
         .map(|item| {
             let path = item["path"].as_str()
                 .filter(|s| !s.is_empty() && s.len() <= 2048
-                    && !s.starts_with('/') && !s.contains('\\')
+                    && !s.starts_with('/') && !s.contains('\\') && !s.contains(':')
                     && !s.chars().any(char::is_control)
                     && !s.split('/').any(|p| p == "." || p == ".."))
                 .ok_or("Invalid Git status file")?;
