@@ -11,7 +11,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
 use pi_rpc::{HerdrAgentProcess, PiProcess, RpcProcess};
 
-use super::SessionView;
+use super::{SessionEvent, SessionView};
 use super::state::BackendStatus;
 use super::view;
 use gentle_core::transcript::{NoticeLevel, Transcript};
@@ -98,17 +98,21 @@ impl SessionView {
     /// The folder button: pick a folder and [`Self::change_cwd`] to it.
     pub(super) fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_remote_herdr() {
-            // A native Windows chooser cannot navigate or change the cwd of
-            // a running Linux agent. Do not restart or migrate its process.
-            if let Some(cwd) = self.remote_cwd() {
-                let cwd = cwd.to_owned();
-                cx.write_to_clipboard(ClipboardItem::new_string(cwd.clone()));
-                window.push_notification(Notification::info(format!(
-                    "Remote directory copied: {cwd}. Use the + beside its machine to start a different agent in another directory."
-                )), cx);
+            // The native folder dialog would select a Windows path. Route
+            // remote navigation through the Linux directory picker instead.
+            // Selecting a new project creates a separate remote agent and
+            // never migrates or terminates this existing agent.
+            let machine = match &self.agent_target {
+                Some(pi_rpc::AgentTarget::Remote { machine, .. }) => Some(machine.clone()),
+                _ => self.herdr_terminal().as_deref()
+                    .and_then(|address| address.split_once('/'))
+                    .map(|(machine, _)| machine.to_owned()),
+            };
+            if let Some(machine) = machine {
+                cx.emit(SessionEvent::OpenRemoteDirectory(machine));
             } else {
                 window.push_notification(Notification::info(
-                    "This restored remote agent has no saved directory. Use its shell to run pwd; use the machine + to start an agent in another project."
+                    "Remote machine unknown. Reopen the Machines panel to select a directory."
                 ), cx);
             }
             return;
