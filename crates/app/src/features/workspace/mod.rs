@@ -117,6 +117,8 @@ struct Pane {
     session_file: Option<PathBuf>,
     /// Last observed Herdr address, so it gets persisted when first assigned.
     herdr_address: Option<String>,
+    /// Per-agent machine choice, never applied to another agent tab.
+    agent_target: Option<pi_rpc::AgentTarget>,
     /// What the tab bar shows for this pane, kept here so drawing the chrome
     /// never reads the views of tabs that aren't shown (reading an entity
     /// while drawing makes its every notify redraw the window). Agents
@@ -669,6 +671,7 @@ impl Workspace {
             path: Some(path),
             session_file: None,
             herdr_address: None,
+            agent_target: None,
             title: SharedString::default(),
             running: false,
             _subscriptions: Vec::new(),
