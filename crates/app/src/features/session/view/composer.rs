@@ -475,7 +475,7 @@ impl SessionView {
                         .whitespace_nowrap()
                         .tooltip(move |window, cx| {
                             Tooltip::new(if remote {
-                                "Copy remote Linux directory (new projects: use machine +)"
+                                "Choose Linux directory for a new remote agent"
                             } else {
                                 "Open another folder"
                             }).build(window, cx)
