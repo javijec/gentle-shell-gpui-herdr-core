@@ -370,7 +370,11 @@ impl Workspace {
     ) {
         let mut known: std::collections::HashSet<String> = self.panes.values()
             .filter(|pane| pane.item.kind == PaneKind::Agent)
-            .filter_map(|pane| pane.herdr_address.clone())
+            .filter_map(|pane| {
+                pane.herdr_address.clone().or_else(|| {
+                    pane.item.terminal_address.as_ref().and_then(|get| get(cx))
+                })
+            })
             .collect();
         // Other workspaces may not have been instantiated yet; keep their
         // saved identities reserved to prevent duplicate recovered tabs.
