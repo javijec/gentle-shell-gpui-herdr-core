@@ -195,6 +195,7 @@ impl Workspace {
                                     .gap(px(1.))
                                     .child(
                                         h_flex()
+                                            .id(("navigator-machine-toggle", group_index))
                                             .h(px(34.))
                                             .px_2()
                                             .gap_2()
