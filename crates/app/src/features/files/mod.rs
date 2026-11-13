@@ -3,6 +3,8 @@
 //! (editable, syntax-highlighted file — ⌘S saves — or read-only diff pane).
 
 mod changes;
+mod remote;
+pub use remote::{RemoteFilesEvent, RemoteFilesView};
 mod listing;
 mod ops;
 mod refs;
