@@ -19,7 +19,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::features::files::FileTreeView;
-use crate::features::machines::{model as machine_model, MachinesEvent, MachinesView};
+use crate::features::machines::{
+    model as machine_model, MachinesEvent, MachinesView,
+    RemoteDirectoryEvent, RemoteDirectoryPicker,
+};
 use crate::features::memory::{MemoryEvent, MemoryView};
 use crate::features::notices::{self, Notices};
 use crate::features::onboarding::{OnboardingEvent, OnboardingView, Probe};
@@ -97,6 +100,7 @@ enum Overlay {
     Providers(Entity<ProvidersView>),
     Sessions(Entity<SessionsView>),
     Machines(Entity<MachinesView>),
+    RemoteDirectory(Entity<RemoteDirectoryPicker>),
     Palette(Entity<PaletteView>),
     Usage(Entity<UsageView>),
     Memory(Entity<MemoryView>),
