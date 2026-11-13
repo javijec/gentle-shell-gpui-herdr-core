@@ -13,7 +13,9 @@ tab treatment.
   count of its session entries.
 - Child entries represent active workspace agent sessions (and shell/file
   tabs so they remain reachable). Click one to show its existing conversation;
-  hover reveals its full title and Herdr terminal address.
+  hover reveals its full title and Herdr terminal address. Double-click an
+  agent to rename it inline (Enter or blur saves; Escape cancels), even when a
+  split-pane file happens to hold keyboard focus.
 - A subtle active-row background replaces the old selected-tab highlight.
   A working dot marks an active turn; × closes only that session (respecting
   existing unsaved-edit confirmation).
@@ -60,7 +62,9 @@ cargo run --locked -p gentle-shell-gpui
 1. Verify **no visible top tabs**, and that the left navigation lists
    This computer and JaviPi with their existing agents beneath them.
 2. Click each agent entry; ensure the correct conversation is displayed and
-   the existing remote `javipi/tN` remains unchanged.
+   the existing remote `javipi/tN` remains unchanged. Double-click an agent
+   to rename it inline; verify Enter saves, Escape cancels, and a split-pane
+   agent can still be renamed while its file pane has focus.
 3. Use + under **This computer** and under **javipi**; confirm independent
    local/remote agents and no accidental fallback to Windows.
 4. Make JaviPi unreachable; the machine should appear disconnected at the
