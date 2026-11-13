@@ -1,159 +1,159 @@
-# Etapa 4B — Agentes remotos por Herdr Core (ARM64)
+# Etapa 4B — Agentes remotos sin instalar ni compilar nada en JaviPi
 
-## Objetivo y límites
+## Qué cambia
 
-Controlar desde Gentle Shell GPUI en Windows un agente **ejecutado en JaviPi**
-(Linux aarch64/DietPi), usando el mismo protocolo RPC JSONL enmarcado en
-base64 que se validó en 4A. El daemon Herdr de Windows usa
-`terminal.run {on: "javipi", cwd: "/srv/workspaces/JaviPi", argv: [...], ...}`
-y devuelve una dirección remota del tipo `javipi/tN`.
+Windows conserva Gentle Shell GPUI y su interfaz de agentes. Herdr Core
+ejecuta los agentes en Linux (JaviPi) y transporta el protocolo RPC.
+**No existe una instalación separada de puente en JaviPi.**
 
-- `GENTLE_SHELL_TERMINAL_BACKEND=herdr`: agentes gestionados por Herdr.
-- Sin máquina seleccionada: se mantiene el comportamiento 4A en el PC local.
-- Con `GENTLE_SHELL_HERDR_AGENT_MACHINE`: los nuevos agentes se crean en
-  esa máquina; nunca se envían las rutas de Windows a un agente remoto.
-- `GENTLE_SHELL_TERMINAL_BACKEND=local`: backend local nativo, Machines
-  desactivado, sin uso de Herdr (independientemente de las otras variables).
-- Si falla el arranque remoto, **no hay fallback silencioso** a Windows.
+La app incluye `crates/pi-rpc/src/herdr_remote_bridge.cjs`. Cuando se abre
+una pestaña remota, GPUI llama a `terminal.run` con la máquina seleccionada,
+un directorio remoto y el comando `node --eval <código integrado> <token>`.
+Herdr transmite ese comando **directamente** al equipo remoto; el código
+se ejecuta en memoria, sin instalar paquetes npm, sin Git, sin Rust ni archivos
+temporales del puente en la Raspberry Pi.
 
-El selector de máquina **por pestaña** es la etapa 4C. La reconexión
-persistente de agentes es 4D. En 4B, reiniciar una conversación remota desde
-un archivo de sesión **local de Windows** está bloqueado: creá una pestaña
-nueva para pruebas. No se transfieren sesiones ni credenciales entre equipos.
+El puente ejecuta el `gentle-shell --mode rpc` **ya existente en JaviPi**
+y usa sus tuberías stdin/stdout. Node.js es una dependencia que ya requiere
+Gentle Shell. El agente emplea **la configuración y autenticación propias**
+de JaviPi; GPUI no copia credenciales del PC.
 
-## Arquitectura implementada
+Los paquetes de entrada/salida usan `GS4A1|<token>|<tipo>|<base64>` sobre
+la PTY Herdr, bloques de hasta 96 bytes y las dos comprobaciones de
+`get_state` heredadas de 4A: se verifica que Pi funcione y que el camino
+GPUI → Herdr → JaviPi → GPUI sea bidireccional. Los errores no activan
+otro agente local por detrás.
 
-`pi-rpc/src/herdr_bridge.rs` contiene el puente sin dependencias de GPUI.
-Lo utilizan:
+## Qué tiene que existir en JaviPi
 
-- Windows: `gentle-shell-gpui.exe --herdr-agent-bridge <token>`, a través
-  del wrapper que añade el contexto propio de GPUI (como en 4A).
-- Linux ARM64: `gentle-shell-herdr-bridge <token>`, binario headless que
-  se compila con `-p pi-rpc --bin gentle-shell-herdr-bridge`.
+**Solo lo que ya usás:**
 
-El puente inicia `gentle-shell --mode rpc` dentro de JaviPi, con stdin/stdout
-reales del proceso hijo. La terminal Herdr transporta solo tramas marcadas,
-sin pasar JSONL crudo. Se conserva la doble comprobación de `get_state`
-(inicio de Pi y recorrido completo GPUI → Herdr → Pi → GPUI).
+- Herdr Core instalado y registrado en el Herdr Core de Windows.
+- Node.js funcionando en la sesión que Herdr inicia en JaviPi.
+- Gentle Shell instalado y funcional en esa misma cuenta de JaviPi.
+- Tus modelos/autenticaciones configurados en JaviPi.
 
-Las variables `PATH`, `HOME`, `USERPROFILE`, `GENTLE_SHELL_BIN`, etc.
-de Windows **no se propagan a JaviPi**. Herdr utiliza el entorno propio del
-core remoto. Solo se permiten dos overrides explícitos del administrador:
+**No hace falta compilar el proyecto ni instalar un puente ARM64.**
 
-- `GENTLE_SHELL_HERDR_REMOTE_BIN` → `GENTLE_SHELL_BIN` en JaviPi.
-- `GENTLE_SHELL_HERDR_REMOTE_PATH` → `PATH` en JaviPi.
+Si Herdr no encuentra `node` o `gentle-shell` porque su PATH es diferente
+del PATH de la terminal interactiva, podés especificar la ubicación real
+con los overrides de la sección de diagnóstico desde Windows, sin
+instalaciones adicionales.
 
-Las claves de autenticación de modelos deben estar configuradas directamente
-en la cuenta de JaviPi; el cliente no las copia.
+## Prueba desde Windows
 
-## 1. Instalar el puente en JaviPi
+Asegurate primero de que el PR #7 esté actualizado (en la rama de pruebas,
+no en `main`):
 
-Usar SSH o una terminal Herdr **dentro de JaviPi**, no PowerShell:
+```powershell
+git fetch https://github.com/javijec/gentle-shell-gpui-herdr-core.git feature/herdr-stage4b-remote-agents
+git switch feature/herdr-stage4b-remote-agents
+git merge --ff-only FETCH_HEAD
 
-```bash
-uname -m
-# Esperado: aarch64. Si el sistema usa armv7l, avisar antes de compilar.
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 
-cd /srv/workspaces
-git clone --single-branch --branch feature/herdr-stage4b-remote-agents \
-  https://github.com/javijec/gentle-shell-gpui-herdr-core.git gentle-shell-gpui-4b
-cd /srv/workspaces/gentle-shell-gpui-4b
+hc machine ls
+```
 
-# Cargo/Rust estable con soporte edition 2024. Evitar saturar RAM de Pi4.
-CARGO_BUILD_JOBS=1 cargo build --release --locked \
-  -p pi-rpc --bin gentle-shell-herdr-bridge
+Si Herdr registra la Raspberry con el nombre exacto `javipi`:
 
-install -Dm755 target/release/gentle-shell-herdr-bridge \
-  "$HOME/.local/bin/gentle-shell-herdr-bridge"
-ls -l "$HOME/.local/bin/gentle-shell-herdr-bridge"
+```powershell
+$env:GENTLE_SHELL_TERMINAL_BACKEND = "herdr"
+$env:GENTLE_SHELL_HERDR_AGENT_MACHINE = "javipi"
+
+# Por defecto, JaviPi usa /srv/workspaces/JaviPi.
+# Solo hace falta cambiarlo si querés abrir otro directorio:
+# $env:GENTLE_SHELL_HERDR_REMOTE_CWD = "/srv/workspaces/PoeTradePlus2"
+
+# Ya NO se utiliza un ejecutable remoto:
+Remove-Item Env:GENTLE_SHELL_HERDR_REMOTE_BRIDGE -ErrorAction SilentlyContinue
+
+cargo run --locked -p gentle-shell-gpui
+```
+
+Abrí una pestaña nueva de agente y comprobá: modelos, respuesta a un
+mensaje y ejecución de herramientas. Para confirmar dónde se ejecuta,
+pedí `pwd; uname -m; hostname` con una herramienta del agente; en JaviPi
+debés ver `/srv/workspaces/JaviPi`, `aarch64` y su hostname. En Windows,
+`hc ls` debe mostrar una terminal remota `javipi/tN` etiquetada
+`gentle-shell=rpc-agent`. El agente Pi debe aparecer **en JaviPi**, no
+como un nuevo proceso local en Windows.
+
+La selección por máquina es global y solo afecta pestañas nuevas
+en esta etapa 4B. Un selector explícito por pestaña queda para 4C.
+
+## Diagnóstico si Herdr no encuentra Node o Gentle Shell
+
+Desde una terminal Herdr conectada a JaviPi (o su terminal SSH existente),
+podés consultar:
+
+```sh
+command -v node
+node --version
 command -v gentle-shell
 gentle-shell --version
 ```
 
-Si el repositorio ya existe en esa ruta, actualizar la rama en lugar de
-clonarlo de nuevo. El directorio de compilación queda en el HDD `/srv`,
-evitando escribir el pesado `target/` en la microSD.
-
-Comprobar la ruta efectiva del puente, por ejemplo:
-`/home/dietpi/.local/bin/gentle-shell-herdr-bridge`. El binario debe
-ejecutarse con el mismo usuario que tenga el inicio de sesión de Gentle Shell.
-
-Si `gentle-shell` no está en el PATH del servicio Herdr, se puede pasar
-la ruta real encontrada en JaviPi mediante el override específico de
-`GENTLE_SHELL_HERDR_REMOTE_BIN` descrito abajo. No usar rutas Windows.
-
-## 2. Seleccionar JaviPi desde Windows
-
-En PowerShell, **antes de abrir GPUI**:
+Si faltan únicamente del PATH del servicio remoto, establecé desde
+PowerShell las rutas **Linux** verificadas en JaviPi (solo cuando haga falta):
 
 ```powershell
-cd D:\Programacion\gentle-shell-gpui-herdr-core
-
-git fetch https://github.com/javijec/gentle-shell-gpui-herdr-core.git feature/herdr-stage4b-remote-agents
-git switch -c feature/herdr-stage4b-remote-agents FETCH_HEAD
-
-hc machine ls
-
-$env:GENTLE_SHELL_TERMINAL_BACKEND = "herdr"
-$env:GENTLE_SHELL_HERDR_AGENT_MACHINE = "javipi"
-$env:GENTLE_SHELL_HERDR_REMOTE_CWD = "/srv/workspaces/JaviPi"
-$env:GENTLE_SHELL_HERDR_REMOTE_BRIDGE = "/home/dietpi/.local/bin/gentle-shell-herdr-bridge"
-
-# SOLO si el core remoto no encuentra gentle-shell:
-# $env:GENTLE_SHELL_HERDR_REMOTE_BIN = "/srv/tools/npm-global/bin/gentle-shell"
-# $env:GENTLE_SHELL_HERDR_REMOTE_PATH = "/srv/tools/npm-global/bin:/usr/local/bin:/usr/bin:/bin"
-
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
-cargo run --locked -p gentle-shell-gpui
+$env:GENTLE_SHELL_HERDR_REMOTE_NODE = "/usr/bin/node"
+$env:GENTLE_SHELL_HERDR_REMOTE_BIN = "/srv/tools/npm-global/bin/gentle-shell"
+$env:GENTLE_SHELL_HERDR_REMOTE_PATH = "/srv/tools/npm-global/bin:/usr/local/bin:/usr/bin:/bin"
 ```
 
-Usar el nombre exacto de `hc machine ls` (podría diferir de `javipi`).
-El bridge y el CWD deben existir *en JaviPi*, no en la PC.
+No supongas que esas rutas existen: consultalas en JaviPi. No uses rutas
+`C:\\` ni variables `HOME` de Windows. Si la máquina no está conectada,
+no hay un fallback silencioso al agente local.
 
-En la aplicación, abrir **una pestaña nueva de agente**. Pedir al agente
-`pwd; uname -m; hostname` con su herramienta de shell. Se espera una ruta
-bajo `/srv/workspaces/JaviPi` y arquitectura `aarch64`; un terminal
-`javipi/tN` debe aparecer en `hc ls`.
+## Desactivar el modo remoto
 
-Para volver a la ruta 4A (agente Herdr local), cerrar GPUI y quitar:
+Para usar otra vez 4A en el mismo PC (Herdr local):
 
 ```powershell
 Remove-Item Env:GENTLE_SHELL_HERDR_AGENT_MACHINE -ErrorAction SilentlyContinue
 Remove-Item Env:GENTLE_SHELL_HERDR_REMOTE_CWD -ErrorAction SilentlyContinue
-Remove-Item Env:GENTLE_SHELL_HERDR_REMOTE_BRIDGE -ErrorAction SilentlyContinue
+Remove-Item Env:GENTLE_SHELL_HERDR_REMOTE_NODE -ErrorAction SilentlyContinue
 Remove-Item Env:GENTLE_SHELL_HERDR_REMOTE_BIN -ErrorAction SilentlyContinue
 Remove-Item Env:GENTLE_SHELL_HERDR_REMOTE_PATH -ErrorAction SilentlyContinue
+
+$env:GENTLE_SHELL_TERMINAL_BACKEND = "herdr"
 ```
 
-Para ejecutar el respaldo completamente nativo, usar
-`GENTLE_SHELL_TERMINAL_BACKEND=local`: Herdr y Machines permanecen
-inhabilitados.
+Para respaldo totalmente nativo:
 
-## 3. Matriz de validación (4B)
+```powershell
+$env:GENTLE_SHELL_TERMINAL_BACKEND = "local"
+```
 
-| Nº | Verificación | Esperado |
-|----|--------------|----------|
-| 49 | Compilar bridge con `cargo --release` en JaviPi ARM64 | Ejecutable headless Linux aarch64 |
-| 50 | `hc machine ls` y lanzar agente remoto | Máquina conectada y dirección `javipi/tN` |
-| 51 | Cargar modelos, enviar prompt, recibir streaming | Modelos y conversación de JaviPi, sin errores RPC |
-| 52 | Ejecutar `pwd; uname -m; hostname` en el agente | `/srv/workspaces/JaviPi`, `aarch64`, JaviPi |
-| 53 | Dos agentes remotos simultáneos | Mensajes y herramientas aislados por pestaña |
-| 54 | Cerrar un agente remoto | Solo su terminal remota termina; Core y otras siguen |
-| 55 | Máquina desconectada/puente inexistente | Error explícito, jamás inicia Pi local |
-| 56 | Quitar configuración remota con backend herdr | Un agente nuevo vuelve a ejecutar 4A local |
-| 57 | Backend local aun con variables remotas definidas | Solo procesos nativos, sin Herdr |
-| 58 | Registrar `hc ls`, revisar entorno remoto | Ninguna ruta, perfil ni autenticación Windows copiada |
+El backend `local` ignora toda configuración remota y no utiliza Herdr.
 
-## Límites conocidos
+## Matriz de aceptación de 4B
 
-- Esta rama no se ha compilado ni ejecutado todavía en Windows o JaviPi.
-  Los tests incluidos son sintéticos; falta la verificación de 49–58.
-- Los títulos, el navegador de archivos, el Git local y algunos indicadores
-  de proyecto de GPUI todavía están ligados a Windows; en 4B no deben
-  considerarse equivalentes al workspace remoto. 4C integrará la elección
-  visible de máquina por pestaña y contexto remoto.
-- Las sesiones persistentes de agentes y la reconexión a terminales remotas
-  tras reiniciar GPUI serán tratados en 4D.
-- No realizar pruebas que eliminen archivos importantes del servidor. Empezar
-  con comandos de solo lectura y un directorio de trabajo conocido.
+| Nº | Prueba | Resultado esperado |
+|----|--------|--------------------|
+| 49 | Iniciar remoto sin Rust, Git ni bridge instalado en JaviPi | El puente Node integrado inicia en memoria |
+| 50 | `hc machine ls`, GPUI y `hc ls` | Dirección de terminal `javipi/tN` |
+| 51 | Modelos, prompt y streaming | Modelos y mensajes remotos correctos |
+| 52 | `pwd; uname -m; hostname` | Ruta Linux JaviPi y CPU aarch64 |
+| 53 | Dos agentes remotos | Canales y respuestas independientes |
+| 54 | Cerrar un agente | Solo termina su terminal Herdr; Core y otros siguen |
+| 55 | Máquina desconectada o Node inexistente | Error explícito sin abrir agente local |
+| 56 | Quitar selección remota en Herdr | Nuevas pestañas vuelven al agente 4A |
+| 57 | Elegir backend `local` con variables remotas | Sin procesos ni conexiones Herdr |
+| 58 | Inspeccionar entorno remoto | Ninguna credencial o ruta Windows transferida |
+
+## Límites
+
+- La rama contiene la implementación y pruebas sintéticas; todavía hay que
+  correr Clippy/tests de workspace y una prueba real Herdr + JaviPi.
+- Las rutas del sistema de archivos y estado de Git mostrados en algunas
+  partes de la UI pueden seguir refiriéndose al PC Windows en 4B. En 4C se
+  integrarán el contexto y la elección de máquina por pestaña.
+- No se reanudan archivos de sesión Windows dentro de JaviPi: abrir
+  una pestaña nueva. La persistencia/reconexión de agentes es 4D.
+- El código del puente viaja como argumento a `node --eval`; no contiene
+  tokens de proveedores ni claves. Herdr transmite ese comando únicamente
+  a la máquina elegida.
