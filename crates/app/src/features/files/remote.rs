@@ -92,6 +92,13 @@ impl RemoteFilesView {
             generation: 0,
             _wait_for_agent: Task::ready(()),
         };
+        if view.root.is_empty() {
+            view.error = Some(
+                "This restored agent has no known remote working directory yet. Refresh after Herdr discovers its terminal, or open a new agent."
+                    .into(),
+            );
+            return view;
+        }
         view.load_directory(view.root.clone(), cx);
         // A newly launched remote Pi may still be connecting when the
         // right panel appears. Wait for the SAME agent to become ready.
@@ -118,7 +125,7 @@ impl RemoteFilesView {
     }
 
     pub fn matches(&self, session: &Entity<SessionView>, root: &str) -> bool {
-        self.session == *session && self.root == root
+        &self.session == session && self.root == root
     }
 
     pub fn session(&self) -> &Entity<SessionView> {
