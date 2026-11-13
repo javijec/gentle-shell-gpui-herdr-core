@@ -8,6 +8,16 @@ use super::*;
 /// How many closes can be undone.
 const KEEP: usize = 20;
 
+/// Closing a Herdr pane intentionally terminates its terminal. Keep the
+/// conversation and machine/cwd for Undo, but never reattach the dead address.
+/// In native mode an address is dormant metadata and must remain preserved.
+fn snapshot_for_reopen(mut saved: SavedPane, herdr_enabled: bool) -> SavedPane {
+    if herdr_enabled {
+        saved.herdr_terminal = None;
+    }
+    saved
+}
+
 /// A pane in a closed tab's layout: one still open, or one that closed.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Slot {
@@ -35,9 +45,11 @@ impl Workspace {
         let Some(tab) = self.space().tabs.get(index) else {
             return;
         };
+        let herdr_enabled = crate::features::terminal::herdr_enabled();
         let layout = tab.tree.filter_map(&mut |id: &PaneId| {
             if closing.contains(id) {
-                self.saved_pane(*id, cx).map(Slot::Closed)
+                self.saved_pane(*id, cx)
+                    .map(|saved| Slot::Closed(snapshot_for_reopen(saved, herdr_enabled)))
             } else {
                 Some(Slot::Open(*id))
             }
@@ -185,3 +197,38 @@ pub(super) const REOPEN_KEY: &str = if cfg!(target_os = "macos") {
 } else {
     "Ctrl+Alt+Shift+T"
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn remote_pane() -> SavedPane {
+        SavedPane {
+            kind: PaneKind::Agent,
+            cwd: PathBuf::from("C:/projects/gentle-shell"),
+            path: None,
+            session: Some(PathBuf::from("C:/sessions/remote.jsonl")),
+            herdr_terminal: Some("javipi/t33".into()),
+            agent_target: Some(pi_rpc::AgentTarget::Remote {
+                machine: "javipi".into(),
+                cwd: "/srv/workspaces/JaviPi".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn undo_after_explicit_herdr_close_starts_fresh_not_dead_terminal() {
+        let original = remote_pane();
+        let restored = snapshot_for_reopen(original.clone(), true);
+        assert_eq!(restored.herdr_terminal, None);
+        assert_eq!(restored.session, original.session);
+        assert_eq!(restored.agent_target, original.agent_target);
+        assert_eq!(restored.cwd, original.cwd);
+    }
+
+    #[test]
+    fn native_mode_keeps_dormant_herdr_address() {
+        let original = remote_pane();
+        assert_eq!(snapshot_for_reopen(original.clone(), false), original);
+    }
+}
