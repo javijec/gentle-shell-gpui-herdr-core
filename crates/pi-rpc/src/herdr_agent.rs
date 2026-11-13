@@ -845,7 +845,9 @@ mod tests {
         );
         assert_eq!(
             recoverable_addresses(&candidates, None),
-            vec!["other/t4", "javipi/t1", "javipi/t5", "javipi/t33"]
+            // Discovery preserves creation order across different machines.
+            // created_ms: javipi/t1=1, other/t4=10, javipi/t5=50, javipi/t33=60.
+            vec!["javipi/t1", "other/t4", "javipi/t5", "javipi/t33"]
         );
     }
 
