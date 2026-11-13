@@ -33,6 +33,7 @@ function harness(cwd = "/srv/workspaces/JaviPi") {
     argv: ["node", "t123"],
     env: { PATH: "/usr/bin", HOME: "/home/dietpi" },
     cwd: () => cwd,
+    getuid: typeof process.getuid === "function" ? () => process.getuid() : undefined,
     stdout: { write: (value) => stdout.push(value) },
     stderr: { write: () => {} },
     stdin: input,
@@ -354,4 +355,18 @@ test("5B requires an existing regular file and rejects binary replacement", {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("5B refuses editing when the remote agent root is the filesystem root", {
+  skip: process.platform === "win32",
+}, async () => {
+  const h = harness("/");
+  rpcInput(h, {
+    type: "herdr_fs_write", id: "root-denied", root: "/",
+    path: "/tmp/nonexistent-herdr-write.txt",
+    content: "forbidden", expectedRevision: "0".repeat(64),
+  });
+  const result = await fsReply(h, "root-denied");
+  assert.equal(result.success, false);
+  assert.match(result.error, /project directory, not/);
 });
