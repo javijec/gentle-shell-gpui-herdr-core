@@ -692,7 +692,7 @@ impl Workspace {
         {
             tab.focused = next;
         }
-        // Dropping a session drops its PiProcess, which shuts the backend down.
+        self.shutdown_agent_pane(pane, cx);
         self.panes.remove(&pane);
         if active {
             self.focus_active(window, cx);
@@ -731,6 +731,7 @@ impl Workspace {
         }
         let tab = self.space_mut().tabs.remove(index);
         for pane in tab.tree.leaves() {
+            self.shutdown_agent_pane(pane, cx);
             self.panes.remove(&pane);
         }
         if self.space().tabs.is_empty() {
