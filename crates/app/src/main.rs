@@ -1,7 +1,3 @@
-// The test harness for the GPUI app expands deeply nested UI and test macros.
-// The default (128) is insufficient in the combined Herdr + upstream v0.1.14
-// test build; rustc specifically recommends 256 for this crate.
-#![recursion_limit = "256"]
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
