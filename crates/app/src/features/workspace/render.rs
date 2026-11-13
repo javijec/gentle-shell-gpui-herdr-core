@@ -16,8 +16,11 @@ impl Render for Workspace {
         {
             tab.focused = inside;
         }
-        let sidebar = self.sidebar.clone().filter(|_| self.sidebar_visible);
-        let has_sidebar = self.sidebar.is_some();
+        let sidebar = self.sidebar.clone().filter(|_| {
+            self.sidebar_visible && self.files_sidebar_open
+        });
+        let navigator_visible = self.sidebar_visible && !self.files_sidebar_open;
+        let has_sidebar = true;
         // Below this the screen buttons fold into one overflow menu.
         let narrow = window.viewport_size().width < px(900.);
         // Native web views would cover a screen opened over them; device
@@ -88,13 +91,25 @@ impl Render for Workspace {
                                 h_flex()
                                     .gap_2()
                                     .flex_1()
-                                    // Width 0: the tabs take what the buttons leave.
+                                    // The machine/agent tree owns navigation:
+                                    // no second tab strip in the title bar.
                                     .w_0()
                                     .min_w_0()
                                     .overflow_hidden()
                                     .child(self.render_workspace_chip(cx))
                                     .child(div().flex_none().w(px(1.)).h(px(14.)).bg(ui::border()))
-                                    .child(self.render_tabs(cx)),
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .max_w(px(340.))
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(ui::muted())
+                                            .child(self.tab().map_or_else(
+                                                || "No session selected".to_string(),
+                                                |tab| self.pane_title(tab.focused).to_string(),
+                                            )),
+                                    ),
                             )
                             .child(
                                 h_flex()
@@ -382,6 +397,23 @@ impl Render for Workspace {
                     .px_1p5()
                     .pb_1p5()
                     .gap_1p5()
+                    .when(navigator_visible, |row| {
+                        row.child(
+                            ui::appear(
+                                "machine-navigator-in",
+                                div()
+                                    .w(px(SIDEBAR_WIDTH))
+                                    .flex_none()
+                                    .h_full()
+                                    .rounded_xl()
+                                    .bg(ui::panel())
+                                    .border_1()
+                                    .border_color(gpui_kit::transparent_black())
+                                    .overflow_hidden()
+                                    .child(self.render_machine_navigator(cx)),
+                            ),
+                        )
+                    })
                     .children(sidebar.map(|view| {
                         ui::appear(
                             "sidebar-in",
