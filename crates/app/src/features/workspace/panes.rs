@@ -359,6 +359,65 @@ impl Workspace {
         }
     }
 
+    /// One-time recovery of agents started by older 4B builds, before agent
+    /// pane addresses were saved. This only opens new views of known live
+    /// Herdr RPC terminals; no terminal.run or second Pi agent is issued.
+    pub(super) fn recover_untracked_agents(
+        &mut self,
+        addresses: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut known: std::collections::HashSet<String> = self.panes.values()
+            .filter(|pane| pane.item.kind == PaneKind::Agent)
+            .filter_map(|pane| pane.herdr_address.clone())
+            .collect();
+        // Other workspaces may not have been instantiated yet; keep their
+        // saved identities reserved to prevent duplicate recovered tabs.
+        for space in &self.spaces {
+            if let Some((tabs, _)) = &space.saved {
+                for tab in tabs {
+                    for pane in tab.layout.leaves() {
+                        if pane.kind == PaneKind::Agent
+                            && let Some(address) = pane.herdr_terminal
+                        {
+                            known.insert(address);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut first_recovered = None;
+        for address in addresses {
+            if !known.insert(address.clone()) {
+                continue;
+            }
+            let cwd = self.space().root.clone();
+            let pane = self.new_agent_pane(
+                cwd, None, None, Some(address), false, window, cx,
+            );
+            let id = self.alloc_id();
+            let space = self.space_mut();
+            if first_recovered.is_none() {
+                first_recovered = Some(space.tabs.len());
+            }
+            space.tabs.push(Tab {
+                id,
+                tree: PaneTree::Leaf(pane),
+                focused: pane,
+            });
+        }
+        if let Some(index) = first_recovered {
+            // After upgrading from 4B's address-less layout, show a recovered
+            // agent rather than starting an unwanted replacement Pi process.
+            self.space_mut().active = index;
+            self.focus_active(window, cx);
+            self.schedule_save(cx);
+            cx.notify();
+        }
+    }
+
     pub(super) fn open_tab(
         &mut self,
         kind: PaneKind,
