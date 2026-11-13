@@ -326,6 +326,29 @@ impl SessionView {
             })
     }
 
+    /// True only when this viewer points at a Herdr agent on another
+    /// computer. A saved remote target does not make native mode remote.
+    pub(super) fn is_remote_herdr(&self) -> bool {
+        if !crate::features::terminal::herdr_enabled() {
+            return false;
+        }
+        match &self.agent_target {
+            Some(pi_rpc::AgentTarget::Local) => false,
+            Some(pi_rpc::AgentTarget::Remote { .. }) => true,
+            None => self.herdr_terminal().as_deref()
+                .is_some_and(|address| address.contains('/')),
+        }
+    }
+
+    /// The launch directory belongs to the remote machine and is never a
+    /// Windows workspace path. Legacy 4B restores can lack this metadata.
+    pub(super) fn remote_cwd(&self) -> Option<&str> {
+        match &self.agent_target {
+            Some(pi_rpc::AgentTarget::Remote { cwd, .. }) if self.is_remote_herdr() => Some(cwd),
+            _ => None,
+        }
+    }
+
     pub fn cwd(&self) -> &PathBuf {
         &self.cwd
     }
