@@ -536,7 +536,7 @@ impl Workspace {
                             .ghost()
                             .xsmall()
                             .icon(Icon::new(IconName::Folder))
-                            .tooltip("Show project files instead of machine navigator")
+                            .tooltip("Toggle local Windows Files panel on the right")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.toggle_sidebar_mode(cx)
                             })),
