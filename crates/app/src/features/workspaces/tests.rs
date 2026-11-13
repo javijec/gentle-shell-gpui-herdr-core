@@ -105,7 +105,7 @@ fn agent_herdr_address_round_trip_and_legacy_layout_are_compatible() {
         herdr_terminal: Some("javipi/t42".into()),
     };
     let json = serde_json::to_string(&saved).unwrap();
-    assert!(json.contains("\\"herdr_terminal\\":\\"javipi/t42\\""));
+    assert!(json.contains(r#""herdr_terminal":"javipi/t42""#));
     assert_eq!(serde_json::from_str::<SavedPane>(&json).unwrap(), saved);
     let old: SavedPane = serde_json::from_str(
         r#"{"kind":"agent","cwd":"D:/Programacion/my-project"}"#,
