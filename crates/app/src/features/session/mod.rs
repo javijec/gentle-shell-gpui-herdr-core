@@ -117,6 +117,8 @@ pub struct SessionView {
     restored_herdr: Option<String>,
     /// Machine chosen for this agent. Existing addresses always win.
     agent_target: Option<pi_rpc::AgentTarget>,
+    /// A recovered mid-turn stream needs a final get_messages snapshot.
+    recovery_snapshot_pending: bool,
     title: Option<String>,
     active_shell: Option<usize>,
     banner: crate::shared::banner::BannerConfig,
@@ -265,6 +267,7 @@ impl SessionView {
             session_file: None,
             restored_herdr: None,
             agent_target: None,
+            recovery_snapshot_pending: false,
             title: None,
             active_shell: None,
             banner: crate::shared::banner::read_config(&pi_rpc::resolve_homes().config),
