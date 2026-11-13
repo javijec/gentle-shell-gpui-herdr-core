@@ -181,9 +181,24 @@ impl Workspace {
             self.switch_workspace(next, window, cx);
         }
         let space = self.spaces.remove(index);
+        // A dormant workspace can contain saved Herdr addresses even though
+        // its panes have not been instantiated in this GPUI process.
+        if crate::features::terminal::herdr_enabled()
+            && let Some((saved_tabs, _)) = &space.saved
+        {
+            for tab in saved_tabs {
+                for pane in tab.layout.leaves() {
+                    if pane.kind == PaneKind::Agent
+                        && let Some(address) = pane.herdr_terminal
+                    {
+                        pi_rpc::HerdrAgentProcess::terminate_saved(address);
+                    }
+                }
+            }
+        }
         for tab in space.tabs {
             for pane in tab.tree.leaves() {
-                // Dropping a session drops its PiProcess, which shuts the backend down.
+                self.shutdown_agent_pane(pane, cx);
                 self.panes.remove(&pane);
             }
         }
