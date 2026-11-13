@@ -109,6 +109,39 @@ No supongas que esas rutas existen: consultalas en JaviPi. No uses rutas
 `C:\\` ni variables `HOME` de Windows. Si la máquina no está conectada,
 no hay un fallback silencioso al agente local.
 
+## Si el arranque de Pi es lento en JaviPi
+
+El puente Node ahora concede hasta 60 segundos a Gentle Shell para
+contestar el primer `get_state`; GPUI concede hasta 90 segundos a ese
+arranque remoto, mientras que el agente local 4A conserva sus 30 segundos.
+No se pasa automáticamente a un agente Windows.
+
+Si expira, el error muestra estadísticas limitadas del stdout inicial,
+sin copiar contenido de mensajes: `stdout_records`, `invalid_json`
+y `last_type`, además de las últimas líneas de stderr. Por ejemplo:
+
+- `stdout_records=0`: el proceso todavía no generó una línea stdout;
+  podría estar bloqueado en carga de extensiones o inicialización.
+- `invalid_json>0`: se está escribiendo texto que no cumple RPC JSONL
+  en stdout (p. ej. banner de CLI).
+- `last_type=...`: se recibieron eventos, pero no la respuesta
+  `get_state` con el ID correlacionado.
+
+Para revisar Node, Gentle Shell y la identidad del proceso remotamente,
+**solo desde Windows** mediante Herdr, sin acceder por SSH ni compilar:
+
+```powershell
+hc exec --on javipi --timeout 30 node --version
+hc exec --on javipi --timeout 30 gentle-shell --version
+hc exec --on javipi --timeout 30 id -un
+hc exec --on javipi --timeout 30 pwd
+```
+
+Si `gentle-shell --version` funciona pero el arranque RPC vuelve a
+bloquearse, el problema queda localizado en la inicialización de Pi/Gentle
+Shell en esa cuenta; se puede investigar las extensiones sin modificar
+el transporte ni instalar software.
+
 ## Desactivar el modo remoto
 
 Para usar otra vez 4A en el mismo PC (Herdr local):
