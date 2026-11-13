@@ -7,7 +7,7 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
 use pi_rpc::{Incoming, UiAnswer, UiMethod, UiRequest};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::state::{BackendStatus, Dialog, TurnActivity};
 use super::{SessionEvent, SessionView, view};
@@ -23,6 +23,44 @@ const GIT_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const STDERR_LINES: usize = 40;
 
 impl SessionView {
+    /// A turn can end while Herdr is disconnected, including during the
+    /// read-only reattach probe. Poll get_state until that turn settles;
+    /// get_messages then restores everything missed by the viewer. Never
+    /// retransmit a user command or launch a new remote Pi instance.
+    fn monitor_recovered_turn(&mut self, cx: &mut Context<Self>) {
+        let generation = self.recovery_generation;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(4)).await;
+                let active = this.update(cx, |this, cx| {
+                    if !this.recovery_snapshot_pending
+                        || this.recovery_generation != generation
+                    {
+                        return false;
+                    }
+                    this.request(json!({"type": "get_state"}), cx, move |this, result, cx| {
+                        if !this.recovery_snapshot_pending
+                            || this.recovery_generation != generation
+                        {
+                            return;
+                        }
+                        if let Ok(state) = result
+                            && state["isStreaming"] == false
+                        {
+                            this.recovery_snapshot_pending = false;
+                            this.transcript.interrupt();
+                            this.refresh_state(cx);
+                        }
+                    });
+                    true
+                }).unwrap_or(false);
+                if !active {
+                    break;
+                }
+            }
+        }).detach();
+    }
+
     /// Apply a batch of backend messages in order, then sync the view and
     /// repaint once.
     pub(super) fn handle_batch(
@@ -58,12 +96,15 @@ impl SessionView {
             Incoming::ConnectionLost(reason) => {
                 // The Herdr viewer failed, not the remote Pi process. Keep
                 // the transcript and running turn; never mark it Exited.
+                self.recovery_snapshot_pending = false;
+                self.recovery_generation = self.recovery_generation.wrapping_add(1);
                 self.transcript.notice(
                     NoticeLevel::Warning,
                     format!("Herdr connection interrupted ({reason}). The agent may still be running; commands will not be replayed automatically."),
                 );
             }
             Incoming::ConnectionRestored => {
+                self.recovery_generation = self.recovery_generation.wrapping_add(1);
                 self.transcript.notice(
                     NoticeLevel::Info,
                     "Herdr reconnected to the original agent. Synchronizing the conversation.".into(),
@@ -73,6 +114,7 @@ impl SessionView {
                 // snapshot at agent_settled to restore missed stream deltas.
                 self.recovery_snapshot_pending = true;
                 self.refresh_state(cx);
+                self.monitor_recovered_turn(cx);
             }
             Incoming::Stderr(line) => {
                 if self.backend.stderr.len() == STDERR_LINES {
