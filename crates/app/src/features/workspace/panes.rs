@@ -107,6 +107,7 @@ impl Workspace {
         prompt: Option<String>,
         resume: Option<PathBuf>,
         restored_herdr: Option<String>,
+        agent_target: Option<pi_rpc::AgentTarget>,
         start_now: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -116,6 +117,7 @@ impl Workspace {
             if let Some(address) = restored_herdr.clone() {
                 session.restore_herdr_terminal(address);
             }
+            session.set_agent_target(agent_target.clone());
             session
         });
         if start_now {
@@ -205,6 +207,7 @@ impl Workspace {
             path: None,
             session_file: resume,
             herdr_address: restored_herdr,
+            agent_target,
             title: SharedString::default(),
             running: false,
             _subscriptions: subscriptions,
@@ -283,6 +286,7 @@ impl Workspace {
             path,
             session_file: None,
             herdr_address: dormant_herdr_address,
+            agent_target: None,
             title: SharedString::default(),
             running: false,
             _subscriptions: Vec::new(),
@@ -302,7 +306,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<PaneId> {
         match kind {
-            PaneKind::Agent => Some(self.new_agent_pane(target, prompt, resume, None, true, window, cx)),
+            PaneKind::Agent => Some(self.new_agent_pane(target, prompt, resume, None, None, true, window, cx)),
             PaneKind::Terminal | PaneKind::File => self.new_factory_pane(kind, target, window, cx),
         }
     }
@@ -325,7 +329,8 @@ impl Workspace {
                 let resume = saved.session.clone().filter(|p| p.exists());
                 // Started once its tab is shown (see `start_shown`).
                 Some(self.new_agent_pane(
-                    cwd, None, resume, saved.herdr_terminal.clone(), false, window, cx,
+                    cwd, None, resume, saved.herdr_terminal.clone(),
+                    saved.agent_target.clone(), false, window, cx,
                 ))
             }
             PaneKind::Terminal => {
@@ -399,7 +404,7 @@ impl Workspace {
             }
             let cwd = self.space().root.clone();
             let pane = self.new_agent_pane(
-                cwd, None, None, Some(address), false, window, cx,
+                cwd, None, None, Some(address), None, false, window, cx,
             );
             let id = self.alloc_id();
             let space = self.space_mut();
@@ -449,6 +454,24 @@ impl Workspace {
             self.schedule_save(cx);
             cx.notify();
         }
+    }
+
+    /// Explicitly create a NEW agent under a single chosen Herdr machine.
+    /// Unlike workspace restore, this is a deliberate terminal.run action.
+    pub(super) fn open_agent_on_machine(
+        &mut self,
+        target: pi_rpc::AgentTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !crate::features::terminal::herdr_enabled() {
+            return;
+        }
+        let cwd = self.active_cwd(cx);
+        let pane = self.new_agent_pane(
+            cwd, None, None, None, Some(target), true, window, cx,
+        );
+        self.push_pane_tab(pane, window, cx);
     }
 
     pub(super) fn open_tab(
