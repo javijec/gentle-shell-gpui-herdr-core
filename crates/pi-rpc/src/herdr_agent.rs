@@ -675,13 +675,13 @@ impl HerdrAgentProcess {
                     } else if !lost_notice.swap(true, Ordering::AcqRel) {
                         let _ = events.try_send(Incoming::ConnectionLost(error.clone()));
                     }
-                    if exhausted {
-                        // TerminalSession pauses after bounded retries. Drive
-                        // its manual-retry entry point in the background, so
-                        // agents eventually recover after longer outages too.
-                        if let Some(session) = session_ref.lock().unwrap().as_ref()
+                    // TerminalSession pauses after bounded retries. Drive
+                    // its manual-retry entry point in the background, so
+                    // agents eventually recover after longer outages too.
+                    if exhausted
+                        && let Some(session) = session_ref.lock().unwrap().as_ref()
                             .and_then(Weak::upgrade)
-                        {
+                    {
                             let ready = ready.clone();
                             let transport_up = transport_up.clone();
                             let allow_reconnect = allow_reconnect.clone();
@@ -696,7 +696,6 @@ impl HerdrAgentProcess {
                                         session.reconnect();
                                     }
                                 });
-                        }
                     }
                 }
                 TerminalEvent::Failed(error) => {
