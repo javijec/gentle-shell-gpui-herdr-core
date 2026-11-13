@@ -106,7 +106,7 @@ pub fn attach_sidebar(
         cx: &mut App,
     ) -> Subscription {
         let tree = cx.new(|cx| FileTreeView::new(root, window, cx));
-        let shown = workspace.read(cx).sidebar_visible();
+        let shown = workspace.read(cx).files_sidebar_visible();
         tree.update(cx, |tree, cx| tree.set_visible(shown, cx));
         let target = workspace.downgrade();
         window
@@ -120,6 +120,9 @@ pub fn attach_sidebar(
                         workspace.open_file_in_tab(path.clone(), window, cx)
                     }
                     FileTreeEvent::OpenDiff(path) => workspace.open_diff(path.clone(), window, cx),
+                    FileTreeEvent::OpenAgent(folder) => {
+                        workspace.open_agent_tab(folder.clone(), window, cx)
+                    }
                     FileTreeEvent::InsertPath(text) => {
                         if workspace.active_agent_is_remote(cx) {
                             // Files/Changes/Branches are from Windows, even

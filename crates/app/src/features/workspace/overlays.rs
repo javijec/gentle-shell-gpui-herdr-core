@@ -28,17 +28,7 @@ impl Workspace {
             .active_session()
             .map(|t| t.read(cx).commands())
             .unwrap_or_default();
-        let workspaces = self
-            .spaces
-            .iter()
-            .enumerate()
-            .map(|(index, space)| WorkspaceRow {
-                index,
-                name: space.name.clone(),
-                tabs: space.tab_count(),
-                current: index == self.current,
-            })
-            .collect();
+        let workspaces = self.workspace_rows();
         let input = PaletteInput {
             commands,
             workspaces,
@@ -63,6 +53,21 @@ impl Workspace {
         );
         self.overlay = Some((Overlay::Palette(view), subscription));
         cx.notify();
+    }
+
+    /// Every workspace as the switcher lists it, with what its agents do.
+    pub(super) fn workspace_rows(&self) -> Vec<WorkspaceRow> {
+        self.spaces
+            .iter()
+            .enumerate()
+            .map(|(index, space)| WorkspaceRow {
+                index,
+                name: space.name.clone(),
+                tabs: space.tab_count(),
+                current: index == self.current,
+                activity: self.space_activity(space),
+            })
+            .collect()
     }
 
     pub(super) fn run_palette_action(
@@ -91,6 +96,7 @@ impl Workspace {
             PaletteAction::NewAgentPane => self.split_with_kind(PaneKind::Agent, window, cx),
             PaletteAction::NewTerminalPane => self.split_with_kind(PaneKind::Terminal, window, cx),
             PaletteAction::ClosePane => self.on_close_pane(&ClosePane, window, cx),
+            PaletteAction::ReopenClosed => self.reopen_closed(window, cx),
             PaletteAction::ToggleSidebar => self.toggle_sidebar(cx),
             PaletteAction::Agents => {
                 if let Some(tab) = tab {
@@ -131,18 +137,20 @@ impl Workspace {
         }
     }
 
-    /// Play the max-effort surge over the window; choosing max again
-    /// restarts it.
-    pub(super) fn play_surge(&mut self, cx: &mut Context<Self>) {
+    /// Play an effort level's surge over the window; another change
+    /// restarts it at the new level.
+    pub(super) fn play_surge(
+        &mut self,
+        level: crate::shared::surge::Level,
+        cx: &mut Context<Self>,
+    ) {
         self.surge_runs += 1;
         let run = self.surge_runs;
-        self.surge = Some((run, std::time::Instant::now()));
+        self.surge = Some((run, std::time::Instant::now(), level));
         self._surge_end = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(crate::shared::surge::DURATION)
-                .await;
+            cx.background_executor().timer(level.duration()).await;
             let _ = this.update(cx, |this, cx| {
-                if this.surge.is_some_and(|(playing, _)| playing == run) {
+                if this.surge.is_some_and(|(playing, _, _)| playing == run) {
                     this.surge = None;
                     cx.notify();
                 }

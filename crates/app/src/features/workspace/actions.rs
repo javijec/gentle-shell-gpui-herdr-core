@@ -99,6 +99,15 @@ impl Workspace {
         }
     }
 
+    pub(super) fn on_reopen_closed(
+        &mut self,
+        _: &ReopenClosed,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reopen_closed(window, cx);
+    }
+
     pub(super) fn on_focus_next_pane(
         &mut self,
         _: &FocusNextPane,
@@ -140,7 +149,7 @@ impl Workspace {
 
     /// Used by the file-tree owner to control filesystem polling. Files is
     /// its own right dock and is no longer coupled to the Machines sidebar.
-    pub fn sidebar_visible(&self) -> bool {
+    pub fn files_sidebar_visible(&self) -> bool {
         self.files_sidebar_open
     }
 

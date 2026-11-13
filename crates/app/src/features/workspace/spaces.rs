@@ -183,6 +183,7 @@ impl Workspace {
             self.switch_workspace(next, window, cx);
         }
         let space = self.spaces.remove(index);
+        self.forget_closed_in(index);
         // A dormant workspace can contain saved Herdr addresses even though
         // its panes have not been instantiated in this GPUI process.
         if crate::features::terminal::herdr_enabled()

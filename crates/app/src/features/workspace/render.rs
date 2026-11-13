@@ -47,9 +47,9 @@ impl Render for Workspace {
         // the root moves in place and asks for the next frame, so the element
         // tree (and every element's state) stays the same.
         let (shake_x, shake_y) = match self.surge {
-            Some((_, started)) => {
+            Some((_, started, level)) => {
                 window.request_animation_frame();
-                crate::shared::surge::shake_at(started.elapsed())
+                crate::shared::surge::shake_at(started.elapsed(), level)
             }
             None => (0., 0.),
         };
@@ -72,6 +72,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_new_agent_pane))
             .on_action(cx.listener(Self::on_new_terminal_pane))
             .on_action(cx.listener(Self::on_close_pane))
+            .on_action(cx.listener(Self::on_reopen_closed))
             .on_action(cx.listener(Self::on_focus_next_pane))
             .on_action(cx.listener(Self::on_focus_prev_pane))
             .on_action(cx.listener(Self::on_toggle_sidebar))
@@ -161,19 +162,48 @@ impl Render for Workspace {
                                                     this.on_split_down(&SplitDown, window, cx)
                                                 })),
                                         )
-                                        .child(
-                                            Button::new("title-close-pane")
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(Icon::new(IconName::X))
-                                                .tooltip(format!(
-                                                    "Close pane ({})",
-                                                    if mac { "⌘W" } else { "Ctrl+W" }
-                                                ))
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.on_close_pane(&ClosePane, window, cx)
-                                                })),
-                                        )
+                                        .child({
+                                            // Names the pane it closes; hovering it
+                                            // marks that pane (see `render_pane`).
+                                            let target = self
+                                                .focused_pane()
+                                                .map(|id| self.pane_title(id))
+                                                .unwrap_or_default();
+                                            let hover = cx.entity().downgrade();
+                                            // The hover is the wrapper's: the button's
+                                            // tooltip already takes its own `on_hover`,
+                                            // and GPUI allows one per element.
+                                            div()
+                                                .id("title-close-pane-hover")
+                                                .on_hover(move |hovered, _, cx| {
+                                                    let hovered = *hovered;
+                                                    let _ = hover.update(cx, |this, cx| {
+                                                        if this.close_hover != hovered {
+                                                            this.close_hover = hovered;
+                                                            cx.notify();
+                                                        }
+                                                    });
+                                                })
+                                                .child(
+                                                    Button::new("title-close-pane")
+                                                        .ghost()
+                                                        .xsmall()
+                                                        .icon(Icon::new(IconName::X))
+                                                        .tooltip(format!(
+                                                            "Close \u{201c}{}\u{201d} ({})",
+                                                            target.trim_end_matches(" •"),
+                                                            if mac { "⌘W" } else { "Ctrl+W" }
+                                                        ))
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.close_hover = false;
+                                                                this.on_close_pane(
+                                                                    &ClosePane, window, cx,
+                                                                )
+                                                            },
+                                                        )),
+                                                )
+                                        })
                                         .child(div().w(px(1.)).h(px(14.)).mx_1().bg(ui::border()))
                                     })
                                     .when_some(
@@ -531,8 +561,11 @@ impl Render for Workspace {
                 Overlay::Onboarding(view) => view.clone().into_any_element(),
                 Overlay::Welcome(view) => view.clone().into_any_element(),
             }))
-            .when_some(self.surge, |root, (run, _)| {
-                root.child(crate::shared::surge::overlay(run))
+            .when_some(self.surge, |root, (run, _, level)| {
+                root.child(crate::shared::surge::overlay(run, level))
+            })
+            .when_some(crate::features::hydration::playing(cx), |root, run| {
+                root.child(crate::features::hydration::overlay(run, cx))
             })
     }
 }

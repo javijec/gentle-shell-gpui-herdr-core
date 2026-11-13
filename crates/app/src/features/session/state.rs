@@ -215,6 +215,8 @@ impl TodoIsland {
 pub(super) struct GitStatus {
     /// Local Git state, never populated from the Windows project for remote agents.
     pub(super) snapshot: Option<GitSnapshot>,
+    /// Local repository path; never display Windows Git paths for remote agents.
+    pub(super) repository: Option<String>,
     /// Read-only Git query issued over the remote agent's own Pi RPC bridge.
     pub(super) remote_branch: Option<String>,
     /// When the working tree was last refreshed.

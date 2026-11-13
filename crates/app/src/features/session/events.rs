@@ -252,6 +252,7 @@ impl SessionView {
                         .await;
                     let _ = this.update(cx, |this, cx| {
                         this.extension.dialogs.retain(|d| d.id != id);
+                        this.sync_chrome(cx);
                         cx.notify();
                     });
                 })
@@ -391,6 +392,7 @@ impl SessionView {
                 .notice(NoticeLevel::Error, format!("{error:#}"));
         }
         self.prepare_dialog(window, cx);
+        self.sync_chrome(cx);
         cx.notify();
     }
 
@@ -402,6 +404,7 @@ impl SessionView {
         // Windows git executable about a remote agent's local GPUI cwd.
         if self.is_remote_herdr() {
             self.git.snapshot = None;
+            self.git.repository = None;
             self.git.remote_branch = None;
             // A read-only Pi RPC bash call runs in the selected remote agent's
             // original process and does not spawn or reattach any terminals.
@@ -431,6 +434,7 @@ impl SessionView {
 
         self.git.remote_branch = None;
         self.git.snapshot = None;
+        self.git.repository = None;
         // A restored 4B Herdr address may not be assigned yet. Waiting for
         // attach is safer than briefly showing Windows Git as remote Git.
         if crate::features::terminal::herdr_enabled()
@@ -442,13 +446,21 @@ impl SessionView {
         }
         let cwd = self.cwd.clone();
         cx.spawn(async move |this, cx| {
-            let snapshot = cx
+            let (snapshot, repository) = cx
                 .background_executor()
-                .spawn(async move { git::snapshot(&cwd) })
+                .spawn(async move {
+                    let snapshot = git::snapshot(&cwd);
+                    let repository = snapshot
+                        .as_ref()
+                        .and_then(|_| git::toplevel(&cwd))
+                        .and_then(|top| git::repository_path(&cwd, &top));
+                    (snapshot, repository)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.git.seq == seq && !this.is_remote_herdr() {
                     this.git.snapshot = snapshot;
+                    this.git.repository = repository;
                     cx.notify();
                 }
             });
