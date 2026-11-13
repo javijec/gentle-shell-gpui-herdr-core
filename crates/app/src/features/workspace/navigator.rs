@@ -9,6 +9,9 @@ struct NavigatorSession {
     tab_id: usize,
     title: String,
     address: Option<String>,
+    /// The runtime working directory, never the Windows workspace fallback
+    /// for a remote Pi agent.
+    directory: Option<String>,
     icon: IconName,
     running: bool,
     pane_count: usize,
@@ -33,6 +36,36 @@ fn machine_key(
         Some(pi_rpc::AgentTarget::Remote { machine, .. }) => Some(machine.clone()),
         None => address.and_then(|value| value.split_once('/'))
             .map(|(machine, _)| machine.to_string()),
+    }
+}
+
+/// Resolve the runtime directory independently of the Windows workspace
+/// folder. Herdr terminal metadata is preferred once available; for new
+/// remote agents, the stored per-agent target is the launch directory.
+/// An old remote address without metadata yields None, never a fake
+/// Windows path.
+fn session_directory(
+    target: Option<&pi_rpc::AgentTarget>,
+    address: Option<&str>,
+    local_cwd: &Path,
+    snapshot: Option<&machine_model::Snapshot>,
+) -> Option<String> {
+    let reported = snapshot.and_then(|snapshot| {
+        snapshot
+            .terminals
+            .iter()
+            .find(|terminal| Some(terminal.address.as_str()) == address)
+            .map(|terminal| terminal.cwd.trim())
+            .filter(|cwd| !cwd.is_empty())
+            .map(str::to_owned)
+    });
+    match target {
+        Some(pi_rpc::AgentTarget::Local) => Some(local_cwd.display().to_string()),
+        Some(pi_rpc::AgentTarget::Remote { cwd, .. }) => {
+            reported.or_else(|| Some(cwd.clone()))
+        }
+        None if address.is_some_and(|address| address.contains('/')) => reported,
+        None => reported.or_else(|| Some(local_cwd.display().to_string())),
     }
 }
 
@@ -89,6 +122,12 @@ impl Workspace {
                         if title.is_empty() { "Agent".into() } else { title }
                     },
                     address: pane.herdr_address.clone(),
+                    directory: session_directory(
+                        pane.agent_target.as_ref(),
+                        pane.herdr_address.as_deref(),
+                        &pane.cwd,
+                        self.machine_snapshot.as_ref(),
+                    ),
                     icon: pane.item.kind.icon(),
                     running: self.tab_running(tab),
                     pane_count: tab.tree.len(),
@@ -294,10 +333,16 @@ impl Workspace {
                                                             format!(" · {} panes", session.pane_count)
                                                         } else { String::new() },
                                                     );
+                                                    let details = match &session.directory {
+                                                        Some(path) => format!("{details} · cwd: {path}"),
+                                                        None => format!("{details} · remote cwd unavailable"),
+                                                    };
+                                                    let directory_label = session.directory.clone()
+                                                        .unwrap_or_else(|| "Remote cwd unavailable".into());
                                                     h_flex()
                                                         .id(("navigator-session", session.tab_id))
                                                         .group(SharedString::from(group_name.clone()))
-                                                        .h(px(34.))
+                                                        .h(px(48.))
                                                         .ml(px(14.))
                                                         .mr(px(5.))
                                                         .pl(px(10.))
@@ -349,19 +394,34 @@ impl Workspace {
                                                                 .on_action(cx.listener(Self::cancel_tab_rename))
                                                                 .child(Input::new(&rename.input).appearance(false).xsmall())
                                                                 .into_any_element(),
-                                                            None => div()
+                                                            None => v_flex()
                                                                 .flex_1()
                                                                 .min_w_0()
-                                                                .overflow_hidden()
-                                                                .text_ellipsis()
-                                                                .whitespace_nowrap()
-                                                                .text_xs()
-                                                                .font_weight(if active {
-                                                                    FontWeight::SEMIBOLD
-                                                                } else {
-                                                                    FontWeight::NORMAL
-                                                                })
-                                                                .child(session.title)
+                                                                .gap(px(2.))
+                                                                .child(
+                                                                    div()
+                                                                        .min_w_0()
+                                                                        .overflow_hidden()
+                                                                        .text_ellipsis()
+                                                                        .whitespace_nowrap()
+                                                                        .text_xs()
+                                                                        .font_weight(if active {
+                                                                            FontWeight::SEMIBOLD
+                                                                        } else {
+                                                                            FontWeight::NORMAL
+                                                                        })
+                                                                        .child(session.title),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .min_w_0()
+                                                                        .overflow_hidden()
+                                                                        .text_ellipsis()
+                                                                        .whitespace_nowrap()
+                                                                        .text_size(px(10.))
+                                                                        .text_color(ui::faint())
+                                                                        .child(directory_label),
+                                                                )
                                                                 .into_any_element(),
                                                         })
                                                         .when(session.running, |row| {
@@ -443,6 +503,51 @@ impl Workspace {
 mod tests {
     use super::machine_key;
     use pi_rpc::AgentTarget;
+
+    #[test]
+    fn distinguishes_local_and_remote_runtime_directories() {
+        use super::session_directory;
+        use std::path::Path;
+        let local = AgentTarget::Local;
+        let remote = AgentTarget::Remote {
+            machine: "javipi".into(),
+            cwd: "/srv/workspaces/JaviPi".into(),
+        };
+        let windows = Path::new(r"D:\\Programacion\\gentle-shell-gpui-herdr-core");
+        assert_eq!(
+            session_directory(Some(&remote), None, windows, None).as_deref(),
+            Some("/srv/workspaces/JaviPi"),
+        );
+        assert_eq!(
+            session_directory(Some(&local), Some("javipi/t2"), windows, None),
+            Some(windows.display().to_string()),
+        );
+        assert_eq!(session_directory(None, Some("javipi/t3"), windows, None), None);
+    }
+
+    #[test]
+    fn recovered_remote_directory_comes_from_herdr_not_windows() {
+        use super::session_directory;
+        use crate::features::machines::model::{Snapshot, Terminal};
+        use std::path::Path;
+        let snapshot = Snapshot {
+            local_name: "local".into(),
+            machines: Vec::new(),
+            terminals: vec![Terminal {
+                address: "javipi/t42".into(),
+                title: "Gentle Shell".into(),
+                cwd: "/srv/workspaces/OtherProject".into(),
+                state: "live".into(),
+            }],
+        };
+        assert_eq!(
+            session_directory(
+                None, Some("javipi/t42"), Path::new("C:/wrong"),
+                Some(&snapshot),
+            ).as_deref(),
+            Some("/srv/workspaces/OtherProject"),
+        );
+    }
 
     #[test]
     fn target_precedes_stale_address() {
