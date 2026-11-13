@@ -196,6 +196,59 @@ impl Workspace {
         }
     }
 
+    /// Pick a Linux working directory before creating a remote agent. No
+    /// remote terminal is started while the picker is open or cancelled.
+    pub(super) fn open_remote_directory_picker(
+        &mut self,
+        machine: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !crate::features::terminal::herdr_enabled() {
+            return;
+        }
+        if self.machine_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.machines.iter().any(|item| {
+                item.name == machine && !item.connected()
+            })
+        }) {
+            window.push_notification(Notification::info(
+                format!("{machine} is disconnected. No agent was started."),
+            ), cx);
+            return;
+        }
+        // Use Herdr's known terminal directories only as shortcuts: they
+        // are not a complete remote filesystem listing.
+        let snapshot = self.machine_snapshot.clone();
+        let view = cx.new(|cx| RemoteDirectoryPicker::new(
+            machine, snapshot, window, cx,
+        ));
+        let subscription = cx.subscribe_in(
+            &view,
+            window,
+            |this, _, event: &RemoteDirectoryEvent, window, cx| match event {
+                RemoteDirectoryEvent::Close => this.close_overlay(window, cx),
+                RemoteDirectoryEvent::Launch { machine, cwd } => {
+                    // Defense in depth: the picker already validated the
+                    // path, but the workspace is the final launch boundary.
+                    let target = pi_rpc::AgentTarget::remote_with_cwd(
+                        machine.clone(), cwd.clone(),
+                    );
+                    this.close_overlay(window, cx);
+                    match target {
+                        Ok(target) => this.open_agent_on_machine(target, window, cx),
+                        Err(error) => window.push_notification(
+                            Notification::info(format!("Invalid remote directory: {error}")),
+                            cx,
+                        ),
+                    }
+                }
+            },
+        );
+        self.overlay = Some((Overlay::RemoteDirectory(view), subscription));
+        cx.notify();
+    }
+
     /// Herdr machine and terminal browser (all discovery/actions off the UI thread).
     pub(super) fn open_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !crate::features::terminal::herdr_enabled() {
@@ -217,12 +270,16 @@ impl Workspace {
                     this.open_herdr_terminal(address, window, cx);
                 }
                 MachinesEvent::NewAgent(machine) => {
-                    let target = match machine {
-                        Some(name) => pi_rpc::AgentTarget::remote_for_machine(name.clone()),
-                        None => pi_rpc::AgentTarget::Local,
-                    };
+                    let machine = machine.clone();
                     this.close_overlay(window, cx);
-                    this.open_agent_on_machine(target, window, cx);
+                    match machine {
+                        Some(machine) => {
+                            this.open_remote_directory_picker(machine, window, cx)
+                        }
+                        None => this.open_agent_on_machine(
+                            pi_rpc::AgentTarget::Local, window, cx,
+                        ),
+                    }
                 }
             },
         );
