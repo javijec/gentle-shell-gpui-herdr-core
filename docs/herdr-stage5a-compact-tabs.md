@@ -103,6 +103,52 @@ picker. No global `GENTLE_SHELL_HERDR_REMOTE_CWD` override is needed.
   local session and its labels must show Windows, not JaviPi.
 - Check the title bar label changes when selecting local vs JaviPi agents.
 
+## Remote agent composer footer
+
+The footer **folder** and **Git branch** indicators are agent-scoped, not
+workspace-scoped. In previous code both read Windows `SessionView.cwd`,
+showing the GPUI source repository under a JaviPi agent.
+
+- A native/local agent still uses the ordinary Windows folder dialog and
+  local Git snapshot.
+- A remote agent displays its saved **Linux** launch directory (or
+  `remote cwd unknown` for a legacy session without target metadata).
+  Clicking the footer folder opens the **remote Linux directory picker**
+  for that machine. Confirming starts a *new, separate remote agent* in
+  the chosen project; the original conversation/process is **not**
+  restarted, moved, killed or recreated. Cancel has no side effects.
+  The picker does not browse remote files in the existing agent.
+- A remote agent's Git label is read from that agent over Pi RPC using
+  `bash` with the read-only command
+  `git symbolic-ref --quiet --short HEAD || git rev-parse --short HEAD`.
+  The result is not inserted into chat context; failure or a non-Git
+  directory hides the branch rather than showing Windows Git.
+- The remote Git status/dirty-file count is not inferred from the Windows
+  checkout. Only the verified remote branch is displayed. The branch
+  is rechecked after reconnect and after regular Git refresh triggers.
+  Stale responses are discarded by generation and remote session guard.
+- The **Files/Changes/Branches** sidebar and workspace chip still refer
+  to GPUI's local workspace; they are not a remote file explorer and
+  must not claim to represent remote Git.
+
+### Composer footer regression tests
+
+1. Local agent: footer folder opens the Windows folder dialog; Git shows
+   the local workspace's current branch.
+2. New JaviPi agent with `/srv/workspaces/PoeTradePlus2`: footer shows
+   that Linux path, not `D:\\Programacion\\gentle-shell-gpui-herdr-core`.
+   Git shows the real remote repository branch after Pi RPC is ready.
+3. Click the remote folder: the Linux directory chooser opens. Cancel
+   leaves the existing agent intact; confirm creates a separate agent
+   under JaviPi in the chosen directory, with a new unique Herdr address.
+4. Use a remote directory that is not a Git repository: no branch is shown,
+   and the Windows `feature/herdr-stage5a-compact-tabs` branch never leaks
+   into that remote footer.
+5. Reconnect remote agent after network loss: remote branch reappears from
+   a fresh RPC query; no second Pi runtime is launched.
+6. Restore a legacy 4B address with no saved target: the footer must say
+   `remote cwd unknown`, never show Windows as its execution folder.
+
 ## Scope
 
 This is a presentation/navigation change. The internal `Tab` / `Pane`
