@@ -434,7 +434,30 @@ impl Workspace {
         }
         this.space_mut().last_active = workspaces::now();
         this.focus_active(window, cx);
-        this.start_shown(window, cx);
+        // New 4B builds know every agent's Herdr address. For agents left
+        // running by older builds, discover their still-live terminals once
+        // (off the UI thread) before activating a restored address-less tab.
+        let discover_remote = crate::features::terminal::herdr_enabled()
+            && std::env::var("GENTLE_SHELL_HERDR_AGENT_MACHINE")
+                .is_ok_and(|machine| !machine.trim().is_empty());
+        if discover_remote {
+            cx.spawn_in(window, async move |this, cx| {
+                let discovered = cx.background_executor().spawn(async {
+                    pi_rpc::HerdrAgentProcess::discover_live_remote_agents()
+                }).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    match discovered {
+                        Ok(addresses) => this.recover_untracked_agents(addresses, window, cx),
+                        Err(error) => {
+                            eprintln!("gentle-shell-gpui: remote agent discovery failed: {error:#}");
+                        }
+                    }
+                    this.start_shown(window, cx);
+                });
+            }).detach();
+        } else {
+            this.start_shown(window, cx);
+        }
         this.schedule_save(cx);
         // First run: the welcome screen, from the very first frame (it looks
         // at the machine itself while its banner writes in), so the chat
