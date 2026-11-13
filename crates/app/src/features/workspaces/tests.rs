@@ -11,6 +11,7 @@ fn sample() -> SavedState {
         path: None,
         session: Some(PathBuf::from("/tmp/sessions/a.jsonl")),
         herdr_terminal: None,
+        agent_target: None,
     };
     let terminal = SavedPane {
         kind: PaneKind::Terminal,
@@ -18,6 +19,7 @@ fn sample() -> SavedState {
         path: None,
         session: None,
         herdr_terminal: Some("remote/t7".to_string()),
+        agent_target: None,
     };
     let file = SavedPane {
         kind: PaneKind::File,
@@ -25,6 +27,7 @@ fn sample() -> SavedState {
         path: Some(PathBuf::from("/tmp/project/README.md")),
         session: None,
         herdr_terminal: None,
+        agent_target: None,
     };
     SavedState {
         version: VERSION,
@@ -103,6 +106,7 @@ fn agent_herdr_address_round_trip_and_legacy_layout_are_compatible() {
         path: None,
         session: Some(PathBuf::from("/home/dietpi/.gentle-shell/agent/sessions/chat.jsonl")),
         herdr_terminal: Some("javipi/t42".into()),
+        agent_target: Some(pi_rpc::AgentTarget::remote_for_machine("javipi".into())),
     };
     let json = serde_json::to_string(&saved).unwrap();
     assert!(json.contains(r#""herdr_terminal":"javipi/t42""#));
@@ -111,6 +115,34 @@ fn agent_herdr_address_round_trip_and_legacy_layout_are_compatible() {
         r#"{"kind":"agent","cwd":"D:/Programacion/my-project"}"#,
     ).unwrap();
     assert!(old.herdr_terminal.is_none());
+}
+
+#[test]
+fn selected_local_and_remote_agents_survive_workspace_round_trip() {
+    let remote = SavedPane {
+        kind: PaneKind::Agent,
+        cwd: PathBuf::from("D:/Programacion/gentle-shell"),
+        path: None,
+        session: None,
+        herdr_terminal: None,
+        agent_target: Some(pi_rpc::AgentTarget::Remote {
+            machine: "javipi".into(),
+            cwd: "/srv/workspaces/JaviPi".into(),
+        }),
+    };
+    let local = SavedPane {
+        agent_target: Some(pi_rpc::AgentTarget::Local),
+        ..remote.clone()
+    };
+    let remote_json = serde_json::to_string(&remote).unwrap();
+    assert_eq!(serde_json::from_str::<SavedPane>(&remote_json).unwrap(), remote);
+    let local_json = serde_json::to_string(&local).unwrap();
+    assert_eq!(serde_json::from_str::<SavedPane>(&local_json).unwrap(), local);
+    let old = r#"{"kind":"agent","cwd":"D:/Programacion/gentle-shell"}"#;
+    assert_eq!(
+        serde_json::from_str::<SavedPane>(old).unwrap().agent_target,
+        None
+    );
 }
 
 #[test]
