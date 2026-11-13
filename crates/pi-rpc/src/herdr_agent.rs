@@ -732,10 +732,47 @@ mod tests {
 
     use super::{
         Incoming, IncomingState, Pending, REMOTE_BRIDGE_JS, recoverable_addresses,
-        token_for_terminal, validate_remote_target,
+        token_for_terminal, validate_remote_target, AgentTarget, RemoteTarget,
     };
     use crate::herdr_wire::encode;
     use serde_json::json;
+
+    #[test]
+    fn per_agent_target_overrides_legacy_global_selection() {
+        assert_eq!(
+            RemoteTarget::from_agent_target(Some(&AgentTarget::Local)).unwrap(),
+            None
+        );
+        let target = AgentTarget::remote_for_machine("javipi".into());
+        assert_eq!(target.machine_label(), "javipi");
+        let remote = RemoteTarget::from_agent_target(Some(&target))
+            .unwrap().unwrap();
+        assert_eq!(remote.cwd.to_str(), Some("/srv/workspaces/JaviPi"));
+        assert_eq!(remote.machine, "javipi");
+        let other = AgentTarget::remote_for_machine("buildbox".into());
+        let remote = RemoteTarget::from_agent_target(Some(&other))
+            .unwrap().unwrap();
+        assert_eq!(remote.cwd.to_str(), Some("/"));
+        let invalid = AgentTarget::Remote {
+            machine: "bad/machine".into(),
+            cwd: "/srv/workspaces".into(),
+        };
+        assert!(RemoteTarget::from_agent_target(Some(&invalid)).is_err());
+    }
+
+    #[test]
+    fn serialized_targets_keep_local_and_remote_selection_independent() {
+        let remote = AgentTarget::Remote {
+            machine: "javipi".into(),
+            cwd: "/srv/workspaces/JaviPi".into(),
+        };
+        let local = AgentTarget::Local;
+        let encoded_remote = serde_json::to_string(&remote).unwrap();
+        let encoded_local = serde_json::to_string(&local).unwrap();
+        assert_eq!(serde_json::from_str::<AgentTarget>(&encoded_remote).unwrap(), remote);
+        assert_eq!(serde_json::from_str::<AgentTarget>(&encoded_local).unwrap(), local);
+        assert_ne!(encoded_remote, encoded_local);
+    }
 
     #[test]
     fn remote_target_needs_no_bridge_install_or_rust_compilation() {
