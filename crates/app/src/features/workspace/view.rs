@@ -97,8 +97,8 @@ impl Workspace {
                     .get(&tab.focused)
                     .map(|p| p.item.kind)
                     .unwrap_or(PaneKind::Agent);
-                let count = tab.tree.len();
-                let agent_machine = self.panes.get(&tab.focused)
+                let pane_count = tab.tree.len();
+                let machine = self.panes.get(&tab.focused)
                     .filter(|pane| pane.item.kind == PaneKind::Agent)
                     .and_then(|pane| {
                         pane.agent_target.as_ref()
@@ -107,35 +107,52 @@ impl Workspace {
                                 .and_then(|address| address.split_once('/'))
                                 .map(|(name, _)| name.to_owned()))
                     });
-                let icon_color = if active { ui::petal() } else { ui::faint() };
+                // Herdr-style numeric tabs. Keep the full identity in the
+                // tooltip: no conversation or machine name is discarded.
+                let mut details = format!("Tab {} — {}", i + 1, self.pane_title(tab.focused));
+                if let Some(machine) = machine {
+                    details.push_str(&format!(" · {machine}"));
+                }
+                if pane_count > 1 {
+                    details.push_str(&format!(" · {pane_count} panes"));
+                }
+                if kind == PaneKind::Agent {
+                    details.push_str(" · Double-click to rename");
+                }
+                let renaming = self.renaming.as_ref().filter(|r| r.pane == tab.focused);
                 let item = h_flex()
-                    .min_w_0()
-                    .overflow_hidden()
                     .id(("tab", tab.id))
                     .group("tab")
+                    .flex_none()
                     .h(px(TITLE_ITEM))
-                    .pl(px(10.))
-                    .pr(px(4.))
+                    .w(px(if renaming.is_some() { 210. } else { 84. }))
+                    .px(px(8.))
                     .gap(px(7.))
-                    .rounded(px(8.))
+                    .rounded(px(7.))
+                    .border_1()
+                    .border_color(ui::border())
+                    .bg(gpui_kit::transparent_black())
                     .text_size(px(12.5))
                     .cursor_pointer()
-                    .relative()
-                    // The fill alone marks the active tab, like Tern; the petal
-                    // icon carries the accent.
                     .when(active, |this| {
                         this.bg(ui::surface_hover().opacity(0.7))
+                            .border_color(ui::petal().opacity(0.65))
                             .text_color(ui::fg())
                     })
                     .when(!active, |this| {
                         this.text_color(ui::muted())
-                            .hover(|s| s.bg(ui::surface_hover().opacity(0.6)).text_color(ui::fg()))
+                            .hover(|this| {
+                                this.bg(ui::surface_hover().opacity(0.45))
+                                    .text_color(ui::fg())
+                            })
                     })
-                    // Keep clicks on tabs from turning into window drags (see the
-                    // workspace chip).
+                    .tooltip(move |window, cx| {
+                        Tooltip::new(details.clone()).build(window, cx)
+                    })
+                    // The native title bar must not interpret tab clicks as
+                    // window dragging, even along its thin outlined border.
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    // A double-click on an agent tab renames its session.
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         if event.click_count() >= 2 {
                             this.start_tab_rename(i, window, cx);
@@ -153,90 +170,49 @@ impl Workspace {
                             .child(if running {
                                 ui::pulse(div().size(px(7.)).rounded_full().bg(ui::accent()))
                                     .into_any_element()
-                            } else if kind == PaneKind::Agent {
-                                div()
-                                    .text_size(px(13.))
-                                    .line_height(relative(1.))
-                                    .text_color(icon_color)
-                                    .child("❀")
-                                    .into_any_element()
                             } else {
                                 Icon::new(kind.icon())
                                     .small()
-                                    .text_color(icon_color)
+                                    .text_color(if active { ui::petal() } else { ui::faint() })
                                     .into_any_element()
                             }),
                     )
                     .child(
-                        match self.renaming.as_ref().filter(|r| r.pane == tab.focused) {
+                        match renaming {
                             Some(rename) => div()
-                                .w(px(160.))
+                                .w(px(150.))
                                 .h(px(20.))
                                 .px_1()
                                 .flex()
                                 .items_center()
                                 .rounded(px(5.))
                                 .bg(ui::well())
-                                // Clicks in the field edit it rather than the tab.
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_action(cx.listener(Self::cancel_tab_rename))
                                 .child(Input::new(&rename.input).appearance(false).xsmall())
                                 .into_any_element(),
                             None => div()
+                                .flex_1()
                                 .min_w_0()
-                                .max_w(px(180.))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .when(active, |d| d.font_weight(FontWeight::MEDIUM))
-                                .child(self.pane_title(tab.focused))
+                                .font_weight(if active {
+                                    FontWeight::SEMIBOLD
+                                } else {
+                                    FontWeight::MEDIUM
+                                })
+                                .child((i + 1).to_string())
                                 .into_any_element(),
                         },
                     )
-                    .when_some(agent_machine, |d, machine| {
-                        d.child(
-                            div()
-                                .flex_none()
-                                .max_w(px(105.))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .rounded(px(5.))
-                                .px(px(5.))
-                                .bg(ui::surface_hover().opacity(0.8))
-                                .text_size(px(10.))
-                                .text_color(ui::muted())
-                                .child(machine),
-                        )
-                    })
-                    .when(count > 1, |d| {
-                        d.child(
-                            div()
-                                .h(px(16.))
-                                .min_w(px(16.))
-                                .px(px(4.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(5.))
-                                .bg(ui::surface_hover().opacity(0.7))
-                                .text_size(px(10.))
-                                .line_height(relative(1.))
-                                .text_color(ui::muted())
-                                .child(count.to_string()),
-                        )
-                    })
                     .child(
                         div()
                             .id(("close-tab", tab.id))
                             .size(px(18.))
+                            .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded(px(5.))
-                            .text_color(ui::faint())
-                            .invisible()
-                            .group_hover("tab", |s| s.visible())
+                            .text_color(ui::muted())
                             .hover(|s| s.bg(ui::surface_hover()).text_color(ui::fg()))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
@@ -244,8 +220,8 @@ impl Workspace {
                             }))
                             .child(Icon::new(IconName::X).xsmall()),
                     );
-                // Tabs shrink (titles end in …) so the title bar's buttons
-                // keep their place in a narrow window.
+                // Stable tab id keeps the same animation/state when a
+                // neighbor is closed and numbers are recomputed.
                 ui::appear(("tab-in", tab.id), div().flex().min_w_0().child(item))
             }))
             .child(
