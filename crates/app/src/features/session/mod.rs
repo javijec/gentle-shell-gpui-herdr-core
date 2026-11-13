@@ -301,9 +301,9 @@ impl SessionView {
                 // A saved remote target does not change the runtime when
                 // the user explicitly chose the native/local backend.
                 if !crate::features::terminal::herdr_enabled() {
-                    return ui::split_path(&self.cwd).1;
-                }
-                match &self.agent_target {
+                    ui::split_path(&self.cwd).1
+                } else {
+                    match &self.agent_target {
                     // The local workspace CWD is only where the Windows GUI
                     // lives. Remote Pi runs in its *Linux* target CWD.
                     Some(pi_rpc::AgentTarget::Remote { cwd, .. }) => cwd
@@ -321,6 +321,7 @@ impl SessionView {
                         "Remote agent".into()
                     }
                     _ => ui::split_path(&self.cwd).1,
+                    }
                 }
             })
     }
