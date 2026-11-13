@@ -119,6 +119,8 @@ pub struct SessionView {
     agent_target: Option<pi_rpc::AgentTarget>,
     /// A recovered mid-turn stream needs a final get_messages snapshot.
     recovery_snapshot_pending: bool,
+    /// Cancel polling from an older network generation or backend restart.
+    recovery_generation: u64,
     title: Option<String>,
     active_shell: Option<usize>,
     banner: crate::shared::banner::BannerConfig,
@@ -268,6 +270,7 @@ impl SessionView {
             restored_herdr: None,
             agent_target: None,
             recovery_snapshot_pending: false,
+            recovery_generation: 0,
             title: None,
             active_shell: None,
             banner: crate::shared::banner::read_config(&pi_rpc::resolve_homes().config),
