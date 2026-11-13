@@ -19,8 +19,11 @@ tab treatment.
 - A subtle active-row background replaces the old selected-tab highlight.
   A working dot marks an active turn; × closes only that session (respecting
   existing unsaved-edit confirmation).
-- The **+** on a machine launches a new agent on that specific machine.
-  Remote launch is disabled when the machine is reported disconnected. The
+- The **+** on a local machine creates a local agent. The **+** on a
+  connected remote machine now opens a directory picker **before** launching
+  anything. Remote launch is unavailable when the machine is disconnected.
+  The picker supports an editable absolute Linux path and shortcuts from
+  Herdr's known terminal directories. Cancel never starts a process. The
   top + creates an agent on This computer.
 - Selecting a session does not spawn an agent and does not change its
   machine. Existing stable identities, saved workspaces, split-pane layout,
@@ -68,8 +71,26 @@ To independently check a remote agent's *current* directory, ask that
 specific agent to run `pwd` in its own shell. A new SSH session's `pwd`
 is not evidence of the agent's CWD.
 
-This phase **does not** add a UI picker for a custom remote CWD yet. That
-would need an explicit per-machine/per-agent creation flow.
+### New remote directory picker
+
+Choose **Machines → javipi → +**, enter an existing remote path such as
+`/srv/workspaces/PoeTradePlus2`, then click **Create agent**. The older
+Machines overlay's **New agent** action uses the same picker.
+
+The default remains `/srv/workspaces/JaviPi`, but this is not mandatory.
+Quick choices include the default path, `/srv/workspaces`, root, and
+previously reported CWDs of terminals belonging to **that same machine**.
+This is **not a live remote filesystem browser**: a custom path can be typed
+even when not present in the list. Its existence is checked by the remote
+launch; if it does not exist, the launch should fail without a local
+fallback. The picker validates Linux absolute paths and rejects Windows
+paths, traversal, control characters and invalid machine names before
+creating the agent pane.
+
+Every created agent persists its own `AgentTarget::Remote { machine, cwd }`
+in the workspace; switching to another agent or restarting GPUI does not
+overwrite it. An already-running remote process is never migrated by the
+picker. No global `GENTLE_SHELL_HERDR_REMOTE_CWD` override is needed.
 
 ### Runtime-directory regressions
 
@@ -111,8 +132,13 @@ cargo run --locked -p gentle-shell-gpui
    the existing remote `javipi/tN` remains unchanged. Double-click an agent
    to rename it inline; verify Enter saves, Escape cancels, and a split-pane
    agent can still be renamed while its file pane has focus.
-3. Use + under **This computer** and under **javipi**; confirm independent
-   local/remote agents and no accidental fallback to Windows.
+3. Use + under **This computer** and under **javipi**. For JaviPi select
+   `/srv/workspaces/PoeTradePlus2`, confirm the agent's `pwd` and
+   the displayed path both match, and verify it does not inherit Windows CWD.
+   Open another JaviPi agent with the default `/srv/workspaces/JaviPi`.
+   Both agents should retain independent paths and sessions.
+   Confirm Cancel does not create a terminal, and invalid or relative Linux
+   paths are rejected without spawning an agent.
 4. Make JaviPi unreachable; the machine should appear disconnected at the
    next snapshot and the remote + should not initiate another agent.
 5. Close just one of two agents with ×; the other remains live.
