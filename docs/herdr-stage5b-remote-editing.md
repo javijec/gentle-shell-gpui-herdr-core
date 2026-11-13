@@ -65,7 +65,20 @@ It now supports a third private request:
 
 ### Interface
 
+The **same source editor** now powers both backends: `FileView` (Windows)
+and `RemoteFilesView` (JaviPi) construct `gpui_kit::EditorState` using
+`files::source_editor`. Both render `Editor` with syntax highlighting,
+line numbers, matching font/size, search, selection and undo/redo. The
+editing engine is independent of storage: `FileView` retains local
+filesystem saves and polling; remote Files continues to use revision-checked
+`herdr_fs_write`, never Windows paths. The remote editor currently stays
+in the right Files dock, **not** as a persistent central `FileView` pane.
+Markdown split-preview, local Git decorations, and remote file panes are
+separate future UI work.
+
 - Browse files as in 5A, select a text file, then click **Edit**.
+- `Ctrl+S` on Windows/Linux (`⌘S` on macOS) invokes the remote save.
+  The editor is locked during an in-flight save to avoid losing new keystrokes.
 - **Save** is enabled only when the editor differs from the preview.
 - **Cancel** abandons the in-view draft.
 - Navigation or closing the Files dock while editing is refused until
@@ -99,8 +112,11 @@ development environment before enabling this in production.
    A pre-5B bridge cannot be upgraded in place; do not kill old agents.
 2. Create a disposable UTF-8 file on JaviPi by your normal workflow.
    Open it in the remote Files dock. Check **Edit** is available.
-3. Edit and **Save**; read the file directly on JaviPi and verify its
-   content. No additional Herdr terminal should be created.
+3. Check line numbers and syntax highlighting on a disposable `prueba.rs`
+   or other source file with a recognized extension. Test editor search and
+   undo/redo. Edit and save using **Ctrl+S**, then again using **Save**;
+   read the file directly on JaviPi and verify its content. No additional
+   Herdr terminal should be created.
 4. Open it again, edit in GPUI, then change the underlying file on JaviPi
    via another process. Press Save; the result must be a conflict and
    the GPUI draft must remain visible.
