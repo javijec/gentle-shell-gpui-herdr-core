@@ -221,7 +221,7 @@ impl SessionView {
     /// Explicit tab close is different from app quit: stop exactly this
     /// agent, even if its restored tab was never activated this run.
     pub fn shutdown_for_tab_close(&self) {
-        if matches!(self.backend.status, BackendStatus::Ready(_)) {
+        if matches!(&self.backend.status, BackendStatus::Ready(_)) {
             self.shutdown_backend();
         } else if crate::features::terminal::herdr_enabled()
             && let Some(address) = self.restored_herdr.clone()
