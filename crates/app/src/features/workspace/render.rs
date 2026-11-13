@@ -380,7 +380,7 @@ impl Render for Workspace {
                                                 .ghost()
                                                 .xsmall()
                                                 .icon(Icon::new(if self.files_sidebar_open {
-                                                    IconName::Layers
+                                                    IconName::FolderOpen
                                                 } else {
                                                     IconName::Folder
                                                 }))
