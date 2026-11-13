@@ -394,6 +394,7 @@ impl SessionView {
                 .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
         };
 
+        let repository = self.git.repository.clone();
         let git: Option<AnyElement> = if remote {
             self.git.remote_branch.as_ref().map(|branch| {
                 h_flex()
@@ -411,6 +412,7 @@ impl SessionView {
         } else {
             self.git.snapshot.as_ref().map(|git| {
                 h_flex()
+                    .id("git-chip")
                     .flex_shrink_0()
                     .gap_1()
                     .text_size(px(12.))
@@ -425,6 +427,10 @@ impl SessionView {
                             .font_family(ui::MONO)
                             .text_color(ui::muted())
                             .child(format!("±{}", git.files.len())))
+                    })
+                    .when_some(repository, |this, path| {
+                        let line = format!("Repository: {path}");
+                        this.tooltip(move |window, cx| Tooltip::new(line.clone()).build(window, cx))
                     })
                     .into_any_element()
             })
