@@ -683,6 +683,7 @@ impl HerdrAgentProcess {
                             .and_then(Weak::upgrade)
                         {
                             let ready = ready.clone();
+                            let transport_up = transport_up.clone();
                             let allow_reconnect = allow_reconnect.clone();
                             let _ = std::thread::Builder::new()
                                 .name("herdr-rpc-retry".into())
@@ -690,6 +691,7 @@ impl HerdrAgentProcess {
                                     std::thread::sleep(Duration::from_secs(15));
                                     if allow_reconnect.load(Ordering::Acquire)
                                         && !ready.load(Ordering::Acquire)
+                                        && !transport_up.load(Ordering::Acquire)
                                     {
                                         session.reconnect();
                                     }
