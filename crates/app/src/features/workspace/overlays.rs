@@ -216,6 +216,14 @@ impl Workspace {
                     this.close_overlay(window, cx);
                     this.open_herdr_terminal(address, window, cx);
                 }
+                MachinesEvent::NewAgent(machine) => {
+                    let target = match machine {
+                        Some(name) => pi_rpc::AgentTarget::remote_for_machine(name.clone()),
+                        None => pi_rpc::AgentTarget::Local,
+                    };
+                    this.close_overlay(window, cx);
+                    this.open_agent_on_machine(target, window, cx);
+                }
             },
         );
         self.overlay = Some((Overlay::Machines(view), subscription));
