@@ -571,6 +571,18 @@ impl HerdrAgentProcess {
         self.write(&value)
     }
 
+    /// A tab can be explicitly closed before its saved agent was reattached.
+    /// Validate ownership in a worker before terminating that exact terminal.
+    pub fn terminate_saved(address: String) {
+        let _ = std::thread::Builder::new()
+            .name("herdr-agent-close-saved".into())
+            .spawn(move || {
+                if inspect_existing(&address).is_ok() {
+                    stop_owned_terminal(address);
+                }
+            });
+    }
+
     /// Stable address stored in the workspace for process-preserving restart.
     pub fn address(&self) -> Option<String> {
         self.address.lock().unwrap().clone()
