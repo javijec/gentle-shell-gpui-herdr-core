@@ -463,6 +463,7 @@ impl Render for Workspace {
                 Overlay::Providers(view) => view.clone().into_any_element(),
                 Overlay::Sessions(view) => view.clone().into_any_element(),
                 Overlay::Machines(view) => view.clone().into_any_element(),
+                Overlay::RemoteDirectory(view) => view.clone().into_any_element(),
                 Overlay::Palette(view) => view.clone().into_any_element(),
                 Overlay::Usage(view) => view.clone().into_any_element(),
                 Overlay::Memory(view) => view.clone().into_any_element(),
