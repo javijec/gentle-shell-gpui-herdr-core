@@ -62,12 +62,16 @@ impl SessionView {
     }
 
     pub(super) fn refresh_state(&mut self, cx: &mut Context<Self>) {
-        self.request(json!({"type": "get_state"}), cx, |this, result, _| {
+        let generation = self.recovery_generation;
+        self.request(json!({"type": "get_state"}), cx, move |this, result, _| {
             if let Some(state) = this.report(result) {
                 // The agent may have completed a turn while Herdr was
                 // offline. A lost agent_settled event must not leave the UI
-                // streaming forever. Do this only after live recovery.
-                if this.recovery_snapshot_pending && state["isStreaming"] == false {
+                // streaming forever. Ignore an old connection's reply.
+                if this.recovery_snapshot_pending
+                    && this.recovery_generation == generation
+                    && state["isStreaming"] == false
+                {
                     this.transcript.interrupt();
                     this.recovery_snapshot_pending = false;
                 }
