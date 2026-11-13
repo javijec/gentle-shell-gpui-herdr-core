@@ -469,7 +469,7 @@ impl Render for Workspace {
                                                 .border_b_1()
                                                 .border_color(ui::border())
                                                 .child(
-                                                    Icon::new(IconName::Monitor)
+                                                    Icon::new(IconName::Folder)
                                                         .xsmall()
                                                         .text_color(ui::muted()),
                                                 )
