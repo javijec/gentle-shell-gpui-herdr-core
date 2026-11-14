@@ -17,8 +17,8 @@ use serde_json::json;
 
 use crate::features::session::SessionView;
 use crate::features::git::{RefEntry, RefsSnapshot, WorkTree};
-use gentle_core::git::refs::{HeadInfo, RefKind, Stash, parse_refs};
-use super::refs::{RefsEvent, RefsView};
+use gentle_core::git::refs::{HeadInfo, RefKind, Stash, Submodule, parse_refs, parse_submodules};
+use super::refs::{RefsEvent, RefsView, RemoteWorktreeDisplay};
 use super::changes::{ChangesEvent, ChangesView};
 use super::backend::{
     GitFileAction, GitFileMutation, HerdrGitGuard, WorkspaceBackend,
@@ -64,10 +64,49 @@ struct RemoteGitSnapshot {
     tags: Vec<String>,
     stashes: Vec<RemoteGitStash>,
     ref_details: Vec<RefEntry>,
+    worktrees: Vec<RemoteWorktreeDisplay>,
+    submodules: Vec<Submodule>,
     files_truncated: bool,
     branches_truncated: bool,
     tags_truncated: bool,
     stashes_truncated: bool,
+}
+
+/// Parse Linux worktree inventory for display only. Never convert paths
+/// to Windows PathBuf, and never offer native filesystem actions for them.
+fn parse_remote_worktrees(
+    raw: &str, root: &str,
+) -> Result<Vec<RemoteWorktreeDisplay>, &'static str> {
+    let mut result = Vec::new();
+    for block in raw.split("\n\n").filter(|block| !block.trim().is_empty()) {
+        let (mut path, mut branch, mut head) = (None, None, None);
+        let (mut locked, mut prunable) = (false, false);
+        for line in block.lines() {
+            if let Some(value) = line.strip_prefix("worktree ") {
+                path = Some(value.to_owned());
+            } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
+                branch = Some(value.to_owned());
+            } else if let Some(value) = line.strip_prefix("HEAD ") {
+                head = Some(value.to_owned());
+            } else if line == "locked" || line.starts_with("locked ") {
+                locked = true;
+            } else if line == "prunable" || line.starts_with("prunable ") {
+                prunable = true;
+            }
+        }
+        let Some(path) = path else { continue; };
+        if !path.starts_with('/') || path.contains('\\')
+            || path.len() > 2048 || path.chars().any(char::is_control)
+        {
+            return Err("Invalid remote worktree path");
+        }
+        if path == root { continue; } // Native view also hides the main worktree.
+        result.push(RemoteWorktreeDisplay { path, branch, head, locked, prunable });
+        if result.len() > 120 {
+            return Err("Too many remote worktrees");
+        }
+    }
+    Ok(result)
 }
 
 /// The JSON shape is not trusted just because it came from an RPC bridge.
@@ -159,6 +198,28 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
         }
         _ => return Err("Invalid remote Git reference metadata"),
     };
+    let worktrees = match data.get("worktreeData") {
+        None => Vec::new(),
+        Some(serde_json::Value::String(raw)) if raw.len() <= 3_000_000 =>
+            parse_remote_worktrees(raw, &toplevel)?,
+        _ => return Err("Invalid remote worktree inventory"),
+    };
+    let submodules = match data.get("submoduleData") {
+        None => Vec::new(),
+        Some(serde_json::Value::String(raw)) if raw.len() <= 500_000 => {
+            let parsed = parse_submodules(raw);
+            if parsed.len() > 120 || parsed.iter().any(|item| {
+                item.path.is_empty() || item.path.len() > 2048
+                    || item.path.starts_with('/')
+                    || item.path.chars().any(char::is_control)
+                    || item.path.split('/').any(|part| part == "." || part == "..")
+            }) {
+                return Err("Invalid remote submodule inventory");
+            }
+            parsed
+        }
+        _ => return Err("Invalid remote submodule inventory"),
+    };
     let head_oid = match data.get("headOid") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(s)) if (s.len() == 40 || s.len() == 64)
@@ -179,7 +240,7 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
         && data["indexTruncated"].as_bool() != Some(true);
     Ok(RemoteGitSnapshot {
         toplevel, head_oid, current_branch, index_token, writes_enabled,
-        files, branches, tags, stashes, ref_details,
+        files, branches, tags, stashes, ref_details, worktrees, submodules,
         files_truncated: data["filesTruncated"].as_bool().unwrap_or(false),
         branches_truncated: data["branchesTruncated"].as_bool().unwrap_or(false),
         tags_truncated: data["tagsTruncated"].as_bool().unwrap_or(false),
@@ -244,6 +305,7 @@ fn shared_remote_refs(source: &RemoteGitSnapshot) -> RefsSnapshot {
     refs.stashes = source.stashes.iter().map(|stash| Stash {
         name: stash.name.clone(), branch: None, message: stash.message.clone(),
     }).collect();
+    refs.submodules = source.submodules.clone();
     refs
 }
 
@@ -251,6 +313,24 @@ fn shared_remote_refs(source: &RemoteGitSnapshot) -> RefsSnapshot {
 mod remote_git_snapshot_tests {
     use super::{parse_git_snapshot, shared_remote_refs, shared_remote_worktree};
     use serde_json::json;
+
+    #[test]
+    fn remote_worktrees_are_display_only_posix_paths() {
+        let raw = concat!(
+            "worktree /srv/workspaces/JaviPi\nHEAD abc123\nbranch refs/heads/main\n\n",
+            "worktree /srv/workspaces/JaviPi.worktrees/test\nHEAD def456\n",
+            "branch refs/heads/test\nlocked\n\n",
+        );
+        let trees = super::parse_remote_worktrees(raw, "/srv/workspaces/JaviPi")
+            .expect("valid worktrees");
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].branch.as_deref(), Some("test"));
+        assert!(trees[0].locked);
+        assert_eq!(trees[0].path, "/srv/workspaces/JaviPi.worktrees/test");
+        assert!(super::parse_remote_worktrees(
+            "worktree C:\\\\temp\\file\n", "/srv/workspaces/JaviPi",
+        ).is_err());
+    }
 
     #[test]
     fn enriches_remote_refs_from_bounded_native_format() {
@@ -1347,8 +1427,9 @@ impl RemoteFilesView {
                         Ok(snapshot) => {
                             let refs = shared_remote_refs(&snapshot);
                             let tree = shared_remote_worktree(&snapshot);
+                            let worktrees = snapshot.worktrees.clone();
                             this.refs.update(cx, |view, cx| {
-                                view.set_remote_refs(Some(refs), cx);
+                                view.set_remote_refs(Some(refs), worktrees, cx);
                             });
                             let writable = snapshot.writes_enabled
                                 && !snapshot.files_truncated && this.root != "/";
@@ -1370,7 +1451,7 @@ impl RemoteFilesView {
                 }
                 if this.git.is_none() {
                     this.refs.update(cx, |view, cx| {
-                        view.set_remote_refs(None, cx);
+                        view.set_remote_refs(None, Vec::new(), cx);
                     });
                     this.changes.update(cx, |view, cx| {
                         view.set_remote_tree(None, false, cx);
