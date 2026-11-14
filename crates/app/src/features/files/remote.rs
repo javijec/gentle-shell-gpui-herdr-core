@@ -12,6 +12,8 @@ use gpui_kit::*;
 use serde_json::json;
 
 use crate::features::session::SessionView;
+use gentle_core::git::status::StatusEntry as RemoteGitFile;
+use super::tabs::FilePanelTab as RemoteTab;
 use super::viewer::MdMode;
 use crate::shared::ui;
 
@@ -36,19 +38,6 @@ struct RemotePreview {
     /// Missing on old bridges: keep browsing read-only instead of inventing
     /// a revision that could overwrite a changed remote file.
     revision: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RemoteTab {
-    Files,
-    Changes,
-    Branches,
-}
-
-struct RemoteGitFile {
-    path: String,
-    index: char,
-    worktree: char,
 }
 
 struct RemoteGitBranch {
@@ -98,7 +87,7 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
                 .filter(|s| s.len() == 1)
                 .ok_or("Invalid Git worktree state")?
                 .chars().next().ok_or("Invalid Git worktree state")?;
-            Ok(RemoteGitFile { path: path.to_owned(), index, worktree })
+            Ok(RemoteGitFile::from_porcelain_v1(path.to_owned(), index, worktree))
         }).collect::<Result<Vec<_>, &'static str>>()?;
     let branches = data["branches"].as_array()
         .ok_or("Missing remote branches")?
@@ -799,7 +788,7 @@ impl RemoteFilesView {
     fn git_commit(&mut self, cx: &mut Context<Self>) {
         let Some(snapshot) = self.git.as_ref().filter(|s| s.writes_enabled
             && !s.files_truncated && s.files.iter()
-                .any(|entry| entry.index != ' ' && entry.index != '?'))
+                .any(|entry| entry.staged().is_some()))
         else { return; };
         let summary = self.git_summary.read(cx).value().trim().to_owned();
         if summary.is_empty() { return; }
@@ -864,47 +853,24 @@ impl RemoteFilesView {
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> Div {
-        let files = self.tab == RemoteTab::Files;
-        let changes = self.tab == RemoteTab::Changes;
-        let branches = self.tab == RemoteTab::Branches;
         let count = self.git.as_ref().map_or(0, |snapshot| snapshot.files.len());
         h_flex()
             .flex_none()
             .px_2()
             .pb_1p5()
             .gap_1()
-            .child(
-                (if files {
-                    Button::new("remote-tab-files").primary().small().label("Files")
-                } else {
-                    Button::new("remote-tab-files").ghost().small().label("Files")
-                })
+            .child(super::tabs::tab_button(RemoteTab::Files, self.tab, 0)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.set_tab(RemoteTab::Files, cx)
-                })),
-            )
-            .child(
-                (if changes {
-                    Button::new("remote-tab-changes").primary().small()
-                        .label(format!("Changes ({count})"))
-                } else {
-                    Button::new("remote-tab-changes").ghost().small()
-                        .label(format!("Changes ({count})"))
-                })
+                })))
+            .child(super::tabs::tab_button(RemoteTab::Changes, self.tab, count)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.set_tab(RemoteTab::Changes, cx)
-                })),
-            )
-            .child(
-                (if branches {
-                    Button::new("remote-tab-branches").primary().small().label("Branches")
-                } else {
-                    Button::new("remote-tab-branches").ghost().small().label("Branches")
-                })
+                })))
+            .child(super::tabs::tab_button(RemoteTab::Branches, self.tab, 0)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.set_tab(RemoteTab::Branches, cx)
-                })),
-            )
+                })))
     }
 
     /// Build each row in its own stack frame and erase the resulting
@@ -922,8 +888,8 @@ impl RemoteFilesView {
         let badge = format!("{}{}", entry.index, entry.worktree);
         let index_state = entry.index;
         let worktree_state = entry.worktree;
-        let can_stage = writable && (entry.worktree != ' ' || entry.index == '?');
-        let can_unstage = writable && entry.index != ' ' && entry.index != '?';
+        let can_stage = writable && entry.unstaged().is_some();
+        let can_unstage = writable && entry.staged().is_some();
         rows.push(
             h_flex()
                 .id(("remote-git-change", index))
@@ -967,7 +933,7 @@ impl RemoteFilesView {
         cx: &mut Context<Self>,
     ) {
         let staged_count = snapshot.files.iter()
-            .filter(|entry| entry.index != ' ' && entry.index != '?').count();
+            .filter(|entry| entry.staged().is_some()).count();
         let summary = self.git_summary.read(cx).value().trim().to_owned();
         let confirmed = self.git_confirm_commit.as_deref() == Some(summary.as_str());
         rows.push(
