@@ -606,34 +606,27 @@ impl RemoteFilesView {
         let generation = self.generation;
         self.saving = true;
         self.error = None;
-        let command = json!({
-            "type": "herdr_fs_write", "root": self.root,
-            "path": path, "content": text, "expectedRevision": revision,
-        });
-        // A 128 KiB file takes many 96-byte PTY frames. The bridge request
-        // writes synchronously, so start it off the GPUI foreground thread.
-        let response = cx.background_executor().spawn(async move {
-            process.request(command).await
-        });
+        // The backend enforces the same revision contract as local files;
+        // the Herdr bridge rechecks it before its atomic remote rename.
+        let operation = WorkspaceBackend::herdr(self.root.clone(), process)
+            .write(WorkspacePath::Herdr(path.clone()), text.clone(), revision);
+        // A 128 KiB file takes many 96-byte PTY frames. Run off the GPUI thread.
+        let response = cx.background_executor().spawn(operation);
         cx.spawn(async move |this, cx| {
             let result = response.await;
             let _ = this.update(cx, |this, cx| {
                 if this.generation != generation { return; }
                 this.saving = false;
                 match result {
-                    Ok(reply) => {
-                        if let Some(new_revision) = reply.data["revision"].as_str() {
-                            this.preview = Some(RemotePreview {
-                                path, content: text, revision: Some(new_revision.into()),
-                            });
-                            if this.pane_path.is_none() {
-                                this.editor = None;
-                                this._editor_events = None;
-                            }
-                            this.error = None;
-                        } else {
-                            this.error = Some("Save response had no revision; reload before editing again.".into());
+                    Ok(new_revision) => {
+                        this.preview = Some(RemotePreview {
+                            path, content: text, revision: Some(new_revision),
+                        });
+                        if this.pane_path.is_none() {
+                            this.editor = None;
+                            this._editor_events = None;
                         }
+                        this.error = None;
                     }
                     Err(error) => this.error = Some(friendly_error(&error.to_string())),
                 }

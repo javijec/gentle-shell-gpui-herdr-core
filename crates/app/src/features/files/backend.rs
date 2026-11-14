@@ -171,6 +171,58 @@ impl WorkspaceBackend {
         })
     }
 
+    /// Existing-file UTF-8 save, fenced by a SHA-256 read revision.
+    /// Herdr enforces the guard again server-side, including symlink checks.
+    pub fn write(
+        self, path: WorkspacePath, content: String, expected_revision: String,
+    ) -> BackendFuture<String> {
+        Box::pin(async move {
+            if expected_revision.len() != 64
+                || !expected_revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err("Missing or invalid file revision".into());
+            }
+            if content.len() > 128 * 1024 || content.contains('\0') {
+                return Err("Only UTF-8 text under 128 KiB can be saved".into());
+            }
+            match (self, path) {
+                (Self::Local { root }, WorkspacePath::Local(path)) => {
+                    ensure_local_path(&root, &path)?;
+                    let metadata = std::fs::symlink_metadata(&path)
+                        .map_err(|error| error.to_string())?;
+                    if !metadata.is_file() || metadata.len() > 128 * 1024 {
+                        return Err("Only an existing regular text file may be saved".into());
+                    }
+                    let original = std::fs::read(&path)
+                        .map_err(|error| error.to_string())?;
+                    if original.contains(&0) || String::from_utf8(original.clone()).is_err() {
+                        return Err("The original file is not UTF-8 text".into());
+                    }
+                    if format!("{:x}", Sha256::digest(&original)) != expected_revision {
+                        return Err("Conflict: file changed since it was read".into());
+                    }
+                    std::fs::write(&path, &content)
+                        .map_err(|error| error.to_string())?;
+                    Ok(format!("{:x}", Sha256::digest(content.as_bytes())))
+                }
+                (Self::Herdr { root, process }, WorkspacePath::Herdr(path)) => {
+                    ensure_herdr_path(&root, &path)?;
+                    let reply = process.request(json!({
+                        "type": "herdr_fs_write", "root": root,
+                        "path": path, "content": content,
+                        "expectedRevision": expected_revision,
+                    })).await.map_err(|error| error.to_string())?;
+                    let revision = reply.data["revision"].as_str()
+                        .filter(|value| value.len() == 64
+                            && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                        .ok_or("Write response had no valid revision")?;
+                    Ok(revision.to_owned())
+                }
+                _ => Err("Workspace path does not belong to the selected backend".into()),
+            }
+        })
+    }
+
     pub fn git_file(
         self, action: GitFileAction, request: GitFileMutation,
     ) -> BackendFuture<()> {
@@ -243,7 +295,7 @@ fn ensure_herdr_path(root: &str, selected: &str) -> Result<(), String> {
         || !selected.starts_with('/') || selected.contains('\\')
         || selected.chars().any(char::is_control)
         || selected.split('/').any(|s| s == ".." || s == ".")
-        || !(root == "/" || selected == root || selected.starts_with(&format!("{root}/")))
+        || !(root == "/" || selected == root.trim_end_matches('/') || selected.starts_with(&format!("{}/", root.trim_end_matches('/'))))
     {
         return Err("Path is outside the selected remote workspace".into());
     }
@@ -277,14 +329,12 @@ mod tests {
     }
 
     #[test]
-    fn local_backend_rejects_remote_scope() {
-        let backend = WorkspaceBackend::local(std::env::temp_dir());
-        let result = futures_test_placeholder(&backend);
-        assert!(result);
-    }
-
-    // No runtime needed: tests verify the declared backend variant.
-    fn futures_test_placeholder(backend: &WorkspaceBackend) -> bool {
-        matches!(backend, WorkspaceBackend::Local { .. })
+    fn revision_guards_are_stable_for_utf8_bytes() {
+        assert_eq!(
+            format!("{:x}", Sha256::digest("hello".as_bytes())),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        );
+        assert!(ensure_herdr_path("/", "/tmp/agent/file.txt").is_ok());
+        assert!(ensure_herdr_path("/srv/project/", "/srv/project/file").is_ok());
     }
 }
