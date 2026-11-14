@@ -722,12 +722,14 @@ async function remoteGit(req) {
 
 
 // Only explicit mutations below may change a repo. Each request names the
-// exact repo and the HEAD/branch displayed by the UI. No stage-all or
-// unstage-all, no discard, reset, push, pull, fetch or forced checkout.
+// exact repo and HEAD/branch/index displayed by the UI. Bulk stage and
+// unstage require exact full status equality and only regular files; no
+// discard, reset, push, pull, fetch or forced checkout.
 const gitWriteInFlight = new Set();
 const GIT_MUTATIONS = [
   "herdr_git_stage", "herdr_git_unstage", "herdr_git_commit",
   "herdr_git_create_branch", "herdr_git_switch_branch",
+  "herdr_git_stage_all", "herdr_git_unstage_all",
 ];
 
 async function checkGitIndexRequest(req, toplevel) {
@@ -822,6 +824,67 @@ function validatedBranchName(name) {
   return name;
 }
 
+// A bulk change is allowed only when the complete current status is
+// byte-for-byte equivalent to the small snapshot the user reviewed.
+// Pathspecs are literal; no symlinks or submodules, and no `git add -A .`.
+async function checkedBulkPaths(req, toplevel, stage) {
+  if (!Array.isArray(req.expectedFiles) || req.expectedFiles.length === 0 ||
+      req.expectedFiles.length > 80) {
+    throw new Error("Bulk Git action requires 1-80 reviewed paths");
+  }
+  const listing = await runGitListing(toplevel, [
+    "status", "--porcelain=v1", "-z", "--no-renames",
+    "--untracked-files=all", "--ignore-submodules=all",
+  ], 0, MAX_GIT_LIST);
+  if (listing.truncated) {
+    throw new Error("Refusing bulk Git action with a truncated status");
+  }
+  const current = parseGitEntries(listing.output);
+  if (current.truncated || current.entries.length !== req.expectedFiles.length) {
+    throw new Error("Conflict: Git file list changed. Refresh before bulk action");
+  }
+  for (let i = 0; i < current.entries.length; i++) {
+    const actual = current.entries[i];
+    const expected = req.expectedFiles[i];
+    if (!expected || expected.path !== actual.path ||
+        expected.index !== actual.index ||
+        expected.worktree !== actual.worktree) {
+      throw new Error("Conflict: Git file status changed. Refresh before bulk action");
+    }
+  }
+  const entries = current.entries.filter((entry) => stage ?
+    (entry.worktree !== " " || entry.index === "?") :
+    (entry.index !== " " && entry.index !== "?"));
+  if (entries.length === 0) {
+    throw new Error(stage ? "Nothing to stage" : "Nothing to unstage");
+  }
+  let totalPathBytes = 0;
+  for (const entry of entries) {
+    if (!safeGitRelative(entry.path) || entry.path.split("/").includes(".git")) {
+      throw new Error("Unsafe Git path for bulk operation");
+    }
+    totalPathBytes += Buffer.byteLength(entry.path, "utf8");
+    if (totalPathBytes > 16000) {
+      throw new Error("Bulk Git paths exceed the safe argument limit");
+    }
+    const target = path.posix.join(toplevel, entry.path);
+    const parent = await fs.realpath(path.posix.dirname(target));
+    if (!within(toplevel, parent)) {
+      throw new Error("Git path parent resolves outside repository");
+    }
+    let stat = null;
+    try { stat = await fs.lstat(target); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    if (stat && (!stat.isFile() || stat.isSymbolicLink())) {
+      throw new Error("Only regular files and tracked deletions can be changed");
+    }
+    if (stat && !within(toplevel, await fs.realpath(target))) {
+      throw new Error("Git file resolves outside repository");
+    }
+  }
+  return entries.map((entry) => ":(literal)" + entry.path);
+}
+
 async function remoteGitWrite(req) {
   const { toplevel } = await gitRepository(req.root);
   validateGitRefRequest(req, toplevel);
@@ -849,6 +912,17 @@ async function remoteGitWrite(req) {
         } else {
           await runGitMutation(toplevel, ["restore", "--staged", "--", literal]);
         }
+      }
+    } else if (req.type === "herdr_git_stage_all" ||
+               req.type === "herdr_git_unstage_all") {
+      const stage = req.type === "herdr_git_stage_all";
+      const paths = await checkedBulkPaths(req, toplevel, stage);
+      if (stage) {
+        await runGitMutation(toplevel, ["add", "-A", "--", ...paths]);
+      } else if (req.expectedHead === null) {
+        await runGitMutation(toplevel, ["rm", "--cached", "-q", "--", ...paths]);
+      } else {
+        await runGitMutation(toplevel, ["restore", "--staged", "--", ...paths]);
       }
     } else if (req.type === "herdr_git_commit") {
       if (!req.expectedBranch) {
