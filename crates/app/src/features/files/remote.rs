@@ -1444,6 +1444,16 @@ unstaged files stay untouched."))
         v_flex().children(rows).into_any_element()
     }
 
+    fn render_branch_create(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        if let Some(snapshot) = self.git.as_ref().filter(|snapshot| {
+            snapshot.writes_enabled && self.root != "/"
+        }) {
+            self.push_git_create_branch_form(&mut rows, snapshot, cx);
+        }
+        v_flex().children(rows).into_any_element()
+    }
+
     /// Keep the root GPUI render shallow on Windows debug builds.
     /// 5D previously built every interactive row and both editors inside
     /// this one render frame, overflowing the Windows UI thread stack.
@@ -1472,9 +1482,6 @@ unstaged files stay untouched."))
                     ),
             )
             .child(self.render_tabs(cx))
-            .when(self.tab == RemoteTab::Branches, |panel| {
-                panel.child(filter_field(&self.git_filter, self.git_loading || self.git_busy))
-            })
             .when(self.git_loading, |panel| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child("Reading status from remote Git…"),
@@ -1491,11 +1498,18 @@ unstaged files stay untouched."))
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child(feedback),
             ))
-            .child(
-                div().id("remote-git-scroll").flex_1().min_h_0()
-                    .overflow_y_scroll()
-                    .child(self.render_git_list(cx)),
-            )
+            .when(self.tab == RemoteTab::Changes, |panel| {
+                panel.child(
+                    div().id("remote-git-scroll").flex_1().min_h_0()
+                        .overflow_y_scroll()
+                        .child(self.render_git_list(cx)),
+                )
+            })
+            .when(self.tab == RemoteTab::Branches, |panel| {
+                panel
+                    .child(div().flex_1().min_h_0().child(self.refs.clone()))
+                    .child(self.render_branch_create(cx))
+            })
             .child(
                 div().h(px(26.)).flex_none().border_t_1()
                     .border_color(ui::border()).px_3().text_size(px(10.))
