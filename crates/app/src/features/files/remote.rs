@@ -579,7 +579,8 @@ impl RemoteFilesView {
             self.tree_rows.iter().position(|node| &node.path == path)
         });
         let index = match (current, next) {
-            (None, _) => 0,
+            (None, true) => 0,
+            (None, false) => self.tree_rows.len() - 1,
             (Some(i), true) => (i + 1).min(self.tree_rows.len() - 1),
             (Some(i), false) => i.saturating_sub(1),
         };
@@ -596,6 +597,7 @@ impl RemoteFilesView {
         self.entry_name.update(cx, |field, cx| {
             field.set_value(name, window, cx);
         });
+        self.tree_scroll.scroll_to_item(index, ScrollStrategy::Nearest);
         cx.notify();
     }
 
@@ -625,6 +627,7 @@ impl RemoteFilesView {
             let name = node.entry.name.clone();
             self.tree_selected_entry = Some((parent.clone(), true));
             self.tree_selected_directory = Some(parent);
+            self.tree_scroll.scroll_to_item(i, ScrollStrategy::Nearest);
             self.entry_name.update(cx, |field, cx| {
                 field.set_value(name, window, cx);
             });
