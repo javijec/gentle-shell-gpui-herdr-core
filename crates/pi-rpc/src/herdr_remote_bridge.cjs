@@ -532,11 +532,12 @@ function parseGitBranches(output) {
   const rows = strictUtf8(output).split("\n").filter(Boolean);
   const branches = [];
   for (const row of rows.slice(0, MAX_GIT_BRANCHES)) {
-    const [name, mark] = row.split("\0");
+    const [name, mark, fullRef] = row.split("\0");
     if (!name || name.length > 512 || /[\x00-\x1f\x7f]/.test(name)) {
       throw new Error("Invalid Git branch");
     }
-    branches.push({ name, current: mark === "*" });
+    branches.push({ name, current: mark === "*",
+      local: typeof fullRef === "string" && fullRef.startsWith("refs/heads/") });
   }
   return { branches, truncated: rows.length > branches.length };
 }
@@ -558,7 +559,7 @@ async function remoteGit(req) {
         "--no-renames", "--untracked-files=all", "--ignore-submodules=all"],
         0, MAX_GIT_LIST),
       runGitListing(toplevel, ["branch", "--all", "--list",
-        "--format=%(refname:short)%00%(HEAD)"],
+        "--format=%(refname:short)%00%(HEAD)%00%(refname)"],
         10, MAX_GIT_BRANCHES),
     ]);
     const files = parseGitEntries(status.output);
@@ -569,7 +570,7 @@ async function remoteGit(req) {
       filesTruncated: files.truncated || status.truncated,
       branches: refs.branches,
       branchesTruncated: refs.truncated || branches.truncated,
-      readOnly: true,
+      readOnly: true, writesEnabled: true,
     };
   }
   if (req.type !== "herdr_git_diff" || !validLinuxPath(req.path)) {
