@@ -14,7 +14,6 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -23,6 +22,7 @@ use super::changes::{ChangesEvent, ChangesView};
 use super::listing::{Entry, list_dir};
 use super::ops::{self, ClipMode};
 use super::refs::{RefsEvent, RefsView};
+use super::tabs::FilePanelTab as Tab;
 use super::{file_icon, status_color};
 use crate::features::git::GitSnapshot;
 use crate::shared::ui;
@@ -121,13 +121,6 @@ pub enum FileTreeEvent {
     OpenAgent(PathBuf),
     /// The header's collapse button: the owner should hide the sidebar.
     Collapse,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab {
-    Files,
-    Changes,
-    Branches,
 }
 
 #[derive(Clone)]
@@ -1337,45 +1330,12 @@ impl FileTreeView {
             .tooltip(tooltip)
     }
 
-    /// One of the Files / Changes / Branches icon tabs.
-    fn tab_button(
-        &self,
-        tab: Tab,
-        icon: IconName,
-        label: &'static str,
-        count: usize,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let active = self.tab == tab;
-        h_flex()
-            .id(label)
-            .h(px(26.))
-            .min_w(px(32.))
-            .px_2()
-            .gap_1()
-            .justify_center()
-            .rounded_md()
-            .cursor_pointer()
-            .when(active, |d| d.bg(ui::surface_hover()))
-            .when(!active, |d| {
-                d.hover(|s| s.bg(ui::surface_hover().opacity(0.6)))
-            })
-            .child(
-                Icon::new(icon)
-                    .small()
-                    .text_color(if active { ui::fg() } else { ui::faint() }),
-            )
-            .when(count > 0, |d| {
-                d.child(
-                    div()
-                        .font_family(ui::MONO)
-                        .text_size(px(10.5))
-                        .text_color(ui::warning())
-                        .child(count.to_string()),
-                )
-            })
-            .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
-            .on_click(cx.listener(move |this, _, window, cx| this.set_tab(tab, window, cx)))
+    /// Shared navigation chrome for local and Herdr backends.
+    fn tab_button(&self, tab: Tab, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        super::tabs::tab_button(tab, self.tab, count)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.set_tab(tab, window, cx)
+            }))
     }
 }
 
@@ -1441,9 +1401,9 @@ impl Render for FileTreeView {
             .px_2()
             .pb_1p5()
             .gap_1()
-            .child(self.tab_button(Tab::Files, IconName::Files, "Files", 0, cx))
-            .child(self.tab_button(Tab::Changes, IconName::Diff, "Changes", change_count, cx))
-            .child(self.tab_button(Tab::Branches, IconName::GitBranch, "Branches", 0, cx));
+            .child(self.tab_button(Tab::Files, 0, cx))
+            .child(self.tab_button(Tab::Changes, change_count, cx))
+            .child(self.tab_button(Tab::Branches, 0, cx));
         // The workspace's sidebar slot paints the rounded glass; a fill here
         // would show square corners past it (GPUI clips to rectangles).
         v_flex()
