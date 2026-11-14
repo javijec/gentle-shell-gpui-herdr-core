@@ -35,6 +35,7 @@ pub(super) enum WorkspaceBackend {
 pub(super) struct WorkspaceDirEntry {
     pub name: String,
     pub kind: String,
+    pub ignored: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -84,16 +85,17 @@ impl WorkspaceBackend {
         Self::Herdr { root, process }
     }
 
-    pub fn list(self, directory: WorkspacePath) -> BackendFuture<WorkspaceListing> {
+    pub fn list(self, directory: WorkspacePath, show_ignored: bool) -> BackendFuture<WorkspaceListing> {
         Box::pin(async move {
             match (self, directory) {
                 (Self::Local { root }, WorkspacePath::Local(directory)) => {
                     ensure_local_path(&root, &directory)?;
-                    let entries = listing::list_dir(&directory, false)
+                    let entries = listing::list_dir(&directory, show_ignored)
                         .into_iter()
                         .map(|entry| WorkspaceDirEntry {
                             name: entry.name,
                             kind: if entry.is_dir { "directory" } else { "file" }.into(),
+                            ignored: entry.ignored,
                         })
                         .collect();
                     Ok(WorkspaceListing { entries, truncated: false })
@@ -118,7 +120,7 @@ impl WorkspaceBackend {
                                     "directory" | "file" | "symlink" | "other"))
                                 .ok_or("Invalid remote directory entry kind")?;
                             Ok(WorkspaceDirEntry {
-                                name: name.to_owned(), kind: kind.to_owned(),
+                                name: name.to_owned(), kind: kind.to_owned(), ignored: false,
                             })
                         })
                         .collect::<Result<Vec<_>, &'static str>>()
@@ -241,7 +243,7 @@ fn ensure_herdr_path(root: &str, selected: &str) -> Result<(), String> {
         || !selected.starts_with('/') || selected.contains('\\')
         || selected.chars().any(char::is_control)
         || selected.split('/').any(|s| s == ".." || s == ".")
-        || !(selected == root || selected.starts_with(&format!("{root}/")))
+        || !(root == "/" || selected == root || selected.starts_with(&format!("{root}/")))
     {
         return Err("Path is outside the selected remote workspace".into());
     }
