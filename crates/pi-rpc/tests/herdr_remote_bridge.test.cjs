@@ -550,6 +550,10 @@ test("5C reports remote Git changes and branches without sending Pi commands", {
     assert.equal(typeof result.data.refDetails, "string");
     assert.ok(result.data.refDetails.includes("refs/heads/feature/test"));
     assert.equal(result.data.refDetailsTruncated, false);
+    assert.equal(typeof result.data.worktreeData, "string");
+    assert.ok(result.data.worktreeData.includes("worktree " + root));
+    assert.equal(result.data.worktreesTruncated, false);
+    assert.equal(typeof result.data.submoduleData, "string");
     assert.equal(h.childWrites.length, before);
     assert.equal(h.calls.length, 1, "no additional agents or terminals");
   } finally {
