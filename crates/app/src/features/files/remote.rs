@@ -1566,6 +1566,13 @@ impl Render for RemoteFilesView {
             .when(!central, |panel| panel.child(self.render_tabs(cx)))
             .when(!central, |panel| panel.child(
                 h_flex().px_2().pb_1().gap_1()
+                    .child(Button::new("remote-tree-select-root")
+                        .ghost().xsmall().label("Root")
+                        .tooltip("Create items in the workspace root")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.tree_selected_directory = None;
+                            cx.notify();
+                        })))
                     .child(div().flex_1().min_w_0()
                         .child(Input::new(&self.create_name).small()))
                     .child(Button::new("remote-create-file")
