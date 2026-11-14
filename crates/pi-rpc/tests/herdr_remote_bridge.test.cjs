@@ -547,6 +547,9 @@ test("5C reports remote Git changes and branches without sending Pi commands", {
       x.index === "?" && x.worktree === "?"));
     assert.ok(result.data.branches.some(x => x.name === "feature/test"));
     assert.ok(result.data.branches.some(x => x.current));
+    assert.equal(typeof result.data.refDetails, "string");
+    assert.ok(result.data.refDetails.includes("refs/heads/feature/test"));
+    assert.equal(result.data.refDetailsTruncated, false);
     assert.equal(h.childWrites.length, before);
     assert.equal(h.calls.length, 1, "no additional agents or terminals");
   } finally {
