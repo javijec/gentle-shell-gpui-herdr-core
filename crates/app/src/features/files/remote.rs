@@ -920,6 +920,7 @@ impl RemoteFilesView {
                             this.tree_selected_directory = Some(path.clone());
                             this.toggle_remote_directory(path.clone(), cx);
                         } else if regular {
+                            this.tree_selected_directory = remote_parent(&this.root, &path);
                             cx.emit(RemoteFilesEvent::OpenFile(path.clone()));
                         }
                         cx.notify();
@@ -1728,6 +1729,7 @@ impl Render for RemoteFilesView {
                         .tooltip("Create items in the workspace root")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.tree_selected_directory = None;
+                            this.tree_selected_entry = None;
                             cx.notify();
                         })))
                     .child(div().flex_1().min_w_0()
@@ -1750,9 +1752,68 @@ impl Render for RemoteFilesView {
                         }))),
             ))
             .when(!central, |panel| panel.child(
-                div().px_3().pb_2().text_xs().text_color(ui::muted())
-                    .child(self.tree_selected_directory.as_ref()
-                        .unwrap_or(&self.current).clone()),
+                v_flex().px_2().pb_1().gap_1()
+                    .child(
+                        h_flex().gap_1()
+                            .child(div().flex_1().min_w_0()
+                                .child(Input::new(&self.entry_name).small()))
+                            .child(Button::new("remote-entry-rename")
+                                .ghost().xsmall()
+                                .icon(Icon::new(IconName::Pencil))
+                                .tooltip("Rename selected remote file or directory")
+                                .disabled(self.entry_busy
+                                    || self.tree_selected_entry.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.rename_remote_entry(cx);
+                                })))
+                            .child(Button::new("remote-entry-duplicate")
+                                .ghost().xsmall()
+                                .icon(Icon::new(IconName::CopyPlus))
+                                .tooltip("Duplicate selected remote file (up to 16 MiB)")
+                                .disabled(self.entry_busy
+                                    || !self.tree_selected_entry.as_ref()
+                                        .is_some_and(|(_, directory)| !directory))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.run_remote_entry(
+                                        WorkspaceEntryAction::Duplicate, cx,
+                                    );
+                                }))),
+                    )
+                    .child(
+                        h_flex().gap_1()
+                            .child(Button::new("remote-entry-cut")
+                                .ghost().xsmall()
+                                .icon(Icon::new(IconName::Scissors))
+                                .tooltip("Cut selected remote file or directory")
+                                .disabled(self.entry_busy
+                                    || self.tree_selected_entry.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.clipboard_remote_entry(true, cx)
+                                })))
+                            .child(Button::new("remote-entry-copy")
+                                .ghost().xsmall()
+                                .icon(Icon::new(IconName::Copy))
+                                .tooltip("Copy selected remote file")
+                                .disabled(self.entry_busy
+                                    || !self.tree_selected_entry.as_ref()
+                                        .is_some_and(|(_, directory)| !directory))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.clipboard_remote_entry(false, cx)
+                                })))
+                            .child(Button::new("remote-entry-paste")
+                                .ghost().xsmall()
+                                .icon(Icon::new(IconName::ClipboardPaste))
+                                .tooltip("Paste into selected folder, or workspace root")
+                                .disabled(self.entry_busy || self.file_clipboard.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.paste_remote_entry(cx)
+                                })))
+                            .child(div().flex_1())
+                            .child(div().min_w_0().truncate().text_xs()
+                                .text_color(ui::muted())
+                                .child(self.tree_selected_directory.as_ref()
+                                    .unwrap_or(&self.root).clone())),
+                    ),
             ))
             .when(self.loading, |panel| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
