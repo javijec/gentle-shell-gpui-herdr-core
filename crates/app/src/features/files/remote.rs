@@ -907,20 +907,13 @@ impl RemoteFilesView {
             )
     }
 
-    fn render_git_panel(&self, cx: &mut Context<Self>) -> Div {
-        let mut rows: Vec<AnyElement> = Vec::new();
-        if let Some(snapshot) = &self.git {
-            let writable = snapshot.writes_enabled && self.root != "/";
-            rows.push(
-                div().px_3().py_2().text_xs().text_color(ui::muted())
-                    .child(snapshot.toplevel.clone()).into_any_element(),
-            );
-            if self.tab == RemoteTab::Changes {
-                if snapshot.files.is_empty() {
-                    rows.push(div().px_3().py_3().text_sm().text_color(ui::muted())
-                        .child("Working tree clean").into_any_element());
-                }
-                for (index, entry) in snapshot.files.iter().enumerate() {
+    /// Build each row in its own stack frame and erase the resulting
+    /// GPUI element type before returning to the list builder.
+    fn push_git_file_row(
+        &self, rows: &mut Vec<AnyElement>, snapshot: &RemoteGitSnapshot,
+        index: usize, entry: &RemoteGitFile, writable: bool,
+        cx: &mut Context<Self>,
+    ) {
                     let target = format!("{}/{}",
                         snapshot.toplevel.trim_end_matches('/'), entry.path);
                     let diff_target = target.clone();
@@ -967,14 +960,13 @@ impl RemoteFilesView {
                             ))
                             .into_any_element(),
                     );
-                }
-                if snapshot.files_truncated {
-                    rows.push(div().px_3().py_2().text_xs()
-                        .text_color(ui::warning())
-                        .child("Showing first 200 changed files").into_any_element());
-                }
-                if writable {
-                    let staged_count = snapshot.files.iter()
+    }
+
+    fn push_git_commit_form(
+        &self, rows: &mut Vec<AnyElement>, snapshot: &RemoteGitSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let staged_count = snapshot.files.iter()
                         .filter(|entry| entry.index != ' ' && entry.index != '?').count();
                     let summary = self.git_summary.read(cx).value().trim().to_owned();
                     let confirmed = self.git_confirm_commit.as_deref() == Some(summary.as_str());
@@ -1002,13 +994,12 @@ unstaged files stay untouched."))
                             ))
                             .into_any_element(),
                     );
-                }
-            } else {
-                if snapshot.branches.is_empty() {
-                    rows.push(div().px_3().py_3().text_sm().text_color(ui::muted())
-                        .child("No Git branches").into_any_element());
-                }
-                for (index, branch) in snapshot.branches.iter().enumerate() {
+    }
+
+    fn push_git_branch_row(
+        &self, rows: &mut Vec<AnyElement>, branch: &RemoteGitBranch,
+        index: usize, writable: bool, cx: &mut Context<Self>,
+    ) {
                     let name = branch.name.clone();
                     let confirmed = self.git_confirm_switch.as_deref() == Some(name.as_str());
                     rows.push(
@@ -1039,14 +1030,13 @@ unstaged files stay untouched."))
                             ))
                             .into_any_element(),
                     );
-                }
-                if snapshot.branches_truncated {
-                    rows.push(div().px_3().py_2().text_xs()
-                        .text_color(ui::warning())
-                        .child("Showing first 120 branches").into_any_element());
-                }
-                if writable {
-                    let name = self.git_branch_name.read(cx).value().trim().to_owned();
+    }
+
+    fn push_git_create_branch_form(
+        &self, rows: &mut Vec<AnyElement>, snapshot: &RemoteGitSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self.git_branch_name.read(cx).value().trim().to_owned();
                     let confirmed = self.git_confirm_create.as_deref() == Some(name.as_str());
                     rows.push(
                         v_flex().px_3().py_3().gap_2().border_t_1()
@@ -1069,9 +1059,59 @@ unstaged files stay untouched."))
                                 .child("Switch refuses staged, unstaged and untracked changes."))
                             .into_any_element(),
                     );
+    }
+
+    /// The list owns only type-erased elements, avoiding a huge combined
+    /// GPUI render expression and keeping 5C/5D behavior identical.
+    fn render_git_list(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        if let Some(snapshot) = &self.git {
+            let writable = snapshot.writes_enabled && self.root != "/";
+            rows.push(
+                div().px_3().py_2().text_xs().text_color(ui::muted())
+                    .child(snapshot.toplevel.clone()).into_any_element(),
+            );
+            if self.tab == RemoteTab::Changes {
+                if snapshot.files.is_empty() {
+                    rows.push(div().px_3().py_3().text_sm().text_color(ui::muted())
+                        .child("Working tree clean").into_any_element());
+                }
+                for (index, entry) in snapshot.files.iter().enumerate() {
+                    self.push_git_file_row(&mut rows, snapshot, index, entry, writable, cx);
+                }
+                if snapshot.files_truncated {
+                    rows.push(div().px_3().py_2().text_xs()
+                        .text_color(ui::warning())
+                        .child("Showing first 200 changed files").into_any_element());
+                }
+                if writable {
+                    self.push_git_commit_form(&mut rows, snapshot, cx);
+                }
+            } else if self.tab == RemoteTab::Branches {
+                if snapshot.branches.is_empty() {
+                    rows.push(div().px_3().py_3().text_sm().text_color(ui::muted())
+                        .child("No Git branches").into_any_element());
+                }
+                for (index, branch) in snapshot.branches.iter().enumerate() {
+                    self.push_git_branch_row(&mut rows, branch, index, writable, cx);
+                }
+                if snapshot.branches_truncated {
+                    rows.push(div().px_3().py_2().text_xs()
+                        .text_color(ui::warning())
+                        .child("Showing first 120 branches").into_any_element());
+                }
+                if writable {
+                    self.push_git_create_branch_form(&mut rows, snapshot, cx);
                 }
             }
         }
+        v_flex().children(rows).into_any_element()
+    }
+
+    /// Keep the root GPUI render shallow on Windows debug builds.
+    /// 5D previously built every interactive row and both editors inside
+    /// this one render frame, overflowing the Windows UI thread stack.
+    fn render_git_panel(&self, cx: &mut Context<Self>) -> Div {
         v_flex()
             .size_full()
             .min_h_0()
@@ -1117,7 +1157,7 @@ unstaged files stay untouched."))
             .child(
                 div().id("remote-git-scroll").flex_1().min_h_0()
                     .overflow_y_scroll()
-                    .child(v_flex().children(rows)),
+                    .child(self.render_git_list(cx)),
             )
             .child(
                 div().h(px(26.)).flex_none().border_t_1()
