@@ -19,7 +19,7 @@ use gpui_kit::*;
 use crate::features::git::{self, RefEntry, RefsSnapshot, StashAction, Worktree};
 use super::branches_ui::{
     BranchDisplay, RefSection as Section, branch_row, filter_field, matches_filter,
-    ref_section_header,
+    ref_row as row, ref_section_header,
 };
 use crate::shared::ui;
 
@@ -811,37 +811,6 @@ impl Render for RefsView {
             })
             .children(self.render_footer())
     }
-}
-
-/// One ref: icon, name, and an optional trailing detail.
-fn row(
-    id: SharedString,
-    icon: IconName,
-    icon_color: Hsla,
-    title: String,
-    title_color: Hsla,
-    trailing: Option<AnyElement>,
-) -> Stateful<Div> {
-    h_flex()
-        .id(id)
-        .h(px(ROW_HEIGHT))
-        .mx_1p5()
-        .pl(px(24.))
-        .pr_1p5()
-        .gap_2()
-        .rounded_md()
-        .hover(|s| s.bg(ui::surface_hover()))
-        .child(Icon::new(icon).xsmall().text_color(icon_color))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_size(px(13.))
-                .text_color(title_color)
-                .child(title),
-        )
-        .children(trailing)
 }
 
 fn detail(text: String) -> AnyElement {
