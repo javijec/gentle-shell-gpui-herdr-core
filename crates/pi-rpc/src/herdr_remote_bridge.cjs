@@ -202,6 +202,9 @@ async function remoteWrite(req) {
   // Work only on the resolved, in-root location: aliases through allowed
   // parent symlinks cannot redirect or bypass the per-file write guard.
   const selected = await fs.realpath(validated);
+  if (protectedGitPath(await fs.realpath(req.root), selected)) {
+    throw new Error("Cannot edit Git metadata or private bridge temporary files");
+  }
   if (typeof req.content !== "string" || !validRevision(req.expectedRevision)) {
     throw new Error("Write requires text and a matching SHA-256 revision");
   }
@@ -294,6 +297,9 @@ async function remoteCreate(req) {
     throw new Error("Invalid new entry type");
   }
   const parent = await safeRemotePath(req.root, req.path);
+  if (protectedGitPath(await fs.realpath(req.root), parent)) {
+    throw new Error("Cannot create entries inside Git metadata");
+  }
   const stat = await fs.lstat(parent);
   if (!stat.isDirectory()) throw new Error("Selected parent is not a directory");
   if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
@@ -325,7 +331,8 @@ function validEntryName(name) {
 
 function protectedGitPath(root, selected) {
   const parts = path.posix.relative(root, selected).split("/");
-  return parts.includes(".git") || parts.includes(".herdr-save-");
+  return parts.includes(".git") ||
+    parts.some((part) => part.startsWith(".herdr-save-"));
 }
 
 async function exclusiveFileCopy(source, destination) {
