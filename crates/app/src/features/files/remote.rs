@@ -328,7 +328,7 @@ mod remote_git_snapshot_tests {
         assert!(trees[0].locked);
         assert_eq!(trees[0].path, "/srv/workspaces/JaviPi.worktrees/test");
         assert!(super::parse_remote_worktrees(
-            "worktree C:\\\\temp\\file\n", "/srv/workspaces/JaviPi",
+            r"worktree C:\temp\file", "/srv/workspaces/JaviPi",
         ).is_err());
     }
 
