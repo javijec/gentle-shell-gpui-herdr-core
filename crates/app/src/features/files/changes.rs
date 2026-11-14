@@ -40,6 +40,10 @@ pub enum ChangesEvent {
     OpenFile(PathBuf),
     /// [`ChangesView::change_count`] changed.
     Changed,
+    /// Routed by the owning Herdr controller, not native Git.
+    RemoteStage { path: String, index: char, worktree: char, stage: bool },
+    RemoteOpenDiff(String),
+    RemoteCommit(String),
 }
 
 #[derive(Clone, PartialEq)]
@@ -90,6 +94,9 @@ pub struct ChangesView {
     root: PathBuf,
     /// `None` until the first read, `Some(None)` outside a git work tree.
     repo: Option<Option<Repo>>,
+    remote: bool,
+    remote_tree: Option<WorkTree>,
+    remote_confirm_commit: Option<String>,
     tree_mode: bool,
     collapsed: HashSet<(Side, String)>,
     selected: Option<(Side, String)>,
@@ -132,6 +139,9 @@ impl ChangesView {
         let mut this = Self {
             root,
             repo: None,
+            remote: false,
+            remote_tree: None,
+            remote_confirm_commit: None,
             tree_mode: false,
             collapsed: HashSet::new(),
             selected: None,
@@ -154,7 +164,8 @@ impl ChangesView {
             loop {
                 // Only while shown and the window is in front.
                 let Ok(due) = this.update_in(cx, |this, window, _| {
-                    (this.visible && window.is_window_active()).then(|| this.status_job())
+                    (this.visible && !this.remote && window.is_window_active())
+                        .then(|| this.status_job())
                 }) else {
                     break;
                 };
@@ -170,11 +181,31 @@ impl ChangesView {
         this
     }
 
+    /// The native ChangesView can also consume a typed Herdr WorkTree.
+    /// Every mutating event is routed back to the owning remote session.
+    pub(super) fn new_remote(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::new(PathBuf::new(), window, cx);
+        view.remote = true;
+        view
+    }
+
+    pub(super) fn set_remote_tree(
+        &mut self, tree: Option<WorkTree>, cx: &mut Context<Self>,
+    ) {
+        if !self.remote {
+            return;
+        }
+        self.remote_tree = tree;
+        self.remote_confirm_commit = None;
+        self.relayout();
+        cx.notify();
+    }
+
     /// Pause polling while hidden; showing the tab re-reads status.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         let shown = visible && !self.visible;
         self.visible = visible;
-        if shown {
+        if shown && !self.remote {
             self.refresh(cx);
         }
     }
@@ -185,7 +216,11 @@ impl ChangesView {
     }
 
     fn tree(&self) -> Option<&WorkTree> {
-        self.repo.as_ref()?.as_ref().map(|repo| &repo.tree)
+        if self.remote {
+            self.remote_tree.as_ref()
+        } else {
+            self.repo.as_ref()?.as_ref().map(|repo| &repo.tree)
+        }
     }
 
     fn repository_path(&self) -> Option<String> {
@@ -200,6 +235,9 @@ impl ChangesView {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.remote {
+            return;
+        }
         let job = self.status_job();
         cx.spawn(async move |this, cx| {
             let repo = cx.background_executor().spawn(job).await;
@@ -323,6 +361,15 @@ impl ChangesView {
     }
 
     fn toggle(&mut self, entry: &StatusEntry, side: Side, cx: &mut Context<Self>) {
+        if self.remote {
+            cx.emit(ChangesEvent::RemoteStage {
+                path: entry.path.clone(),
+                index: entry.index,
+                worktree: entry.worktree,
+                stage: side == Side::Unstaged,
+            });
+            return;
+        }
         let Some(toplevel) = self.toplevel() else { return; };
         let action = match side {
             Side::Unstaged => GitFileAction::Stage,
@@ -363,6 +410,12 @@ impl ChangesView {
     }
 
     fn click_entry(&mut self, path: &str, side: Side, cx: &mut Context<Self>) {
+        if self.remote {
+            self.selected = Some((side, path.to_owned()));
+            cx.emit(ChangesEvent::RemoteOpenDiff(path.to_owned()));
+            cx.notify();
+            return;
+        }
         let Some(toplevel) = self.toplevel() else {
             return;
         };
