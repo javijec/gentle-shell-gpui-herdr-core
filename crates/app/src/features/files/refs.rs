@@ -72,6 +72,7 @@ pub struct RefsView {
     repo: Option<Option<Repo>>,
     remote: bool,
     remote_refs: Option<RefsSnapshot>,
+    remote_pending_branch: Option<String>,
     filter: Entity<InputState>,
     collapsed: HashSet<Section>,
     /// The list's rows, rebuilt when the refs, filter or collapsed sections change.
@@ -100,6 +101,7 @@ impl RefsView {
             repo: None,
             remote: false,
             remote_refs: None,
+            remote_pending_branch: None,
             filter,
             collapsed: HashSet::new(),
             lines: Rc::new(Vec::new()),
@@ -145,8 +147,18 @@ impl RefsView {
             return;
         }
         self.remote_refs = refs;
+        self.remote_pending_branch = None;
         self.relayout(cx);
         cx.notify();
+    }
+
+    pub(super) fn mark_remote_switch(
+        &mut self, name: Option<String>, cx: &mut Context<Self>,
+    ) {
+        if self.remote {
+            self.remote_pending_branch = name;
+            cx.notify();
+        }
     }
 
     fn refs(&self) -> Option<&RefsSnapshot> {
@@ -738,9 +750,13 @@ impl RefsView {
     fn render_branch(&self, branch: &RefEntry, cx: &mut Context<Self>) -> AnyElement {
         if self.remote {
             let name = branch.name.clone();
+            let confirmation = (self.remote_pending_branch.as_deref()
+                == Some(name.as_str()) && !branch.current).then(|| {
+                ui::chip("Click again to confirm", ui::warning()).into_any_element()
+            });
             return branch_row(
                 SharedString::from(format!("remote-ref-branch-{name}")),
-                BranchDisplay::from_local(branch), None,
+                BranchDisplay::from_local(branch), confirmation,
             )
             .when(!branch.current, |row| row.cursor_pointer())
             .on_click(cx.listener(move |_, _, _, cx| {
