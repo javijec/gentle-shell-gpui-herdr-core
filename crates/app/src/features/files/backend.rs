@@ -171,6 +171,58 @@ impl WorkspaceBackend {
         })
     }
 
+    /// Create only a single new item under an already selected folder.
+    /// Herdr's bridge enforces no-clobber O_EXCL and validates the agent root.
+    pub fn create(
+        self, parent: WorkspacePath, name: String, directory: bool,
+    ) -> BackendFuture<WorkspacePath> {
+        Box::pin(async move {
+            if name.is_empty() || name.len() > 255
+                || name == "." || name == ".." || name == ".git"
+                || name.starts_with(".herdr-save-")
+                || name.contains('/') || name.contains('\\')
+                || name.chars().any(char::is_control)
+            {
+                return Err("Invalid new file or folder name".into());
+            }
+            match (self, parent) {
+                (Self::Local { root }, WorkspacePath::Local(parent)) => {
+                    ensure_local_path(&root, &parent)?;
+                    let path = parent.join(&name);
+                    if directory {
+                        std::fs::create_dir(&path)
+                            .map_err(|error| error.to_string())?;
+                    } else {
+                        std::fs::OpenOptions::new().write(true).create_new(true)
+                            .open(&path).map_err(|error| error.to_string())?;
+                    }
+                    Ok(WorkspacePath::Local(path))
+                }
+                (Self::Herdr { root, process }, WorkspacePath::Herdr(parent)) => {
+                    ensure_herdr_path(&root, &parent)?;
+                    let target = if parent == "/" {
+                        format!("/{name}")
+                    } else {
+                        format!("{parent}/{name}")
+                    };
+                    ensure_herdr_path(&root, &target)?;
+                    let reply = process.request(json!({
+                        "type": "herdr_fs_create",
+                        "root": root,
+                        "path": parent,
+                        "name": name,
+                        "kind": if directory { "directory" } else { "file" },
+                    })).await.map_err(|error| error.to_string())?;
+                    if reply.data["path"].as_str() != Some(target.as_str()) {
+                        return Err("Remote create returned an unexpected path".into());
+                    }
+                    Ok(WorkspacePath::Herdr(target))
+                }
+                _ => Err("Workspace path does not belong to the selected backend".into()),
+            }
+        })
+    }
+
     /// Existing-file UTF-8 save, fenced by a SHA-256 read revision.
     /// Herdr enforces the guard again server-side, including symlink checks.
     pub fn write(
@@ -329,6 +381,23 @@ mod tests {
         for path in ["../outside", "/absolute", "src/../outside", "C:/Windows", ""] {
             assert!(safe_git_relative(path).is_err(), "{path}");
         }
+    }
+
+    #[test]
+    fn remote_create_names_are_confined_to_the_parent() {
+        for name in ["../etc", "a/b", "a\\b", "..", ".git", ""] {
+            assert!(
+                name.contains('/') || name.contains('\\') || name.is_empty()
+                    || name == ".." || name == ".git",
+                "{name}"
+            );
+        }
+        assert!(ensure_herdr_path(
+            "/srv/project", "/srv/project/subfolder/new-file.rs",
+        ).is_ok());
+        assert!(ensure_herdr_path(
+            "/srv/project", "/srv/project-neighbor/secret",
+        ).is_err());
     }
 
     #[test]
