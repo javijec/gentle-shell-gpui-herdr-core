@@ -19,7 +19,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::changes::{ChangesEvent, ChangesView};
-use super::dock_ui::{file_row_shell as row_shell, panel_header, panel_shell};
+use super::dock_ui::{file_entry_row, file_row_shell as row_shell, panel_header, panel_shell};
 use super::listing::Entry;
 use super::backend::{WorkspaceBackend, WorkspacePath};
 use super::ops::{self, ClipMode};
@@ -1059,13 +1059,8 @@ impl FileTreeView {
         } else {
             file_icon(&entry.name)
         };
-        let name_color = match status {
-            Some(s) if !cut => status_color(s),
-            _ if dim => ui::faint(),
-            _ => ui::fg(),
-        };
         let id = SharedString::from(entry.path.to_string_lossy().into_owned());
-        let shell = row_shell(id, row.depth, selected || renaming)
+        let shell = row_shell(id.clone(), row.depth, selected || renaming)
             .child(
                 div()
                     .w(px(14.))
@@ -1093,34 +1088,10 @@ impl FileTreeView {
         }
         let click = entry.clone();
         let menu_target = entry.path.clone();
-        shell
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(13.))
-                    .text_color(name_color)
-                    .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
-                    .child(entry.name.clone()),
-            )
-            .when(dirty, |d| {
-                d.child(
-                    div()
-                        .size(px(5.))
-                        .rounded_full()
-                        .bg(ui::warning().opacity(0.8)),
-                )
-            })
-            .when_some(status, |d, s| {
-                d.child(
-                    div()
-                        .font_family(ui::MONO)
-                        .text_size(px(10.5))
-                        .text_color(status_color(s))
-                        .child(status_letter(s).to_string()),
-                )
-            })
+        file_entry_row(
+            id, row.depth, selected, &entry.name, entry.is_dir, open,
+            dim, status, status.map(status_letter), dirty,
+        )
             .cursor_pointer()
             // Bubbles before the context menu opens, so it acts on this row.
             .on_mouse_down(
