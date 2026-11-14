@@ -195,7 +195,7 @@ impl WorkspaceBackend {
                     }
                     let original = std::fs::read(&path)
                         .map_err(|error| error.to_string())?;
-                    if original.contains(&0) || String::from_utf8(original.clone()).is_err() {
+                    if original.contains(&0) || std::str::from_utf8(&original).is_err() {
                         return Err("The original file is not UTF-8 text".into());
                     }
                     if format!("{:x}", Sha256::digest(&original)) != expected_revision {
