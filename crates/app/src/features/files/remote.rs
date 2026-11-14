@@ -2,7 +2,7 @@
 //! revision-checked UTF-8 editing run through the existing injected bridge.
 //! This view never uses local Windows filesystem APIs or remote Pi bash.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -23,6 +23,8 @@ use super::backend::{
 use gentle_core::git::status::{EntryKind, StatusEntry as RemoteGitFile};
 use super::changes_ui::{ChangeSide, change_row, section_header, side_entries};
 use super::dock_ui::{file_row_shell, panel_header, panel_shell};
+use super::remote_tree::visible_rows;
+use super::file_icon;
 use super::branches_ui::{
     BranchDisplay, RefSection, branch_matches, branch_row, filter_field,
     matches_filter, ref_row, ref_section_header,
@@ -266,6 +268,9 @@ pub struct RemoteFilesView {
     _git_events: Vec<Subscription>,
     focus: FocusHandle,
     entries: Vec<RemoteEntry>,
+    tree_children: HashMap<String, Vec<RemoteEntry>>,
+    tree_expanded: HashSet<String>,
+    tree_loading: HashSet<String>,
     preview: Option<RemotePreview>,
     editor: Option<Entity<EditorState>>,
     /// Markdown uses the same Edit / Split / Preview mode as FileView.
@@ -375,6 +380,9 @@ impl RemoteFilesView {
             _git_events: git_events,
             focus: cx.focus_handle(),
             entries: Vec::new(),
+            tree_children: HashMap::new(),
+            tree_expanded: HashSet::new(),
+            tree_loading: HashSet::new(),
             preview: None,
             editor: None,
             markdown: None,
@@ -498,6 +506,9 @@ impl RemoteFilesView {
         self.markdown = None;
         self._editor_events = None;
         self.entries.clear();
+        self.tree_children.clear();
+        self.tree_expanded.clear();
+        self.tree_loading.clear();
         self.error = None;
         self.truncated = false;
         self.loading = true;
@@ -518,7 +529,8 @@ impl RemoteFilesView {
                 this.loading = false;
                 match response {
                     Ok(listing) => {
-                        this.entries = listing.entries;
+                        this.entries = listing.entries.clone();
+                        this.tree_children.insert(this.current.clone(), listing.entries);
                         this.truncated = listing.truncated;
                     }
                     Err(error) => this.error = Some(friendly_error(&error.to_string())),
@@ -527,6 +539,121 @@ impl RemoteFilesView {
             });
         }).detach();
         cx.notify();
+    }
+
+    /// Expand a directory without replacing the selected project root or
+    /// closing a central editor. Children are loaded only when requested.
+    fn toggle_remote_directory(&mut self, path: String, cx: &mut Context<Self>) {
+        if self.tree_expanded.remove(&path) {
+            cx.notify();
+            return;
+        }
+        self.tree_expanded.insert(path.clone());
+        if self.tree_children.contains_key(&path) || self.tree_loading.contains(&path) {
+            cx.notify();
+            return;
+        }
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.error = Some("Remote agent is not connected".into());
+            cx.notify();
+            return;
+        };
+        self.tree_loading.insert(path.clone());
+        let generation = self.generation;
+        let response = WorkspaceBackend::herdr(self.root.clone(), process)
+            .list(WorkspacePath::Herdr(path.clone()), false);
+        cx.spawn(async move |this, cx| {
+            let result = response.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.tree_loading.remove(&path);
+                match result {
+                    Ok(listing) => {
+                        this.tree_children.insert(path, listing.entries);
+                        if listing.truncated {
+                            this.error = Some(
+                                "This folder has more than 500 entries; showing the first 500."
+                                    .into(),
+                            );
+                        }
+                    }
+                    Err(error) => this.error = Some(friendly_error(&error)),
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    /// Exactly the native tree's row shell and icon/label rules, with remote
+    /// Linux paths kept as Strings. Build rows separately to keep the GPUI
+    /// Windows render stack bounded.
+    fn render_remote_tree(&self, cx: &mut Context<Self>) -> AnyElement {
+        let nodes = visible_rows(
+            &self.root, &self.tree_children, &self.tree_expanded, &self.tree_loading,
+        );
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(nodes.len());
+        for (index, node) in nodes.into_iter().enumerate() {
+            let directory = node.entry.kind == "directory";
+            let regular = node.entry.kind == "file";
+            let opened = node.expanded;
+            let path = node.path.clone();
+            let insert_path = node.path.clone();
+            let (icon, tint) = if directory {
+                (if opened { IconName::FolderOpen } else { IconName::Folder }, ui::muted())
+            } else {
+                file_icon(&node.entry.name)
+            };
+            rows.push(
+                file_row_shell(
+                    SharedString::from(format!("remote-tree-row-{index}")),
+                    node.depth,
+                    false,
+                )
+                    .cursor_pointer()
+                    .child(
+                        div().w(px(14.)).flex().justify_center()
+                            .when(directory, |d| {
+                                d.child(Icon::new(if opened {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                }).xsmall().text_color(ui::faint()))
+                            }),
+                    )
+                    .child(Icon::new(icon).small().text_color(tint))
+                    .child(
+                        div().flex_1().min_w_0().truncate()
+                            .text_size(px(13.))
+                            .text_color(ui::fg())
+                            .child(node.entry.name),
+                    )
+                    .when(node.loading, |row| {
+                        row.child(div().text_xs().text_color(ui::muted()).child("…"))
+                    })
+                    .child(
+                        Button::new(format!("remote-tree-insert-{index}"))
+                            .ghost().xsmall()
+                            .icon(Icon::new(IconName::Copy))
+                            .tooltip("Insert Linux path into agent prompt")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(RemoteFilesEvent::InsertPath(insert_path.clone()));
+                            })),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if directory {
+                            this.toggle_remote_directory(path.clone(), cx);
+                        } else if regular {
+                            cx.emit(RemoteFilesEvent::OpenFile(path.clone()));
+                        }
+                    }))
+                    .into_any_element(),
+            );
+        }
+        v_flex().children(rows).into_any_element()
     }
 
     fn open(
@@ -1487,42 +1614,7 @@ impl Render for RemoteFilesView {
                         .child(div().text_xs().child("..")),
                 );
             }
-            for (index, entry) in self.entries.iter().enumerate() {
-                let is_dir = entry.kind == "directory";
-                let is_file = entry.kind == "file";
-                let path = remote_child(&self.current, &entry.name);
-                let click_path = path.clone();
-                let insert_path = path;
-                content = content.child(
-                    file_row_shell(
-                        SharedString::from(format!("remote-file-row-{index}")), 0, false,
-                    ).cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if is_dir {
-                                this.load_directory(click_path.clone(), cx);
-                            } else if is_file {
-                                cx.emit(RemoteFilesEvent::OpenFile(click_path.clone()));
-                            }
-                        }))
-                        .child(
-                            Icon::new(if is_dir { IconName::Folder }
-                                      else { IconName::File })
-                                .small().text_color(if is_dir { ui::champagne() } else { ui::muted() }),
-                        )
-                        .child(div().flex_1().min_w_0().truncate()
-                            .text_xs().child(entry.name.clone()))
-                        .child(
-                            Button::new(("remote-file-insert", index))
-                                .ghost().xsmall()
-                                .icon(Icon::new(IconName::Copy))
-                                .tooltip("Insert Linux path into agent prompt")
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.stop_propagation();
-                                    cx.emit(RemoteFilesEvent::InsertPath(insert_path.clone()));
-                                })),
-                        ),
-                );
-            }
+            content = content.child(self.render_remote_tree(cx));
         }
 
         panel_shell()
