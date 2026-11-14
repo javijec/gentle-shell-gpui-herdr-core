@@ -972,7 +972,10 @@ impl RemoteFilesView {
                                 view.set_remote_refs(Some(refs), cx);
                             });
                             this.changes.update(cx, |view, cx| {
-                                view.set_remote_tree(Some(tree), cx);
+                                view.set_remote_tree(
+                                    Some(tree), snapshot.writes_enabled
+                                        && !snapshot.files_truncated && this.root != "/", cx,
+                                );
                             });
                             this.git = Some(snapshot);
                             this.git_error = None;
@@ -992,7 +995,7 @@ impl RemoteFilesView {
                         view.set_remote_refs(None, cx);
                     });
                     this.changes.update(cx, |view, cx| {
-                        view.set_remote_tree(None, cx);
+                        view.set_remote_tree(None, false, cx);
                     });
                 }
                 cx.notify();
@@ -1022,6 +1025,9 @@ impl RemoteFilesView {
     ) {
         if self.git_busy || self.git_loading { return; }
         self.git_busy = true;
+        self.changes.update(cx, |view, cx| {
+            view.set_remote_busy(true, cx);
+        });
         self.git_error = None;
         self.git_feedback = None;
         self.git_confirm_commit = None;
@@ -1032,6 +1038,9 @@ impl RemoteFilesView {
             let result = response.await;
             let _ = this.update(cx, |this, cx| {
                 this.git_busy = false;
+                this.changes.update(cx, |view, cx| {
+                    view.set_remote_busy(false, cx);
+                });
                 match result {
                     Ok(_) => {
                         this.git_feedback = Some("Remote Git updated. Status refreshed.".into());
@@ -1405,9 +1414,7 @@ unstaged files stay untouched."))
             ))
             .when(self.tab == RemoteTab::Changes, |panel| {
                 panel.child(
-                    div().id("remote-git-scroll").flex_1().min_h_0()
-                        .overflow_y_scroll()
-                        .child(self.render_git_list(cx)),
+                    div().flex_1().min_h_0().child(self.changes.clone()),
                 )
             })
             .when(self.tab == RemoteTab::Branches, |panel| {
