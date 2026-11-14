@@ -433,6 +433,56 @@ test("5C reports remote Git changes and branches without sending Pi commands", {
   }
 });
 
+test("5E.6 includes bounded tag and stash metadata without Pi RPC writes", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-extra-refs-"));
+  try {
+    const git = gitInit(root);
+    git("tag", "v1.0");
+    fs.writeFileSync(path.join(root, "tracked.txt"), "modified\n");
+    git("stash", "push", "-qm", "wip: local experiment");
+    const h = harness(root);
+    const before = h.childWrites.length;
+    rpcInput(h, { type: "herdr_git_snapshot", id: "refs-extra", root });
+    const reply = await fsReply(h, "refs-extra");
+    assert.equal(reply.success, true, reply.error);
+    assert.ok(reply.data.tags.some((tag) => tag.name === "v1.0"));
+    assert.ok(reply.data.stashes.some((stash) =>
+      stash.name === "stash@{0}" &&
+      stash.message.includes("wip: local experiment")));
+    assert.equal(reply.data.tagsTruncated, false);
+    assert.equal(reply.data.stashesTruncated, false);
+    assert.equal(h.childWrites.length, before);
+    assert.equal(h.calls.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("5E.6 caps tag and stash listings without maxBuffer errors", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-extra-cap-"));
+  try {
+    const git = gitInit(root);
+    for (let i = 0; i < 125; i++) {
+      git("tag", "test-tag-" + i.toString().padStart(3, "0"));
+    }
+    const h = harness(root);
+    rpcInput(h, { type: "herdr_git_snapshot", id: "refs-cap", root });
+    const reply = await fsReply(h, "refs-cap");
+    assert.equal(reply.success, true, reply.error);
+    assert.equal(reply.data.tags.length, 120);
+    assert.equal(reply.data.tagsTruncated, true);
+    assert.deepEqual(reply.data.stashes, []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("5C shows tracked and untracked diffs read-only", {
   skip: process.platform === "win32",
 }, async () => {

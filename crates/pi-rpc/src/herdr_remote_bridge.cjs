@@ -336,6 +336,8 @@ async function remoteFilesRequest(req) {
 // Never run Git aliases, a shell, local Windows Git or network Git actions.
 const MAX_GIT_LIST = 200;
 const MAX_GIT_BRANCHES = 120;
+const MAX_GIT_TAGS = 120;
+const MAX_GIT_STASHES = 120;
 const MAX_GIT_DIFF = 96 * 1024;
 
 function strictUtf8(bytes) {
@@ -542,6 +544,33 @@ function parseGitBranches(output) {
   return { branches, truncated: rows.length > branches.length };
 }
 
+// Every additional ref query is a bounded Git read. Never fall back to
+// invoking a shell, executing hooks, or inspecting files outside the repo.
+function parseGitTags(output) {
+  const rows = strictUtf8(output).split("\n").filter(Boolean);
+  const tags = rows.map((name) => {
+    if (name.length > 512 || /[\x00-\x1f\x7f]/.test(name) ||
+        name.startsWith("-") || name.includes("..")) {
+      throw new Error("Invalid Git tag");
+    }
+    return { name };
+  });
+  return { tags };
+}
+
+function parseGitStashes(output) {
+  const rows = strictUtf8(output).split("\n").filter(Boolean);
+  const stashes = rows.map((row) => {
+    const parts = row.split("\0");
+    if (parts.length !== 2 || !/^stash@\{\d+\}$/.test(parts[0]) ||
+        parts[1].length > 2048 || /[\x00-\x1f\x7f]/.test(parts[1])) {
+      throw new Error("Invalid Git stash record");
+    }
+    return { name: parts[0], message: parts[1] };
+  });
+  return { stashes };
+}
+
 async function gitRefState(toplevel) {
   const headOid = await runGit(toplevel, ["rev-parse", "--verify", "-q", "HEAD"])
     .then((bytes) => strictUtf8(bytes).trim()).catch(() => null);
@@ -554,7 +583,7 @@ async function gitRefState(toplevel) {
 async function remoteGit(req) {
   const { toplevel } = await gitRepository(req.root);
   if (req.type === "herdr_git_snapshot") {
-    const [status, branches, index] = await Promise.all([
+    const [status, branches, index, tags, stashes] = await Promise.all([
       runGitListing(toplevel, ["status", "--porcelain=v1", "-z",
         "--no-renames", "--untracked-files=all", "--ignore-submodules=all"],
         0, MAX_GIT_LIST),
@@ -563,9 +592,15 @@ async function remoteGit(req) {
         10, MAX_GIT_BRANCHES),
       runGitListing(toplevel, ["diff", "--cached", "--raw",
         "-z", "--no-renames"], 0, MAX_GIT_LIST * 2),
+      runGitListing(toplevel, ["for-each-ref",
+        "--format=%(refname:short)", "refs/tags"], 10, MAX_GIT_TAGS),
+      runGitListing(toplevel, ["stash", "list",
+        "--format=%gd%x00%gs"], 10, MAX_GIT_STASHES),
     ]);
     const files = parseGitEntries(status.output);
     const refs = parseGitBranches(branches.output);
+    const extraTags = parseGitTags(tags.output);
+    const extraStashes = parseGitStashes(stashes.output);
     const { headOid, currentBranch } = await gitRefState(toplevel);
     return {
       toplevel, headOid, currentBranch, files: files.entries,
@@ -573,6 +608,8 @@ async function remoteGit(req) {
       filesTruncated: files.truncated || status.truncated,
       branches: refs.branches,
       branchesTruncated: refs.truncated || branches.truncated,
+      tags: extraTags.tags, tagsTruncated: tags.truncated,
+      stashes: extraStashes.stashes, stashesTruncated: stashes.truncated,
       readOnly: true, writesEnabled: true,
     };
   }
