@@ -670,6 +670,52 @@ async function gitWrite(h, root, snapshot, type, id, props = {}) {
   return fsReply(h, id);
 }
 
+test("5F bulk Git stage and unstage are bounded and revalidate status", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-bulk-git-"));
+  try {
+    gitInit(root);
+    fs.writeFileSync(path.join(root, "tracked.txt"), "changed one\\n");
+    fs.writeFileSync(path.join(root, "second.txt"), "new file\\n");
+    const h = harness(root);
+    let snap = await gitSnapshot(h, root, "bulk-s1");
+    const original = snap.files.map(({ path, index, worktree }) => ({
+      path, index, worktree,
+    }));
+    const success = await gitWrite(h, root, snap, "herdr_git_stage_all", "bulk-stage", {
+      expectedFiles: original,
+    });
+    assert.equal(success.success, true, success.error);
+    assert.equal((await gitWrite(h, root, snap, "herdr_git_unstage_all", "bulk-stale", {
+      expectedFiles: original,
+    })).success, false, "index guard must block a stale request");
+    snap = await gitSnapshot(h, root, "bulk-s2");
+    assert.ok(snap.files.every((f) => f.index !== " " && f.index !== "?"));
+    const reviewed = snap.files.map(({ path, index, worktree }) => ({
+      path, index, worktree,
+    }));
+    const reverted = await gitWrite(h, root, snap, "herdr_git_unstage_all",
+      "bulk-unstage", { expectedFiles: reviewed });
+    assert.equal(reverted.success, true, reverted.error);
+    assert.equal(fs.readFileSync(path.join(root, "tracked.txt"), "utf8"), "changed one\\n");
+    assert.equal(fs.readFileSync(path.join(root, "second.txt"), "utf8"), "new file\\n");
+    snap = await gitSnapshot(h, root, "bulk-s3");
+    const changed = snap.files.map(({ path, index, worktree }) => ({
+      path, index, worktree,
+    }));
+    changed[0].index = "A"; // tamper with the file the user reviewed
+    const refused = await gitWrite(h, root, snap, "herdr_git_stage_all",
+      "bulk-tampered", { expectedFiles: changed });
+    assert.equal(refused.success, false);
+    assert.match(refused.error, /Git file status changed/);
+    assert.equal(h.childWrites.length, 1, "all requests remain inside the private bridge");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("5D stages and unstages exactly one selected file without modifying worktree", {
   skip: process.platform === "win32",
 }, async () => {
