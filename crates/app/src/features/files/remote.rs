@@ -324,6 +324,9 @@ pub struct RemoteFilesView {
     tree_children: HashMap<String, Vec<RemoteEntry>>,
     tree_expanded: HashSet<String>,
     tree_loading: HashSet<String>,
+    tree_selected_directory: Option<String>,
+    create_name: Entity<InputState>,
+    creating: bool,
     preview: Option<RemotePreview>,
     editor: Option<Entity<EditorState>>,
     /// Markdown uses the same Edit / Split / Preview mode as FileView.
@@ -395,6 +398,9 @@ impl RemoteFilesView {
         let git_branch_name = cx.new(|cx| {
             InputState::new(window, cx).placeholder("New local branch name")
         });
+        let create_name = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("New file or folder name")
+        });
         let refs = cx.new(|cx| RefsView::new_remote(window, cx));
         let refs_events = cx.subscribe(&refs, |this, _, event: &RefsEvent, cx| {
             if let RefsEvent::SwitchRemoteBranch(branch) = event {
@@ -428,6 +434,9 @@ impl RemoteFilesView {
             cx.subscribe(&git_branch_name, |_, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event { cx.notify(); }
             }),
+            cx.subscribe(&create_name, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event { cx.notify(); }
+            }),
         ];
         let mut view = Self {
             session,
@@ -455,6 +464,9 @@ impl RemoteFilesView {
             tree_children: HashMap::new(),
             tree_expanded: HashSet::new(),
             tree_loading: HashSet::new(),
+            tree_selected_directory: None,
+            create_name,
+            creating: false,
             preview: None,
             editor: None,
             markdown: None,
@@ -581,6 +593,7 @@ impl RemoteFilesView {
         self.tree_children.clear();
         self.tree_expanded.clear();
         self.tree_loading.clear();
+        self.tree_selected_directory = None;
         self.error = None;
         self.truncated = false;
         self.loading = true;
@@ -606,6 +619,46 @@ impl RemoteFilesView {
                         this.truncated = listing.truncated;
                     }
                     Err(error) => this.error = Some(friendly_error(&error.to_string())),
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    fn create_remote_entry(
+        &mut self, directory: bool, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if self.creating || self.root == "/" || self.pane_path.is_some() {
+            return;
+        }
+        let name = self.create_name.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            return;
+        }
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.error = Some("Remote agent is not connected".into());
+            cx.notify();
+            return;
+        };
+        let parent = self.tree_selected_directory.clone()
+            .unwrap_or_else(|| self.root.clone());
+        let operation = WorkspaceBackend::herdr(self.root.clone(), process)
+            .create(WorkspacePath::Herdr(parent), name, directory);
+        self.creating = true;
+        self.error = None;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = operation.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.creating = false;
+                match result {
+                    Ok(_) => {
+                        this.create_name.update(cx, |field, cx| {
+                            field.set_value(String::new(), window, cx)
+                        });
+                        this.load_directory(this.root.clone(), cx);
+                    }
+                    Err(error) => this.error = Some(friendly_error(&error)),
                 }
                 cx.notify();
             });
@@ -676,7 +729,9 @@ impl RemoteFilesView {
             rows.push(
                 file_entry_row(
                     SharedString::from(format!("remote-tree-row-{index}")),
-                    node.depth, false, &node.entry.name, directory, opened,
+                    node.depth,
+                    self.tree_selected_directory.as_deref() == Some(node.path.as_str()),
+                    &node.entry.name, directory, opened,
                     false, None, None, false,
                 )
                     .cursor_pointer()
@@ -695,6 +750,7 @@ impl RemoteFilesView {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if directory {
+                            this.tree_selected_directory = Some(path.clone());
                             this.toggle_remote_directory(path.clone(), cx);
                         } else if regular {
                             cx.emit(RemoteFilesEvent::OpenFile(path.clone()));
@@ -1462,8 +1518,30 @@ impl Render for RemoteFilesView {
             )
             .when(!central, |panel| panel.child(self.render_tabs(cx)))
             .when(!central, |panel| panel.child(
+                h_flex().px_2().pb_1().gap_1()
+                    .child(div().flex_1().min_w_0()
+                        .child(Input::new(&self.create_name).small()))
+                    .child(Button::new("remote-create-file")
+                        .ghost().xsmall()
+                        .icon(Icon::new(IconName::FilePlus))
+                        .tooltip("New file in selected folder (or workspace root)")
+                        .disabled(self.creating || self.root == "/")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.create_remote_entry(false, window, cx)
+                        })))
+                    .child(Button::new("remote-create-folder")
+                        .ghost().xsmall()
+                        .icon(Icon::new(IconName::FolderPlus))
+                        .tooltip("New folder in selected folder (or workspace root)")
+                        .disabled(self.creating || self.root == "/")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.create_remote_entry(true, window, cx)
+                        }))),
+            ))
+            .when(!central, |panel| panel.child(
                 div().px_3().pb_2().text_xs().text_color(ui::muted())
-                    .child(self.current.clone()),
+                    .child(self.tree_selected_directory.as_ref()
+                        .unwrap_or(&self.current).clone()),
             ))
             .when(self.loading, |panel| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
