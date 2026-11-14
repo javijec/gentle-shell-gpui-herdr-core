@@ -2,12 +2,13 @@
 //! revision-checked UTF-8 editing run through the existing injected bridge.
 //! This view never uses local Windows filesystem APIs or remote Pi bash.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -15,17 +16,19 @@ use gpui_kit::*;
 use serde_json::json;
 
 use crate::features::session::SessionView;
+use crate::features::git::{RefEntry, RefsSnapshot, WorkTree};
+use gentle_core::git::refs::{HeadInfo, RefKind, Stash, Submodule, parse_refs, parse_submodules};
+use super::refs::{RefsEvent, RefsView, RemoteWorktreeDisplay};
+use super::changes::{ChangesEvent, ChangesView};
 use super::backend::{
     GitFileAction, GitFileMutation, HerdrGitGuard, WorkspaceBackend,
+    WorkspaceEntryAction,
     WorkspaceDirEntry as RemoteEntry, WorkspacePath,
     WorkspaceText as RemotePreview,
 };
-use gentle_core::git::status::{EntryKind, StatusEntry as RemoteGitFile};
-use super::changes_ui::{ChangeSide, change_row, section_header, side_entries};
-use super::branches_ui::{
-    BranchDisplay, RefSection, branch_matches, branch_row, filter_field,
-    matches_filter, ref_row, ref_section_header,
-};
+use gentle_core::git::status::{BranchStatus, StatusEntry as RemoteGitFile};
+use super::dock_ui::{file_entry_row, panel_header, panel_shell};
+use super::remote_tree::{RemoteTreeRow, visible_rows};
 use super::tabs::FilePanelTab as RemoteTab;
 use super::viewer::MdMode;
 use crate::shared::ui;
@@ -60,10 +63,50 @@ struct RemoteGitSnapshot {
     branches: Vec<RemoteGitBranch>,
     tags: Vec<String>,
     stashes: Vec<RemoteGitStash>,
+    ref_details: Vec<RefEntry>,
+    worktrees: Vec<RemoteWorktreeDisplay>,
+    submodules: Vec<Submodule>,
     files_truncated: bool,
     branches_truncated: bool,
     tags_truncated: bool,
     stashes_truncated: bool,
+}
+
+/// Parse Linux worktree inventory for display only. Never convert paths
+/// to Windows PathBuf, and never offer native filesystem actions for them.
+fn parse_remote_worktrees(
+    raw: &str, root: &str,
+) -> Result<Vec<RemoteWorktreeDisplay>, &'static str> {
+    let mut result = Vec::new();
+    for block in raw.split("\n\n").filter(|block| !block.trim().is_empty()) {
+        let (mut path, mut branch, mut head) = (None, None, None);
+        let (mut locked, mut prunable) = (false, false);
+        for line in block.lines() {
+            if let Some(value) = line.strip_prefix("worktree ") {
+                path = Some(value.to_owned());
+            } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
+                branch = Some(value.to_owned());
+            } else if let Some(value) = line.strip_prefix("HEAD ") {
+                head = Some(value.to_owned());
+            } else if line == "locked" || line.starts_with("locked ") {
+                locked = true;
+            } else if line == "prunable" || line.starts_with("prunable ") {
+                prunable = true;
+            }
+        }
+        let Some(path) = path else { continue; };
+        if !path.starts_with('/') || path.contains('\\')
+            || path.len() > 2048 || path.chars().any(char::is_control)
+        {
+            return Err("Invalid remote worktree path");
+        }
+        if path == root { continue; } // Native view also hides the main worktree.
+        result.push(RemoteWorktreeDisplay { path, branch, head, locked, prunable });
+        if result.len() > 120 {
+            return Err("Too many remote worktrees");
+        }
+    }
+    Ok(result)
 }
 
 /// The JSON shape is not trusted just because it came from an RPC bridge.
@@ -141,6 +184,42 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
         }).collect::<Result<Vec<_>, &'static str>>()?,
         _ => return Err("Invalid remote Git stashes"),
     };
+    let ref_details = match data.get("refDetails") {
+        None => Vec::new(), // Older bridge without extended ref information
+        Some(serde_json::Value::String(raw)) if raw.len() <= 1_500_000 => {
+            let parsed = parse_refs(raw);
+            if parsed.len() > 360 || parsed.iter().any(|entry| {
+                entry.name.is_empty() || entry.name.len() > 512
+                    || entry.name.chars().any(char::is_control)
+            }) {
+                return Err("Invalid remote Git reference metadata");
+            }
+            parsed
+        }
+        _ => return Err("Invalid remote Git reference metadata"),
+    };
+    let worktrees = match data.get("worktreeData") {
+        None => Vec::new(),
+        Some(serde_json::Value::String(raw)) if raw.len() <= 3_000_000 =>
+            parse_remote_worktrees(raw, &toplevel)?,
+        _ => return Err("Invalid remote worktree inventory"),
+    };
+    let submodules = match data.get("submoduleData") {
+        None => Vec::new(),
+        Some(serde_json::Value::String(raw)) if raw.len() <= 500_000 => {
+            let parsed = parse_submodules(raw);
+            if parsed.len() > 120 || parsed.iter().any(|item| {
+                item.path.is_empty() || item.path.len() > 2048
+                    || item.path.starts_with('/')
+                    || item.path.chars().any(char::is_control)
+                    || item.path.split('/').any(|part| part == "." || part == "..")
+            }) {
+                return Err("Invalid remote submodule inventory");
+            }
+            parsed
+        }
+        _ => return Err("Invalid remote submodule inventory"),
+    };
     let head_oid = match data.get("headOid") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(s)) if (s.len() == 40 || s.len() == 64)
@@ -161,7 +240,7 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
         && data["indexTruncated"].as_bool() != Some(true);
     Ok(RemoteGitSnapshot {
         toplevel, head_oid, current_branch, index_token, writes_enabled,
-        files, branches, tags, stashes,
+        files, branches, tags, stashes, ref_details, worktrees, submodules,
         files_truncated: data["filesTruncated"].as_bool().unwrap_or(false),
         branches_truncated: data["branchesTruncated"].as_bool().unwrap_or(false),
         tags_truncated: data["tagsTruncated"].as_bool().unwrap_or(false),
@@ -169,10 +248,146 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
     })
 }
 
+fn shared_remote_worktree(source: &RemoteGitSnapshot) -> WorkTree {
+    WorkTree {
+        branch: BranchStatus {
+            oid: source.head_oid.clone(),
+            head: source.current_branch.clone(),
+            ..BranchStatus::default()
+        },
+        entries: source.files.clone(),
+    }
+}
+
+/// Project a bounded Herdr Git read into the same native RefsSnapshot
+/// consumed by RefsView. Linux paths never become native PathBuf objects.
+fn shared_remote_refs(source: &RemoteGitSnapshot) -> RefsSnapshot {
+    let mut refs = RefsSnapshot::default();
+    refs.head = HeadInfo {
+        branch: source.current_branch.clone(),
+        sha: source.head_oid.as_ref().map(|oid| oid.chars().take(7).collect()),
+        dirty: !source.files.is_empty(),
+        ..HeadInfo::default()
+    };
+    for branch in &source.branches {
+        let kind = if branch.local { RefKind::Branch } else { RefKind::Remote };
+        let mut entry = source.ref_details.iter()
+            .find(|details| details.kind == kind && details.name == branch.name)
+            .cloned()
+            .unwrap_or_else(|| RefEntry {
+                kind, name: branch.name.clone(), current: branch.current,
+                upstream: None, ahead: 0, behind: 0, gone: false,
+                sha: String::new(), subject: String::new(),
+            });
+        // The branch list is authoritative about HEAD in this snapshot.
+        entry.current = branch.current;
+        if branch.local {
+            refs.branches.push(entry);
+        } else {
+            refs.remotes.push(entry);
+        }
+    }
+    refs.tags = source.tags.iter().map(|tag| {
+        source.ref_details.iter()
+            .find(|entry| entry.kind == RefKind::Tag && entry.name == *tag)
+            .cloned()
+            .unwrap_or_else(|| RefEntry {
+                kind: RefKind::Tag, name: tag.clone(), current: false,
+                upstream: None, ahead: 0, behind: 0, gone: false,
+                sha: String::new(), subject: String::new(),
+            })
+    }).collect();
+    if let Some(head) = refs.branches.iter().find(|entry| entry.current) {
+        refs.head.upstream = head.upstream.clone();
+        refs.head.ahead = head.ahead;
+        refs.head.behind = head.behind;
+    }
+    refs.stashes = source.stashes.iter().map(|stash| Stash {
+        name: stash.name.clone(), branch: None, message: stash.message.clone(),
+    }).collect();
+    refs.submodules = source.submodules.clone();
+    refs
+}
+
 #[cfg(test)]
 mod remote_git_snapshot_tests {
-    use super::parse_git_snapshot;
+    use super::{parse_git_snapshot, shared_remote_refs, shared_remote_worktree};
     use serde_json::json;
+
+    #[test]
+    fn remote_worktrees_are_display_only_posix_paths() {
+        let raw = concat!(
+            "worktree /srv/workspaces/JaviPi\nHEAD abc123\nbranch refs/heads/main\n\n",
+            "worktree /srv/workspaces/JaviPi.worktrees/test\nHEAD def456\n",
+            "branch refs/heads/test\nlocked\n\n",
+        );
+        let trees = super::parse_remote_worktrees(raw, "/srv/workspaces/JaviPi")
+            .expect("valid worktrees");
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].branch.as_deref(), Some("test"));
+        assert!(trees[0].locked);
+        assert_eq!(trees[0].path, "/srv/workspaces/JaviPi.worktrees/test");
+        assert!(super::parse_remote_worktrees(
+            r"worktree C:\temp\file", "/srv/workspaces/JaviPi",
+        ).is_err());
+    }
+
+    #[test]
+    fn enriches_remote_refs_from_bounded_native_format() {
+        let data = json!({
+            "toplevel": "/srv/workspaces/JaviPi",
+            "readOnly": true,
+            "files": [],
+            "branches": [{"name":"main","current":true,"local":true}],
+            "tags": [{"name":"v1"}],
+            "refDetails": concat!(
+                "*\0refs/heads/main\0origin/main\0[ahead 2, behind 1]\0abc1234\0feature\n",
+                " \0refs/tags/v1\0\0\0def1234\0release\n",
+            ),
+        });
+        let bridge = parse_git_snapshot(&data).expect("valid enriched metadata");
+        let refs = shared_remote_refs(&bridge);
+        assert_eq!(refs.head.upstream.as_deref(), Some("origin/main"));
+        assert_eq!((refs.head.ahead, refs.head.behind), (2, 1));
+        assert_eq!(refs.tags[0].subject, "release");
+    }
+
+    #[test]
+    fn typed_herdr_snapshots_feed_the_same_native_refs_and_changes_views() {
+        let data = json!({
+            "toplevel": "/srv/workspaces/JaviPi",
+            "readOnly": true,
+            "writesEnabled": true,
+            "headOid": "a".repeat(40),
+            "currentBranch": "main",
+            "indexToken": "b".repeat(64),
+            "files": [
+                {"path": "src/main.rs", "index": "M", "worktree": "M"},
+                {"path": "new.txt", "index": "?", "worktree": "?"}
+            ],
+            "branches": [
+                {"name": "main", "current": true, "local": true},
+                {"name": "dev", "current": false, "local": true},
+                {"name": "origin/main", "current": false, "local": false}
+            ],
+            "tags": [{"name": "v1.0"}],
+            "stashes": [{"name": "stash@{0}", "message": "On main: save"}]
+        });
+        let bridge = parse_git_snapshot(&data).expect("valid agent snapshot");
+        let changes = shared_remote_worktree(&bridge);
+        let refs = shared_remote_refs(&bridge);
+        assert_eq!(changes.entries.len(), 2);
+        assert_eq!(changes.branch.head.as_deref(), Some("main"));
+        assert_eq!((changes.entries[0].staged(), changes.entries[0].unstaged()),
+            (Some('M'), Some('M')));
+        assert_eq!(refs.branches.len(), 2);
+        assert_eq!(refs.remotes.len(), 1);
+        assert_eq!(refs.tags.len(), 1);
+        assert_eq!(refs.stashes.len(), 1);
+        assert_eq!(refs.head.branch.as_deref(), Some("main"));
+        assert_eq!(refs.remotes[0].name, "origin/main");
+        assert_eq!(refs.stashes[0].name, "stash@{0}");
+    }
 
     #[test]
     fn tags_and_stashes_accept_new_snapshots_and_validate_records() {
@@ -235,9 +450,13 @@ mod remote_git_snapshot_tests {
 
 const MAX_EDIT_BYTES: usize = 128 * 1024;
 const CONTEXT: &str = "GentleRemoteFileView";
+const TREE_CONTEXT: &str = "GentleRemoteFilesTree";
 const SAVE_HINT: &str = if cfg!(target_os = "macos") { "⌘S" } else { "Ctrl+S" };
 
-actions!(herdr_file_view, [Save]);
+actions!(herdr_file_view, [
+    Save, TreeUp, TreeDown, TreeLeft, TreeRight, TreeOpen,
+    TreeRename, TreeCopy, TreeCut, TreePaste,
+]);
 
 pub struct RemoteFilesView {
     session: Entity<SessionView>,
@@ -255,16 +474,27 @@ pub struct RemoteFilesView {
     git_generation: u64,
     git_busy: bool,
     git_feedback: Option<String>,
-    git_summary: Entity<InputState>,
     git_branch_name: Entity<InputState>,
-    git_filter: Entity<InputState>,
-    git_collapsed: HashSet<RefSection>,
-    git_confirm_commit: Option<String>,
+    refs: Entity<RefsView>,
+    _refs_events: Subscription,
+    changes: Entity<ChangesView>,
+    _changes_events: Subscription,
     git_confirm_create: Option<String>,
     git_confirm_switch: Option<String>,
     _git_events: Vec<Subscription>,
     focus: FocusHandle,
-    entries: Vec<RemoteEntry>,
+    tree_children: HashMap<String, Vec<RemoteEntry>>,
+    tree_rows: Rc<Vec<RemoteTreeRow>>,
+    tree_scroll: UniformListScrollHandle,
+    tree_expanded: HashSet<String>,
+    tree_loading: HashSet<String>,
+    tree_selected_directory: Option<String>,
+    tree_selected_entry: Option<(String, bool)>,
+    file_clipboard: Option<(String, bool)>,
+    entry_name: Entity<InputState>,
+    entry_busy: bool,
+    create_name: Entity<InputState>,
+    creating: bool,
     preview: Option<RemotePreview>,
     editor: Option<Entity<EditorState>>,
     /// Markdown uses the same Edit / Split / Preview mode as FileView.
@@ -281,6 +511,7 @@ pub struct RemoteFilesView {
 
 impl EventEmitter<RemoteFilesEvent> for RemoteFilesView {}
 
+#[cfg(test)]
 fn remote_child(directory: &str, name: &str) -> String {
     if directory == "/" {
         format!("/{name}")
@@ -319,11 +550,110 @@ impl RemoteFilesView {
     /// remote editor's focused UI. The action always saves through Herdr.
     pub fn bind_keys(cx: &mut App) {
         let key = if cfg!(target_os = "macos") { "cmd-s" } else { "ctrl-s" };
-        cx.bind_keys([KeyBinding::new(key, Save, Some(CONTEXT))]);
+        let copy = if cfg!(target_os = "macos") { "cmd-c" } else { "ctrl-c" };
+        let cut = if cfg!(target_os = "macos") { "cmd-x" } else { "ctrl-x" };
+        let paste = if cfg!(target_os = "macos") { "cmd-v" } else { "ctrl-v" };
+        cx.bind_keys([
+            KeyBinding::new(key, Save, Some(CONTEXT)),
+            KeyBinding::new("up", TreeUp, Some(TREE_CONTEXT)),
+            KeyBinding::new("down", TreeDown, Some(TREE_CONTEXT)),
+            KeyBinding::new("left", TreeLeft, Some(TREE_CONTEXT)),
+            KeyBinding::new("right", TreeRight, Some(TREE_CONTEXT)),
+            KeyBinding::new("enter", TreeOpen, Some(TREE_CONTEXT)),
+            KeyBinding::new("f2", TreeRename, Some(TREE_CONTEXT)),
+            KeyBinding::new(copy, TreeCopy, Some(TREE_CONTEXT)),
+            KeyBinding::new(cut, TreeCut, Some(TREE_CONTEXT)),
+            KeyBinding::new(paste, TreePaste, Some(TREE_CONTEXT)),
+        ]);
     }
 
     fn save_shortcut(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         self.save_edit(cx);
+    }
+
+    fn select_tree_row(
+        &mut self, next: bool, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if self.pane_path.is_some() || self.tree_rows.is_empty() { return; }
+        let current = self.tree_selected_entry.as_ref().and_then(|(path, _)| {
+            self.tree_rows.iter().position(|node| &node.path == path)
+        });
+        let index = match (current, next) {
+            (None, true) => 0,
+            (None, false) => self.tree_rows.len() - 1,
+            (Some(i), true) => (i + 1).min(self.tree_rows.len() - 1),
+            (Some(i), false) => i.saturating_sub(1),
+        };
+        let node = &self.tree_rows[index];
+        let path = node.path.clone();
+        let is_directory = node.entry.kind == "directory";
+        let name = node.entry.name.clone();
+        self.tree_selected_entry = Some((path.clone(), is_directory));
+        self.tree_selected_directory = if is_directory {
+            Some(path)
+        } else {
+            remote_parent(&self.root, &path)
+        };
+        self.entry_name.update(cx, |field, cx| {
+            field.set_value(name, window, cx);
+        });
+        self.tree_scroll.scroll_to_item(index, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    fn tree_up(&mut self, _: &TreeUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tree_row(false, window, cx);
+    }
+    fn tree_down(&mut self, _: &TreeDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tree_row(true, window, cx);
+    }
+    fn tree_open(&mut self, _: &TreeOpen, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((path, directory)) = self.tree_selected_entry.clone() {
+            if directory {
+                self.toggle_remote_directory(path, cx);
+            } else {
+                cx.emit(RemoteFilesEvent::OpenFile(path));
+            }
+        }
+    }
+    fn tree_left(&mut self, _: &TreeLeft, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((path, directory)) = self.tree_selected_entry.clone() else { return; };
+        if directory && self.tree_expanded.contains(&path) {
+            self.toggle_remote_directory(path, cx);
+        } else if let Some(parent) = remote_parent(&self.root, &path)
+            && let Some(i) = self.tree_rows.iter().position(|node| node.path == parent)
+        {
+            let node = &self.tree_rows[i];
+            let name = node.entry.name.clone();
+            self.tree_selected_entry = Some((parent.clone(), true));
+            self.tree_selected_directory = Some(parent);
+            self.tree_scroll.scroll_to_item(i, ScrollStrategy::Nearest);
+            self.entry_name.update(cx, |field, cx| {
+                field.set_value(name, window, cx);
+            });
+            cx.notify();
+        }
+    }
+    fn tree_right(&mut self, _: &TreeRight, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((path, true)) = self.tree_selected_entry.clone()
+            && !self.tree_expanded.contains(&path)
+        {
+            self.toggle_remote_directory(path, cx);
+        }
+    }
+    fn tree_rename(&mut self, _: &TreeRename, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tree_selected_entry.is_some() {
+            self.entry_name.update(cx, |field, cx| field.focus(window, cx));
+        }
+    }
+    fn tree_copy(&mut self, _: &TreeCopy, _: &mut Window, cx: &mut Context<Self>) {
+        self.clipboard_remote_entry(false, cx);
+    }
+    fn tree_cut(&mut self, _: &TreeCut, _: &mut Window, cx: &mut Context<Self>) {
+        self.clipboard_remote_entry(true, cx);
+    }
+    fn tree_paste(&mut self, _: &TreePaste, _: &mut Window, cx: &mut Context<Self>) {
+        self.paste_remote_entry(cx);
     }
 
     pub fn new(
@@ -333,21 +663,55 @@ impl RemoteFilesView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let git_summary = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Commit summary (staged files)")
-        });
         let git_branch_name = cx.new(|cx| {
             InputState::new(window, cx).placeholder("New local branch name")
         });
-        let git_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter refs"));
+        let create_name = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("New file or folder name")
+        });
+        let entry_name = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Rename selected entry")
+        });
+        let refs = cx.new(|cx| RefsView::new_remote(window, cx));
+        let refs_events = cx.subscribe(&refs, |this, _, event: &RefsEvent, cx| {
+            if let RefsEvent::SwitchRemoteBranch(branch) = event {
+                this.git_switch_branch(branch.clone(), cx);
+            }
+        });
+        let changes = cx.new(|cx| ChangesView::new_remote(window, cx));
+        let changes_events = cx.subscribe(&changes, |this, _, event: &ChangesEvent, cx| {
+            match event {
+                ChangesEvent::RemoteStage { path, index, worktree, stage } => {
+                    this.git_file_action(
+                        if *stage { GitFileAction::Stage } else { GitFileAction::Unstage },
+                        path.clone(), *index, *worktree, cx,
+                    );
+                }
+                ChangesEvent::RemoteOpenDiff(path) => {
+                    if let Some(snapshot) = this.git.as_ref() {
+                        let absolute = format!(
+                            "{}/{}", snapshot.toplevel.trim_end_matches('/'), path
+                        );
+                        cx.emit(RemoteFilesEvent::OpenDiff(absolute));
+                    }
+                }
+                ChangesEvent::RemoteCommit(summary) => {
+                    this.git_commit_message(summary.clone(), cx);
+                }
+                ChangesEvent::RemoteBulkStage { stage } => {
+                    this.git_bulk_stage(*stage, cx);
+                }
+                _ => {}
+            }
+        });
         let git_events = vec![
-            cx.subscribe(&git_summary, |_, _, event: &InputEvent, cx| {
-                if let InputEvent::Change = event { cx.notify(); }
-            }),
             cx.subscribe(&git_branch_name, |_, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event { cx.notify(); }
             }),
-            cx.subscribe(&git_filter, |_, _, event: &InputEvent, cx| {
+            cx.subscribe(&create_name, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event { cx.notify(); }
+            }),
+            cx.subscribe(&entry_name, |_, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event { cx.notify(); }
             }),
         ];
@@ -364,16 +728,27 @@ impl RemoteFilesView {
             git_generation: 0,
             git_busy: false,
             git_feedback: None,
-            git_summary,
             git_branch_name,
-            git_filter,
-            git_collapsed: HashSet::new(),
-            git_confirm_commit: None,
+            refs,
+            _refs_events: refs_events,
+            changes,
+            _changes_events: changes_events,
             git_confirm_create: None,
             git_confirm_switch: None,
             _git_events: git_events,
             focus: cx.focus_handle(),
-            entries: Vec::new(),
+            tree_children: HashMap::new(),
+            tree_rows: Rc::new(Vec::new()),
+            tree_scroll: UniformListScrollHandle::new(),
+            tree_expanded: HashSet::new(),
+            tree_loading: HashSet::new(),
+            tree_selected_directory: None,
+            tree_selected_entry: None,
+            file_clipboard: None,
+            entry_name,
+            entry_busy: false,
+            create_name,
+            creating: false,
             preview: None,
             editor: None,
             markdown: None,
@@ -496,7 +871,12 @@ impl RemoteFilesView {
         self.editor = None;
         self.markdown = None;
         self._editor_events = None;
-        self.entries.clear();
+        self.tree_children.clear();
+        self.tree_expanded.clear();
+        self.tree_loading.clear();
+        self.tree_selected_directory = None;
+        self.tree_selected_entry = None;
+        self.rebuild_remote_rows();
         self.error = None;
         self.truncated = false;
         self.loading = true;
@@ -517,7 +897,8 @@ impl RemoteFilesView {
                 this.loading = false;
                 match response {
                     Ok(listing) => {
-                        this.entries = listing.entries;
+                        this.tree_children.insert(this.current.clone(), listing.entries);
+                        this.rebuild_remote_rows();
                         this.truncated = listing.truncated;
                     }
                     Err(error) => this.error = Some(friendly_error(&error.to_string())),
@@ -527,6 +908,303 @@ impl RemoteFilesView {
         }).detach();
         cx.notify();
     }
+
+    fn rebuild_remote_rows(&mut self) {
+        self.tree_rows = Rc::new(visible_rows(
+            &self.root, &self.tree_children, &self.tree_expanded, &self.tree_loading,
+        ));
+    }
+
+    fn refresh_tree_folder(&mut self, folder: String, cx: &mut Context<Self>) {
+        self.tree_children.remove(&folder);
+        self.tree_expanded.remove(&folder);
+        self.toggle_remote_directory(folder, cx);
+    }
+
+    fn clipboard_remote_entry(&mut self, cut: bool, cx: &mut Context<Self>) {
+        if let Some((path, directory)) = &self.tree_selected_entry {
+            if !cut && *directory {
+                self.error = Some("Recursive directory copying is not supported yet".into());
+            } else {
+                self.file_clipboard = Some((path.clone(), cut));
+                self.error = None;
+            }
+            cx.notify();
+        }
+    }
+
+    fn rename_remote_entry(&mut self, cx: &mut Context<Self>) {
+        let new_name = self.entry_name.read(cx).value().trim().to_owned();
+        if !new_name.is_empty() {
+            self.run_remote_entry(WorkspaceEntryAction::Rename(new_name), cx);
+        }
+    }
+
+    fn paste_remote_entry(&mut self, cx: &mut Context<Self>) {
+        let Some((source, cut)) = self.file_clipboard.clone() else { return; };
+        let directory = self.tree_selected_directory.clone()
+            .unwrap_or_else(|| self.root.clone());
+        self.run_remote_entry_from(
+            source,
+            if cut {
+                WorkspaceEntryAction::Move(WorkspacePath::Herdr(directory))
+            } else {
+                WorkspaceEntryAction::CopyTo(WorkspacePath::Herdr(directory))
+            },
+            cx,
+        );
+    }
+
+    fn run_remote_entry(
+        &mut self, action: WorkspaceEntryAction, cx: &mut Context<Self>,
+    ) {
+        let Some((source, _)) = &self.tree_selected_entry else { return; };
+        self.run_remote_entry_from(source.clone(), action, cx);
+    }
+
+    fn run_remote_entry_from(
+        &mut self, source: String, action: WorkspaceEntryAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.entry_busy || self.creating || self.root == "/" || self.pane_path.is_some() {
+            return;
+        }
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.error = Some("Remote agent is disconnected".into());
+            cx.notify();
+            return;
+        };
+        let source_parent = remote_parent(&self.root, &source)
+            .unwrap_or_else(|| self.root.clone());
+        let dest_parent = match &action {
+            WorkspaceEntryAction::Move(WorkspacePath::Herdr(dir))
+                | WorkspaceEntryAction::CopyTo(WorkspacePath::Herdr(dir)) =>
+                dir.clone(),
+            _ => source_parent.clone(),
+        };
+        let should_clear_clipboard = matches!(
+            &action, WorkspaceEntryAction::Rename(_) | WorkspaceEntryAction::Move(_)
+        );
+        let operation = WorkspaceBackend::herdr(self.root.clone(), process)
+            .entry(WorkspacePath::Herdr(source.clone()), action);
+        self.entry_busy = true;
+        self.error = None;
+        cx.spawn(async move |this, cx| {
+            let result = operation.await;
+            let _ = this.update(cx, |this, cx| {
+                this.entry_busy = false;
+                match result {
+                    Ok(_) => {
+                        let stale_prefix = format!("{source}/");
+                        this.tree_children.retain(|path, _| {
+                            path != &source && !path.starts_with(&stale_prefix)
+                        });
+                        this.tree_expanded.retain(|path| {
+                            path != &source && !path.starts_with(&stale_prefix)
+                        });
+                        if this.tree_selected_entry.as_ref()
+                            .is_some_and(|(path, _)| path == &source)
+                        {
+                            this.tree_selected_entry = None;
+                        }
+                        if this.tree_selected_directory.as_deref() == Some(source.as_str()) {
+                            this.tree_selected_directory = None;
+                        }
+                        if should_clear_clipboard {
+                            this.file_clipboard = None;
+                        }
+                        this.refresh_tree_folder(source_parent.clone(), cx);
+                        if dest_parent != source_parent {
+                            this.refresh_tree_folder(dest_parent.clone(), cx);
+                        }
+                        this.rebuild_remote_rows();
+                    }
+                    Err(error) => this.error = Some(friendly_error(&error)),
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    fn create_remote_entry(
+        &mut self, directory: bool, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if self.creating || self.entry_busy || self.root == "/" || self.pane_path.is_some() {
+            return;
+        }
+        let name = self.create_name.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            return;
+        }
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.error = Some("Remote agent is not connected".into());
+            cx.notify();
+            return;
+        };
+        let parent = self.tree_selected_directory.clone()
+            .unwrap_or_else(|| self.root.clone());
+        let operation = WorkspaceBackend::herdr(self.root.clone(), process)
+            .create(WorkspacePath::Herdr(parent.clone()), name, directory);
+        self.creating = true;
+        self.error = None;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = operation.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.creating = false;
+                match result {
+                    Ok(_) => {
+                        this.create_name.update(cx, |field, cx| {
+                            field.set_value(String::new(), window, cx)
+                        });
+                        // Preserve all expanded folders; only re-query the
+                        // parent that received this file or directory.
+                        this.refresh_tree_folder(parent.clone(), cx);
+                    }
+                    Err(error) => this.error = Some(friendly_error(&error)),
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    /// Expand a directory without replacing the selected project root or
+    /// closing a central editor. Children are loaded only when requested.
+    fn toggle_remote_directory(&mut self, path: String, cx: &mut Context<Self>) {
+        if self.tree_expanded.remove(&path) {
+            self.rebuild_remote_rows();
+            cx.notify();
+            return;
+        }
+        self.tree_expanded.insert(path.clone());
+        if self.tree_children.contains_key(&path) || self.tree_loading.contains(&path) {
+            self.rebuild_remote_rows();
+            cx.notify();
+            return;
+        }
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.error = Some("Remote agent is not connected".into());
+            cx.notify();
+            return;
+        };
+        self.tree_loading.insert(path.clone());
+        self.rebuild_remote_rows();
+        let generation = self.generation;
+        let response = WorkspaceBackend::herdr(self.root.clone(), process)
+            .list(WorkspacePath::Herdr(path.clone()), false);
+        cx.spawn(async move |this, cx| {
+            let result = response.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.tree_loading.remove(&path);
+                match result {
+                    Ok(listing) => {
+                        this.tree_children.insert(path, listing.entries);
+                        if listing.truncated {
+                            this.error = Some(
+                                "This folder has more than 500 entries; showing the first 500."
+                                    .into(),
+                            );
+                        }
+                    }
+                    Err(error) => this.error = Some(friendly_error(&error)),
+                }
+                this.rebuild_remote_rows();
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    /// Exactly the native tree's row shell and icon/label rules, with remote
+    /// Linux paths kept as Strings. Build rows separately to keep the GPUI
+    /// Windows render stack bounded.
+    fn render_remote_tree(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.tree_rows.is_empty() {
+            return div().flex_1().min_h_0().px_3().py_2()
+                .text_sm().text_color(ui::muted())
+                .child(if self.loading {
+                    "Loading remote folder…"
+                } else {
+                    "No entries in this folder"
+                })
+                .into_any_element();
+        }
+        div().relative().flex_1().min_h_0()
+            .child(
+                uniform_list(
+                    "remote-file-tree-rows",
+                    self.tree_rows.len(),
+                    cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                        let nodes = this.tree_rows.clone();
+                        nodes[range.clone()].iter().enumerate()
+                            .map(|(offset, node)| {
+                                this.render_remote_tree_row(node, range.start + offset, cx)
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .size_full()
+                .p_1p5()
+                .track_scroll(&self.tree_scroll),
+            )
+            .vertical_scrollbar(&self.tree_scroll)
+            .into_any_element()
+    }
+
+    fn render_remote_tree_row(
+        &self, node: &RemoteTreeRow, index: usize, cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let directory = node.entry.kind == "directory";
+        let regular = node.entry.kind == "file";
+        let opened = node.expanded;
+        let path = node.path.clone();
+        let name = node.entry.name.clone();
+        let insert_path = node.path.clone();
+        file_entry_row(
+            SharedString::from(format!("remote-tree-row-{index}")),
+            node.depth,
+            self.tree_selected_entry.as_ref()
+                .is_some_and(|(selected, _)| selected == &node.path),
+            &node.entry.name, directory, opened,
+            false, None, None, false,
+        )
+        .cursor_pointer()
+        .when(node.loading, |row| {
+            row.child(div().text_xs().text_color(ui::muted()).child("…"))
+        })
+        .child(
+            Button::new(format!("remote-tree-insert-{index}"))
+                .ghost().xsmall()
+                .icon(Icon::new(IconName::Copy))
+                .tooltip("Insert Linux path into agent prompt")
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(RemoteFilesEvent::InsertPath(insert_path.clone()));
+                })),
+        )
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.tree_selected_entry = Some((path.clone(), directory));
+            this.focus.focus(window, cx);
+            this.entry_name.update(cx, |input, cx| {
+                input.set_value(name.clone(), window, cx);
+            });
+            if directory {
+                this.tree_selected_directory = Some(path.clone());
+                this.toggle_remote_directory(path.clone(), cx);
+            } else if regular {
+                this.tree_selected_directory = remote_parent(&this.root, &path);
+                cx.emit(RemoteFilesEvent::OpenFile(path.clone()));
+            }
+            this.rebuild_remote_rows();
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
 
     fn open(
         &mut self, path: String, is_directory: bool,
@@ -727,9 +1405,11 @@ impl RemoteFilesView {
     }
 
     fn refresh_git(&mut self, cx: &mut Context<Self>) {
-        self.git_confirm_commit = None;
         self.git_confirm_create = None;
         self.git_confirm_switch = None;
+        self.refs.update(cx, |view, cx| {
+            view.mark_remote_switch(None, cx);
+        });
         self.git_generation = self.git_generation.wrapping_add(1);
         let generation = self.git_generation;
         self.git_loading = true;
@@ -753,6 +1433,17 @@ impl RemoteFilesView {
                 match result {
                     Ok(reply) => match parse_git_snapshot(&reply.data) {
                         Ok(snapshot) => {
+                            let refs = shared_remote_refs(&snapshot);
+                            let tree = shared_remote_worktree(&snapshot);
+                            let worktrees = snapshot.worktrees.clone();
+                            this.refs.update(cx, |view, cx| {
+                                view.set_remote_refs(Some(refs), worktrees, cx);
+                            });
+                            let writable = snapshot.writes_enabled
+                                && !snapshot.files_truncated && this.root != "/";
+                            this.changes.update(cx, |view, cx| {
+                                view.set_remote_tree(Some(tree), writable, cx);
+                            });
                             this.git = Some(snapshot);
                             this.git_error = None;
                         }
@@ -765,6 +1456,14 @@ impl RemoteFilesView {
                         this.git = None;
                         this.git_error = Some(friendly_error(&error.to_string()));
                     }
+                }
+                if this.git.is_none() {
+                    this.refs.update(cx, |view, cx| {
+                        view.set_remote_refs(None, Vec::new(), cx);
+                    });
+                    this.changes.update(cx, |view, cx| {
+                        view.set_remote_tree(None, false, cx);
+                    });
                 }
                 cx.notify();
             });
@@ -793,16 +1492,24 @@ impl RemoteFilesView {
     ) {
         if self.git_busy || self.git_loading { return; }
         self.git_busy = true;
+        self.changes.update(cx, |view, cx| {
+            view.set_remote_busy(true, cx);
+        });
         self.git_error = None;
         self.git_feedback = None;
-        self.git_confirm_commit = None;
         self.git_confirm_create = None;
         self.git_confirm_switch = None;
+        self.refs.update(cx, |view, cx| {
+            view.mark_remote_switch(None, cx);
+        });
         let response = cx.background_executor().spawn(operation);
         cx.spawn(async move |this, cx| {
             let result = response.await;
             let _ = this.update(cx, |this, cx| {
                 this.git_busy = false;
+                this.changes.update(cx, |view, cx| {
+                    view.set_remote_busy(false, cx);
+                });
                 match result {
                     Ok(_) => {
                         this.git_feedback = Some("Remote Git updated. Status refreshed.".into());
@@ -841,24 +1548,47 @@ impl RemoteFilesView {
         self.git_write_future(backend.git_file(action, request), cx);
     }
 
-    fn git_commit(&mut self, cx: &mut Context<Self>) {
-        let Some(snapshot) = self.git.as_ref().filter(|s| s.writes_enabled
-            && !s.files_truncated && s.files.iter()
-                .any(|entry| entry.staged().is_some()))
-        else { return; };
-        let summary = self.git_summary.read(cx).value().trim().to_owned();
-        if summary.is_empty() { return; }
-        if self.git_confirm_commit.as_deref() != Some(summary.as_str()) {
-            self.git_confirm_commit = Some(summary);
-            self.git_feedback = Some(
-                "Review the staged changes, then click Confirm commit.".into());
-            cx.notify();
-            return;
-        }
+    /// A confirmed commit from the shared ChangesView; retain Herdr guards.
+    /// A bulk operation checks a complete, untruncated, reviewed snapshot
+    /// on the bridge before staging only literal file paths.
+    fn git_bulk_stage(&mut self, stage: bool, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|snapshot| {
+            snapshot.writes_enabled && !snapshot.files_truncated
+                && !snapshot.files.is_empty() && snapshot.files.len() <= 80
+                && snapshot.index_token.is_some()
+        }) else { return; };
+        let expected_files: Vec<serde_json::Value> = snapshot.files.iter()
+            .map(|entry| json!({
+                "path": entry.path,
+                "index": entry.index.to_string(),
+                "worktree": entry.worktree.to_string(),
+            }))
+            .collect();
+        let command = json!({
+            "type": if stage { "herdr_git_stage_all" } else { "herdr_git_unstage_all" },
+            "root": self.root,
+            "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "expectedFiles": expected_files,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_commit_message(&mut self, summary: String, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|snapshot| {
+            snapshot.writes_enabled && !snapshot.files_truncated
+                && snapshot.files.iter().any(|entry| entry.staged().is_some())
+        }) else { return; };
+        if summary.trim().is_empty() || summary.len() > 120
+            || summary.chars().any(char::is_control)
+        { return; }
         let command = json!({
             "type": "herdr_git_commit", "root": self.root,
             "toplevel": snapshot.toplevel,
-            "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
             "expectedIndexToken": snapshot.index_token,
             "summary": summary,
         });
@@ -892,9 +1622,13 @@ impl RemoteFilesView {
             && s.head_oid.is_some() && s.current_branch.is_some())
         else { return; };
         if self.git_confirm_switch.as_deref() != Some(branch.as_str()) {
-            self.git_confirm_switch = Some(branch);
+            self.git_confirm_switch = Some(branch.clone());
+            self.refs.update(cx, |view, cx| {
+                view.mark_remote_switch(Some(branch), cx);
+            });
             self.git_feedback = Some(
-                "Branch switching requires a clean tree. Click Confirm switch.".into());
+                "Branch switching requires a clean tree. Click the same branch again to confirm."
+                    .into());
             cx.notify();
             return;
         }
@@ -933,131 +1667,6 @@ impl RemoteFilesView {
     /// GPUI element type before returning to the list builder.
     /// Both native and Herdr use the same checkbox row. The backend
     /// provides the operation and guards; there is no host-specific UI.
-    fn push_git_file_row(
-        &self, rows: &mut Vec<AnyElement>, snapshot: &RemoteGitSnapshot,
-        index: usize, entry: &RemoteGitFile, side: ChangeSide, badge: char,
-        writable: bool, cx: &mut Context<Self>,
-    ) {
-        let diff_target = format!(
-            "{}/{}", snapshot.toplevel.trim_end_matches('/'), entry.path
-        );
-        let action = match side {
-            ChangeSide::Unstaged => GitFileAction::Stage,
-            ChangeSide::Staged => GitFileAction::Unstage,
-        };
-        let stage_target = entry.path.clone();
-        let index_state = entry.index;
-        let worktree_state = entry.worktree;
-        let allowed = writable && entry.kind != EntryKind::Conflict
-            && !self.git_busy && !self.git_loading;
-        let id = format!("remote-change-{side:?}-{index}");
-        let weak = cx.entity().downgrade();
-        let control = div()
-            .id(SharedString::from(format!("{id}-check-wrap")))
-            .flex_none()
-            .on_click(|_, _, cx| cx.stop_propagation())
-            .child(Checkbox::new(SharedString::from(format!("{id}-check")))
-                .small()
-                .checked(side == ChangeSide::Staged)
-                .disabled(!allowed)
-                .on_click(move |_, _, cx| {
-                    let target = stage_target.clone();
-                    let _ = weak.update(cx, |this, cx| {
-                        this.git_file_action(action, target, index_state, worktree_state, cx);
-                    });
-                }));
-        rows.push(
-            change_row(
-                SharedString::from(id), &entry.path, badge, false, 0., control,
-            )
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(RemoteFilesEvent::OpenDiff(diff_target.clone()));
-                }))
-                .into_any_element(),
-        );
-    }
-
-    fn push_git_section_header(
-        &self, rows: &mut Vec<AnyElement>, side: ChangeSide, count: usize,
-    ) {
-        // Bulk writes must be a separate guarded server operation. Their
-        // controls remain visible but disabled until that protocol exists.
-        let checkbox = Checkbox::new(SharedString::from(
-            format!("remote-{side:?}-all-check"),
-        ))
-            .small()
-            .checked(side == ChangeSide::Staged)
-            .disabled(true);
-        let button = Button::new(format!("remote-{side:?}-all"))
-            .outline()
-            .xsmall()
-            .label(side.action_label())
-            .disabled(true)
-            .tooltip("Bulk Stage/Unstage is not supported by this Herdr bridge");
-        rows.push(section_header(side, count, checkbox, button).into_any_element());
-    }
-
-    fn push_git_commit_form(
-        &self, rows: &mut Vec<AnyElement>, snapshot: &RemoteGitSnapshot,
-        cx: &mut Context<Self>,
-    ) {
-        let staged_count = snapshot.files.iter()
-            .filter(|entry| entry.staged().is_some()).count();
-        let summary = self.git_summary.read(cx).value().trim().to_owned();
-        let confirmed = self.git_confirm_commit.as_deref() == Some(summary.as_str());
-        rows.push(
-            v_flex().px_3().py_3().gap_2().border_t_1()
-                .border_color(ui::border())
-                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD)
-                    .child(format!("Commit staged changes ({staged_count} visible)")))
-                .child(div().text_xs().text_color(ui::muted())
-                    .child("Only staged Git changes are committed; \
-unstaged files stay untouched."))
-                .child(Input::new(&self.git_summary).small())
-                .child(
-                    Button::new("remote-git-commit")
-                        .primary().small().w_full()
-                        .label(if confirmed { "Confirm commit" } else { "Review commit" })
-                        .disabled(self.git_busy || self.git_loading
-                            || summary.is_empty() || staged_count == 0
-                            || snapshot.files_truncated)
-                        .on_click(cx.listener(|this, _, _, cx| this.git_commit(cx))),
-                )
-                .when(snapshot.files_truncated, |v| v.child(
-                    div().text_xs().text_color(ui::warning())
-                        .child("Refresh in a smaller worktree before committing."),
-                ))
-                .into_any_element(),
-        );
-    }
-
-    fn push_git_branch_row(
-        &self, rows: &mut Vec<AnyElement>, branch: &RemoteGitBranch,
-        index: usize, writable: bool, cx: &mut Context<Self>,
-    ) {
-        let name = branch.name.clone();
-        let confirmed = self.git_confirm_switch.as_deref() == Some(name.as_str());
-        let action = (writable && branch.local && !branch.current).then(|| {
-            Button::new(format!("remote-git-switch-{index}"))
-                .ghost()
-                .xsmall()
-                .label(if confirmed { "Confirm switch" } else { "Switch" })
-                .disabled(self.git_busy || self.git_loading)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.git_switch_branch(name.clone(), cx);
-                }))
-                .into_any_element()
-        });
-        rows.push(
-            branch_row(
-                SharedString::from(format!("remote-git-branch-{index}")),
-                BranchDisplay::from_remote(&branch.name, branch.current),
-                action,
-            )
-            .into_any_element(),
-        );
-    }
-
     fn push_git_create_branch_form(
         &self, rows: &mut Vec<AnyElement>, snapshot: &RemoteGitSnapshot,
         cx: &mut Context<Self>,
@@ -1089,162 +1698,12 @@ unstaged files stay untouched."))
 
     /// The list owns only type-erased elements, avoiding a huge combined
     /// GPUI render expression and keeping 5C/5D behavior identical.
-    fn render_git_list(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_branch_create(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut rows: Vec<AnyElement> = Vec::new();
-        if let Some(snapshot) = &self.git {
-            let writable = snapshot.writes_enabled && self.root != "/";
-            rows.push(
-                div().px_3().py_2().text_xs().text_color(ui::muted())
-                    .child(snapshot.toplevel.clone()).into_any_element(),
-            );
-            if self.tab == RemoteTab::Changes {
-                if snapshot.files.is_empty() {
-                    rows.push(div().px_3().py_3().text_sm().text_color(ui::muted())
-                        .child("Working tree clean").into_any_element());
-                }
-                for side in [ChangeSide::Unstaged, ChangeSide::Staged] {
-                    let entries = side_entries(&snapshot.files, side);
-                    if entries.is_empty() {
-                        continue;
-                    }
-                    self.push_git_section_header(&mut rows, side, entries.len());
-                    for (index, badge) in entries {
-                        if let Some(entry) = snapshot.files.get(index) {
-                            self.push_git_file_row(
-                                &mut rows, snapshot, index, entry, side, badge, writable, cx,
-                            );
-                        }
-                    }
-                }
-                if snapshot.files_truncated {
-                    rows.push(div().px_3().py_2().text_xs()
-                        .text_color(ui::warning())
-                        .child("Showing first 200 changed files").into_any_element());
-                }
-                if writable {
-                    self.push_git_commit_form(&mut rows, snapshot, cx);
-                }
-            } else if self.tab == RemoteTab::Branches {
-                let query = self.git_filter.read(cx).value().trim().to_owned();
-                let mut matched = 0usize;
-                // The 5D snapshot already distinguishes local and remote
-                // branches. Keep their original indices for guarded Switch.
-                for section in [
-                    RefSection::Branches, RefSection::Remotes,
-                    RefSection::Tags, RefSection::Stashes,
-                ] {
-                    let visible: Vec<usize> = match section {
-                        RefSection::Branches | RefSection::Remotes => snapshot.branches.iter()
-                            .enumerate()
-                            .filter(|(_, branch)| {
-                                branch_matches(section, branch.local, &branch.name, &query)
-                            })
-                            .map(|(index, _)| index)
-                            .collect(),
-                        RefSection::Tags => snapshot.tags.iter()
-                            .enumerate()
-                            .filter(|(_, tag)| matches_filter(&query, tag))
-                            .map(|(index, _)| index)
-                            .collect(),
-                        RefSection::Stashes => snapshot.stashes.iter()
-                            .enumerate()
-                            .filter(|(_, stash)| {
-                                matches_filter(&query, &stash.name)
-                                    || matches_filter(&query, &stash.message)
-                            })
-                            .map(|(index, _)| index)
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    if visible.is_empty() {
-                        continue;
-                    }
-                    matched += visible.len();
-                    let collapsed = self.git_collapsed.contains(&section);
-                    rows.push(
-                        ref_section_header(section, visible.len(), collapsed)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.git_collapsed.remove(&section) {
-                                    this.git_collapsed.insert(section);
-                                }
-                                cx.notify();
-                            }))
-                            .into_any_element(),
-                    );
-                    if !collapsed {
-                        for index in visible {
-                            match section {
-                                RefSection::Branches | RefSection::Remotes => {
-                                    if let Some(branch) = snapshot.branches.get(index) {
-                                        self.push_git_branch_row(
-                                            &mut rows, branch, index, writable, cx,
-                                        );
-                                    }
-                                }
-                                RefSection::Tags => {
-                                    if let Some(tag) = snapshot.tags.get(index) {
-                                        rows.push(ref_row(
-                                            SharedString::from(format!("remote-ref-tag-{index}")),
-                                            IconName::Tag,
-                                            ui::muted(),
-                                            tag.clone(),
-                                            ui::fg(),
-                                            None,
-                                        ).into_any_element());
-                                    }
-                                }
-                                RefSection::Stashes => {
-                                    if let Some(stash) = snapshot.stashes.get(index) {
-                                        rows.push(ref_row(
-                                            SharedString::from(format!("remote-ref-stash-{index}")),
-                                            IconName::Archive,
-                                            ui::muted(),
-                                            stash.message.clone(),
-                                            ui::fg(),
-                                            Some(div()
-                                                .font_family(ui::MONO)
-                                                .text_size(px(10.5))
-                                                .text_color(ui::faint())
-                                                .child(stash.name.clone())
-                                                .into_any_element()),
-                                        ).into_any_element());
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                if matched == 0 {
-                    rows.push(
-                        div().px_3().py_3().text_sm().text_color(ui::muted())
-                            .child(if query.is_empty() {
-                                "No Git references"
-                            } else {
-                                "No refs match in the loaded snapshot"
-                            })
-                            .into_any_element(),
-                    );
-                }
-                if snapshot.branches_truncated {
-                    rows.push(div().px_3().py_2().text_xs()
-                        .text_color(ui::warning())
-                        .child("Showing first 120 branches").into_any_element());
-                }
-                if snapshot.tags_truncated {
-                    rows.push(div().px_3().py_2().text_xs()
-                        .text_color(ui::warning())
-                        .child("Showing first 120 tags").into_any_element());
-                }
-                if snapshot.stashes_truncated {
-                    rows.push(div().px_3().py_2().text_xs()
-                        .text_color(ui::warning())
-                        .child("Showing first 120 stashes").into_any_element());
-                }
-                if writable {
-                    self.push_git_create_branch_form(&mut rows, snapshot, cx);
-                }
-            }
+        if let Some(snapshot) = self.git.as_ref().filter(|snapshot| {
+            snapshot.writes_enabled && self.root != "/"
+        }) {
+            self.push_git_create_branch_form(&mut rows, snapshot, cx);
         }
         v_flex().children(rows).into_any_element()
     }
@@ -1253,11 +1712,9 @@ unstaged files stay untouched."))
     /// 5D previously built every interactive row and both editors inside
     /// this one render frame, overflowing the Windows UI thread stack.
     fn render_git_panel(&self, cx: &mut Context<Self>) -> Div {
-        v_flex()
-            .size_full()
-            .min_h_0()
+        panel_shell()
             .child(
-                h_flex().h(px(40.)).px_2().gap_1().flex_none()
+                panel_header()
                     .child(Icon::new(IconName::GitBranch).small().text_color(ui::petal()))
                     .child(div().flex_1().min_w_0().truncate().text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
@@ -1279,9 +1736,6 @@ unstaged files stay untouched."))
                     ),
             )
             .child(self.render_tabs(cx))
-            .when(self.tab == RemoteTab::Branches, |panel| {
-                panel.child(filter_field(&self.git_filter, self.git_loading || self.git_busy))
-            })
             .when(self.git_loading, |panel| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child("Reading status from remote Git…"),
@@ -1298,11 +1752,16 @@ unstaged files stay untouched."))
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child(feedback),
             ))
-            .child(
-                div().id("remote-git-scroll").flex_1().min_h_0()
-                    .overflow_y_scroll()
-                    .child(self.render_git_list(cx)),
-            )
+            .when(self.tab == RemoteTab::Changes, |panel| {
+                panel.child(
+                    div().flex_1().min_h_0().child(self.changes.clone()),
+                )
+            })
+            .when(self.tab == RemoteTab::Branches, |panel| {
+                panel
+                    .child(div().flex_1().min_h_0().child(self.refs.clone()))
+                    .child(self.render_branch_create(cx))
+            })
             .child(
                 div().h(px(26.)).flex_none().border_t_1()
                     .border_color(ui::border()).px_3().text_size(px(10.))
@@ -1339,7 +1798,7 @@ impl Render for RemoteFilesView {
         }
         let parent = remote_parent(&self.root, &self.current);
         let central = self.pane_path.is_some();
-        let mut content = v_flex().gap(px(1.));
+        let mut content = v_flex().gap(px(1.)).flex_1().min_h_0();
         if let Some(preview) = &self.preview {
             let copied = preview.path.clone();
             let rows: Vec<String> = preview.content.lines().take(600).map(str::to_owned).collect();
@@ -1488,54 +1947,24 @@ impl Render for RemoteFilesView {
                         .child(div().text_xs().child("..")),
                 );
             }
-            for (index, entry) in self.entries.iter().enumerate() {
-                let is_dir = entry.kind == "directory";
-                let is_file = entry.kind == "file";
-                let path = remote_child(&self.current, &entry.name);
-                let click_path = path.clone();
-                let insert_path = path;
-                content = content.child(
-                    h_flex()
-                        .id(("remote-file-row", index))
-                        .h(px(26.)).px_2().gap(px(5.))
-                        .cursor_pointer()
-                        .hover(|row| row.bg(ui::surface_hover()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if is_dir {
-                                this.load_directory(click_path.clone(), cx);
-                            } else if is_file {
-                                cx.emit(RemoteFilesEvent::OpenFile(click_path.clone()));
-                            }
-                        }))
-                        .child(
-                            Icon::new(if is_dir { IconName::Folder }
-                                      else { IconName::File })
-                                .small().text_color(if is_dir { ui::champagne() } else { ui::muted() }),
-                        )
-                        .child(div().flex_1().min_w_0().truncate()
-                            .text_xs().child(entry.name.clone()))
-                        .child(
-                            Button::new(("remote-file-insert", index))
-                                .ghost().xsmall()
-                                .icon(Icon::new(IconName::Copy))
-                                .tooltip("Insert Linux path into agent prompt")
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.stop_propagation();
-                                    cx.emit(RemoteFilesEvent::InsertPath(insert_path.clone()));
-                                })),
-                        ),
-                );
-            }
+            content = content.child(self.render_remote_tree(cx));
         }
 
-        v_flex()
-            .key_context(CONTEXT)
+        panel_shell()
+            .key_context(if central { CONTEXT } else { TREE_CONTEXT })
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::save_shortcut))
-            .size_full()
-            .min_h_0()
+            .on_action(cx.listener(Self::tree_up))
+            .on_action(cx.listener(Self::tree_down))
+            .on_action(cx.listener(Self::tree_left))
+            .on_action(cx.listener(Self::tree_right))
+            .on_action(cx.listener(Self::tree_open))
+            .on_action(cx.listener(Self::tree_rename))
+            .on_action(cx.listener(Self::tree_copy))
+            .on_action(cx.listener(Self::tree_cut))
+            .on_action(cx.listener(Self::tree_paste))
             .child(
-                h_flex().h(px(40.)).px_2().gap_1().flex_none()
+                panel_header()
                     .child(Icon::new(if central { IconName::FileCode }
                         else { IconName::Layers })
                         .small().text_color(ui::petal()))
@@ -1581,8 +2010,97 @@ impl Render for RemoteFilesView {
             )
             .when(!central, |panel| panel.child(self.render_tabs(cx)))
             .when(!central, |panel| panel.child(
-                div().px_3().pb_2().text_xs().text_color(ui::muted())
-                    .child(self.current.clone()),
+                h_flex().px_2().pb_1().gap_1()
+                    .child(Button::new("remote-tree-select-root")
+                        .ghost().xsmall().label("Root")
+                        .tooltip("Create items in the workspace root")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.tree_selected_directory = None;
+                            this.tree_selected_entry = None;
+                            cx.notify();
+                        })))
+                    .child(div().flex_1().min_w_0()
+                        .child(Input::new(&self.create_name).small()))
+                    .child(Button::new("remote-create-file")
+                        .ghost().xsmall()
+                        .icon(Icon::new(IconName::FilePlus))
+                        .tooltip("New file in selected folder (or workspace root)")
+                        .disabled(self.creating || self.entry_busy || self.root == "/")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.create_remote_entry(false, window, cx)
+                        })))
+                    .child(Button::new("remote-create-folder")
+                        .ghost().xsmall()
+                        .icon(Icon::new(IconName::FolderPlus))
+                        .tooltip("New folder in selected folder (or workspace root)")
+                        .disabled(self.creating || self.entry_busy || self.root == "/")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.create_remote_entry(true, window, cx)
+                        }))),
+            ))
+            .when(!central, |panel| panel.child(
+                v_flex().px_2().pb_1().gap_1()
+                    .child(
+                        h_flex().gap_1()
+                            .child(div().flex_1().min_w_0()
+                                .child(Input::new(&self.entry_name).small()))
+                            .child(Button::new("remote-entry-rename")
+                                .ghost().xsmall()
+                                .icon(Icon::new(IconName::Pencil))
+                                .tooltip("Rename selected remote file or directory")
+                                .disabled(self.entry_busy
+                                    || self.tree_selected_entry.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.rename_remote_entry(cx);
+                                })))
+                            .child(Button::new("remote-entry-duplicate")
+                                .ghost().xsmall()
+                                .icon(Icon::new(IconName::CopyPlus))
+                                .tooltip("Duplicate selected remote file (up to 16 MiB)")
+                                .disabled(self.entry_busy
+                                    || !self.tree_selected_entry.as_ref()
+                                        .is_some_and(|(_, directory)| !directory))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.run_remote_entry(
+                                        WorkspaceEntryAction::Duplicate, cx,
+                                    );
+                                }))),
+                    )
+                    .child(
+                        h_flex().gap_1()
+                            .child(Button::new("remote-entry-cut")
+                                .ghost().xsmall()
+                                .icon(Icon::new(IconName::Scissors))
+                                .tooltip("Cut selected remote file or directory")
+                                .disabled(self.entry_busy
+                                    || self.tree_selected_entry.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.clipboard_remote_entry(true, cx)
+                                })))
+                            .child(Button::new("remote-entry-copy")
+                                .ghost().xsmall()
+                                .icon(Icon::new(IconName::Copy))
+                                .tooltip("Copy selected remote file")
+                                .disabled(self.entry_busy
+                                    || !self.tree_selected_entry.as_ref()
+                                        .is_some_and(|(_, directory)| !directory))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.clipboard_remote_entry(false, cx)
+                                })))
+                            .child(Button::new("remote-entry-paste")
+                                .ghost().xsmall()
+                                .icon(Icon::new(IconName::ClipboardPaste))
+                                .tooltip("Paste into selected folder, or workspace root")
+                                .disabled(self.entry_busy || self.file_clipboard.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.paste_remote_entry(cx)
+                                })))
+                            .child(div().flex_1())
+                            .child(div().min_w_0().truncate().text_xs()
+                                .text_color(ui::muted())
+                                .child(self.tree_selected_directory.as_ref()
+                                    .unwrap_or(&self.root).clone())),
+                    ),
             ))
             .when(self.loading, |panel| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
@@ -1595,7 +2113,7 @@ impl Render for RemoteFilesView {
             .child(
                 div()
                     .id("remote-file-tree-scroll")
-                    .flex_1().min_h_0().overflow_y_scroll()
+                    .flex_1().min_h_0().overflow_hidden()
                     .child(content),
             )
             .when(self.truncated, |panel| panel.child(

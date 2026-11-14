@@ -401,6 +401,127 @@ function gitInit(root) {
   return git;
 }
 
+test("5F creates a file or folder only inside the selected Herdr root", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-create-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-create-outside-"));
+  try {
+    const h = harness(root);
+    const create = async (id, parent, name, kind) => {
+      rpcInput(h, {
+        type: "herdr_fs_create", id, root, path: parent, name, kind,
+      });
+      return await fsReply(h, id);
+    };
+    const directory = await create("create-dir", root, "src", "directory");
+    assert.equal(directory.success, true, directory.error);
+    assert.equal(fs.statSync(path.join(root, "src")).isDirectory(), true);
+    const file = await create("create-file", path.join(root, "src"), "main.rs", "file");
+    assert.equal(file.success, true, file.error);
+    assert.equal(fs.readFileSync(path.join(root, "src/main.rs"), "utf8"), "");
+    assert.equal((await create("create-duplicate",
+      path.join(root, "src"), "main.rs", "file")).success, false);
+    assert.equal((await create("create-traverse",
+      root, "../outside", "directory")).success, false);
+    assert.equal((await create("create-git", root, ".git", "directory")).success, false);
+    fs.mkdirSync(path.join(root, ".git"));
+    fs.writeFileSync(path.join(root, ".git", "config"), "[core]\\n");
+    assert.equal((await create("create-in-git", path.join(root, ".git"),
+      "unsafe", "file")).success, false);
+    rpcInput(h, {
+      type: "herdr_fs_write", id: "write-git-config", root,
+      path: path.join(root, ".git", "config"), content: "tampered",
+      expectedRevision: "a".repeat(64),
+    });
+    assert.equal((await fsReply(h, "write-git-config")).success, false);
+    assert.equal(fs.existsSync(path.join(root, ".git", "unsafe")), false);
+
+    fs.symlinkSync(outside, path.join(root, "external"), "dir");
+    assert.equal((await create("create-symlink",
+      path.join(root, "external"), "escape", "file")).success, false);
+    assert.equal(fs.existsSync(path.join(outside, "escape")), false);
+    assert.equal(h.childWrites.length, 1, "no additional Pi agent RPC operations");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("5F guarded remote file entry actions never overwrite or escape", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-entry-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-entry-outside-"));
+  try {
+    fs.mkdirSync(path.join(root, "src"));
+    fs.mkdirSync(path.join(root, "dest"));
+    fs.writeFileSync(path.join(root, "src", "main.rs"), "original\n");
+    fs.writeFileSync(path.join(root, "dest", "main.rs"), "existing\n");
+    fs.writeFileSync(path.join(outside, "secret"), "private");
+    fs.symlinkSync(outside, path.join(root, "external"), "dir");
+    const h = harness(root);
+    const act = async (id, operation, source, props = {}) => {
+      rpcInput(h, {
+        type: "herdr_fs_entry", id, root, path: source,
+        operation, ...props,
+      });
+      return fsReply(h, id);
+    };
+    let result = await act("entry-rename", "rename",
+      path.join(root, "src", "main.rs"), { name: "renamed.rs" });
+    assert.equal(result.success, true, result.error);
+    assert.equal(fs.existsSync(path.join(root, "src", "main.rs")), false);
+    assert.equal(fs.readFileSync(path.join(root, "src", "renamed.rs"), "utf8"), "original\n");
+    result = await act("entry-duplicate", "duplicate",
+      path.join(root, "src", "renamed.rs"));
+    assert.equal(result.success, true, result.error);
+    assert.equal(fs.readFileSync(path.join(root, "src", "renamed copy.rs"), "utf8"),
+      "original\n");
+    result = await act("entry-copy", "copy",
+      path.join(root, "src", "renamed.rs"), {
+        destinationDir: path.join(root, "dest"),
+      });
+    assert.equal(result.success, true, result.error);
+    assert.equal(fs.readFileSync(path.join(root, "dest", "renamed.rs"), "utf8"),
+      "original\n");
+    const conflict = await act("entry-conflict", "rename",
+      path.join(root, "src", "renamed.rs"), { name: "renamed copy.rs" });
+    assert.equal(conflict.success, false, "rename must not overwrite");
+    result = await act("entry-move", "move",
+      path.join(root, "src", "renamed.rs"), {
+        destinationDir: path.join(root, "dest"),
+      });
+    assert.equal(result.success, false, "move must refuse a duplicate name");
+    assert.equal(fs.readFileSync(path.join(root, "dest", "renamed.rs"), "utf8"),
+      "original\n");
+    result = await act("entry-folder", "rename",
+      path.join(root, "src"), { name: "source" });
+    assert.equal(result.success, true, result.error);
+    assert.equal(fs.existsSync(path.join(root, "source", "renamed copy.rs")), true);
+    const escape = await act("entry-escape", "copy",
+      path.join(root, "source", "renamed copy.rs"), { destinationDir: outside });
+    assert.equal(escape.success, false);
+    const symlink = await act("entry-symlink", "move",
+      path.join(root, "source", "renamed copy.rs"), {
+        destinationDir: path.join(root, "external"),
+      });
+    assert.equal(symlink.success, false);
+    assert.equal(fs.existsSync(path.join(outside, "renamed copy.rs")), false);
+    assert.equal((await act("entry-unsafe", "rename",
+      path.join(root, "source", "renamed copy.rs"), { name: "../outside" })).success,
+      false);
+    assert.equal((await act("entry-root", "rename", root, { name: "evil" })).success,
+      false);
+    assert.equal(h.childWrites.length, 1, "only initial Pi startup RPC was forwarded");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test("5C reports remote Git changes and branches without sending Pi commands", {
   skip: process.platform === "win32",
 }, async () => {
@@ -426,6 +547,13 @@ test("5C reports remote Git changes and branches without sending Pi commands", {
       x.index === "?" && x.worktree === "?"));
     assert.ok(result.data.branches.some(x => x.name === "feature/test"));
     assert.ok(result.data.branches.some(x => x.current));
+    assert.equal(typeof result.data.refDetails, "string");
+    assert.ok(result.data.refDetails.includes("refs/heads/feature/test"));
+    assert.equal(result.data.refDetailsTruncated, false);
+    assert.equal(typeof result.data.worktreeData, "string");
+    assert.ok(result.data.worktreeData.includes("worktree " + root));
+    assert.equal(result.data.worktreesTruncated, false);
+    assert.equal(typeof result.data.submoduleData, "string");
     assert.equal(h.childWrites.length, before);
     assert.equal(h.calls.length, 1, "no additional agents or terminals");
   } finally {
@@ -633,6 +761,52 @@ async function gitWrite(h, root, snapshot, type, id, props = {}) {
   });
   return fsReply(h, id);
 }
+
+test("5F bulk Git stage and unstage are bounded and revalidate status", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-bulk-git-"));
+  try {
+    gitInit(root);
+    fs.writeFileSync(path.join(root, "tracked.txt"), "changed one\\n");
+    fs.writeFileSync(path.join(root, "second.txt"), "new file\\n");
+    const h = harness(root);
+    let snap = await gitSnapshot(h, root, "bulk-s1");
+    const original = snap.files.map(({ path, index, worktree }) => ({
+      path, index, worktree,
+    }));
+    const success = await gitWrite(h, root, snap, "herdr_git_stage_all", "bulk-stage", {
+      expectedFiles: original,
+    });
+    assert.equal(success.success, true, success.error);
+    assert.equal((await gitWrite(h, root, snap, "herdr_git_unstage_all", "bulk-stale", {
+      expectedFiles: original,
+    })).success, false, "index guard must block a stale request");
+    snap = await gitSnapshot(h, root, "bulk-s2");
+    assert.ok(snap.files.every((f) => f.index !== " " && f.index !== "?"));
+    const reviewed = snap.files.map(({ path, index, worktree }) => ({
+      path, index, worktree,
+    }));
+    const reverted = await gitWrite(h, root, snap, "herdr_git_unstage_all",
+      "bulk-unstage", { expectedFiles: reviewed });
+    assert.equal(reverted.success, true, reverted.error);
+    assert.equal(fs.readFileSync(path.join(root, "tracked.txt"), "utf8"), "changed one\\n");
+    assert.equal(fs.readFileSync(path.join(root, "second.txt"), "utf8"), "new file\\n");
+    snap = await gitSnapshot(h, root, "bulk-s3");
+    const changed = snap.files.map(({ path, index, worktree }) => ({
+      path, index, worktree,
+    }));
+    changed[0].index = "A"; // tamper with the file the user reviewed
+    const refused = await gitWrite(h, root, snap, "herdr_git_stage_all",
+      "bulk-tampered", { expectedFiles: changed });
+    assert.equal(refused.success, false);
+    assert.match(refused.error, /Git file status changed/);
+    assert.equal(h.childWrites.length, 1, "all requests remain inside the private bridge");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("5D stages and unstages exactly one selected file without modifying worktree", {
   skip: process.platform === "win32",
