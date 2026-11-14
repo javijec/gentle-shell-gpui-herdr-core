@@ -15,15 +15,16 @@ use gpui_kit::*;
 use serde_json::json;
 
 use crate::features::session::SessionView;
-use crate::features::git::{RefEntry, RefsSnapshot};
+use crate::features::git::{RefEntry, RefsSnapshot, WorkTree};
 use gentle_core::git::refs::{HeadInfo, RefKind, Stash};
 use super::refs::{RefsEvent, RefsView};
+use super::changes::{ChangesEvent, ChangesView};
 use super::backend::{
     GitFileAction, GitFileMutation, HerdrGitGuard, WorkspaceBackend,
     WorkspaceDirEntry as RemoteEntry, WorkspacePath,
     WorkspaceText as RemotePreview,
 };
-use gentle_core::git::status::{EntryKind, StatusEntry as RemoteGitFile};
+use gentle_core::git::status::{BranchStatus, EntryKind, StatusEntry as RemoteGitFile};
 use super::changes_ui::{ChangeSide, change_row, section_header, side_entries};
 use super::dock_ui::{file_row_shell, panel_header, panel_shell};
 use super::remote_tree::visible_rows;
@@ -171,6 +172,17 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
     })
 }
 
+fn shared_remote_worktree(source: &RemoteGitSnapshot) -> WorkTree {
+    WorkTree {
+        branch: BranchStatus {
+            oid: source.head_oid.clone(),
+            head: source.current_branch.clone(),
+            ..BranchStatus::default()
+        },
+        entries: source.files.clone(),
+    }
+}
+
 /// Project a bounded Herdr Git read into the same native RefsSnapshot
 /// consumed by RefsView. Linux paths never become native PathBuf objects.
 fn shared_remote_refs(source: &RemoteGitSnapshot) -> RefsSnapshot {
@@ -306,6 +318,8 @@ pub struct RemoteFilesView {
     git_branch_name: Entity<InputState>,
     refs: Entity<RefsView>,
     _refs_events: Subscription,
+    changes: Entity<ChangesView>,
+    _changes_events: Subscription,
     git_confirm_commit: Option<String>,
     git_confirm_create: Option<String>,
     git_confirm_switch: Option<String>,
@@ -395,6 +409,29 @@ impl RemoteFilesView {
                 this.git_switch_branch(branch.clone(), cx);
             }
         });
+        let changes = cx.new(|cx| ChangesView::new_remote(window, cx));
+        let changes_events = cx.subscribe(&changes, |this, _, event: &ChangesEvent, cx| {
+            match event {
+                ChangesEvent::RemoteStage { path, index, worktree, stage } => {
+                    this.git_file_action(
+                        if *stage { GitFileAction::Stage } else { GitFileAction::Unstage },
+                        path.clone(), *index, *worktree, cx,
+                    );
+                }
+                ChangesEvent::RemoteOpenDiff(path) => {
+                    if let Some(snapshot) = this.git.as_ref() {
+                        let absolute = format!(
+                            "{}/{}", snapshot.toplevel.trim_end_matches('/'), path
+                        );
+                        cx.emit(RemoteFilesEvent::OpenDiff(absolute));
+                    }
+                }
+                ChangesEvent::RemoteCommit(summary) => {
+                    this.git_commit_message(summary.clone(), cx);
+                }
+                _ => {}
+            }
+        });
         let git_events = vec![
             cx.subscribe(&git_summary, |_, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event { cx.notify(); }
@@ -420,6 +457,8 @@ impl RemoteFilesView {
             git_branch_name,
             refs,
             _refs_events: refs_events,
+            changes,
+            _changes_events: changes_events,
             git_confirm_commit: None,
             git_confirm_create: None,
             git_confirm_switch: None,
@@ -928,8 +967,12 @@ impl RemoteFilesView {
                     Ok(reply) => match parse_git_snapshot(&reply.data) {
                         Ok(snapshot) => {
                             let refs = shared_remote_refs(&snapshot);
+                            let tree = shared_remote_worktree(&snapshot);
                             this.refs.update(cx, |view, cx| {
                                 view.set_remote_refs(Some(refs), cx);
+                            });
+                            this.changes.update(cx, |view, cx| {
+                                view.set_remote_tree(Some(tree), cx);
                             });
                             this.git = Some(snapshot);
                             this.git_error = None;
@@ -947,6 +990,9 @@ impl RemoteFilesView {
                 if this.git.is_none() {
                     this.refs.update(cx, |view, cx| {
                         view.set_remote_refs(None, cx);
+                    });
+                    this.changes.update(cx, |view, cx| {
+                        view.set_remote_tree(None, cx);
                     });
                 }
                 cx.notify();
@@ -1022,6 +1068,24 @@ impl RemoteFilesView {
             }),
         };
         self.git_write_future(backend.git_file(action, request), cx);
+    }
+
+    /// A confirmed commit from the shared ChangesView; retain Herdr guards.
+    fn git_commit_message(&mut self, summary: String, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|snapshot| {
+            snapshot.writes_enabled && !snapshot.files_truncated
+                && snapshot.files.iter().any(|entry| entry.staged().is_some())
+        }) else { return; };
+        if summary.trim().is_empty() || summary.len() > 4096 { return; }
+        let command = json!({
+            "type": "herdr_git_commit", "root": self.root,
+            "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "summary": summary,
+        });
+        self.git_write(command, cx);
     }
 
     fn git_commit(&mut self, cx: &mut Context<Self>) {
