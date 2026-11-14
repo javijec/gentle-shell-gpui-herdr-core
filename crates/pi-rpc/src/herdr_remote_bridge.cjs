@@ -959,7 +959,8 @@ function inputLine() {
         try { request = JSON.parse(requestLine.toString("utf8")); } catch {}
         if (request && (request.type === "herdr_fs_list" ||
                         request.type === "herdr_fs_read" ||
-                        request.type === "herdr_fs_write")) {
+                        request.type === "herdr_fs_write" ||
+                        request.type === "herdr_fs_create")) {
           void remoteFilesRequest(request);
         } else if (request && (request.type === "herdr_git_snapshot" ||
                                request.type === "herdr_git_diff" ||
