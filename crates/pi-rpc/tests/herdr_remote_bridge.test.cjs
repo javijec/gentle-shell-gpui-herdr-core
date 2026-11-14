@@ -392,6 +392,8 @@ function gitInit(root) {
     assert.equal(result.status, 0, result.stderr);
   };
   git("init", "-q");
+  git("config", "user.name", "Herdr");
+  git("config", "user.email", "herdr@example.invalid");
   fs.writeFileSync(path.join(root, "tracked.txt"), "first\n");
   git("add", "--", "tracked.txt");
   git("-c", "user.name=Herdr", "-c", "user.email=herdr@example.invalid",
@@ -576,6 +578,7 @@ async function gitWrite(h, root, snapshot, type, id, props = {}) {
   rpcInput(h, {
     type, id, root, toplevel: snapshot.toplevel,
     expectedHead: snapshot.headOid, expectedBranch: snapshot.currentBranch,
+    expectedIndexToken: snapshot.indexToken,
     ...props,
   });
   return fsReply(h, id);
@@ -594,6 +597,8 @@ test("5D stages and unstages exactly one selected file without modifying worktre
     const h = harness(root);
     let snapshot = await gitSnapshot(h, root, "write-s1");
     assert.match(snapshot.headOid, /^[a-f0-9]{40}$/);
+    assert.match(snapshot.indexToken, /^[a-f0-9]{64}$/);
+    assert.equal(snapshot.writesEnabled, true);
     const first = snapshot.files.find(x => x.path === "tracked.txt");
     assert.equal((await gitWrite(h, root, snapshot, "herdr_git_stage", "write-a", {
       path: file, expectedIndex: first.index, expectedWorktree: first.worktree,
@@ -758,5 +763,30 @@ test("5D denies stale status, symlinks, unselected paths and invalid refs", {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("5D refuses a commit when the staged index changed since the snapshot", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const cp = require("node:child_process");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-index-"));
+  try {
+    gitInit(root);
+    const h = harness(root);
+    fs.writeFileSync(path.join(root, "tracked.txt"), "first staged\n");
+    cp.execFileSync("git", ["-C", root, "add", "tracked.txt"]);
+    const old = await gitSnapshot(h, root, "index-s1");
+    fs.writeFileSync(path.join(root, "tracked.txt"), "second staged\n");
+    cp.execFileSync("git", ["-C", root, "add", "tracked.txt"]);
+    const stale = await gitWrite(h, root, old, "herdr_git_commit",
+      "index-stale", { summary: "must not commit" });
+    assert.equal(stale.success, false);
+    assert.match(stale.error, /staged Git index changed/);
+    assert.equal(cp.execFileSync("git", ["-C", root,
+      "log", "-1", "--format=%s"]).toString().trim(), "Initial");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
