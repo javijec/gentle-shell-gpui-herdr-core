@@ -52,7 +52,7 @@ se detiene el proceso Git al detectar un registro adicional al límite.
 Así, un repositorio con cientos de miles de entradas no llena el buffer
 de salida de Node: Changes y Branches muestran resultados parciales y
 marcan el truncamiento en la interfaz. Cada registro se limita a 4096 bytes,
-con timeout de 8 segundos. El diff consulta el estado únicamente de la
+con timeout de 15 segundos para listados. El diff consulta el estado únicamente de la
 ruta seleccionada mediante un pathspec literal, sin leer nuevamente la
 salida de estado de todo el repositorio.
 
