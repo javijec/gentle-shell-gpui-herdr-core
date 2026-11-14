@@ -314,6 +314,146 @@ async function remoteCreate(req) {
   return { path: destination, kind: req.kind };
 }
 
+// File operations are deliberately separate from the Pi agent and Git.
+// No replacement, shell, symlink traversal, or mutations of .git metadata.
+function validEntryName(name) {
+  return typeof name === "string" && name.length > 0 && name.length <= 255 &&
+    name !== "." && name !== ".." && name !== ".git" &&
+    !name.startsWith(".herdr-save-") && !name.includes("/") &&
+    !name.includes("\\") && !/[\x00-\x1f\x7f]/.test(name);
+}
+
+function protectedGitPath(root, selected) {
+  const parts = path.posix.relative(root, selected).split("/");
+  return parts.includes(".git") || parts.includes(".herdr-save-");
+}
+
+async function exclusiveFileCopy(source, destination) {
+  const handle = await fs.open(source,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  let created = false;
+  try {
+    const st = await handle.stat();
+    if (!st.isFile() || st.nlink !== 1 || st.size > 16 * 1024 * 1024 ||
+        (typeof process.getuid === "function" && st.uid !== process.getuid())) {
+      throw new Error("Only owned, unlinked regular files up to 16 MiB can be duplicated");
+    }
+    const output = await fs.open(destination,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT |
+      fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    created = true;
+    try {
+      const buffer = Buffer.alloc(64 * 1024);
+      let position = 0;
+      while (position < st.size) {
+        const { bytesRead } = await handle.read(buffer, 0,
+          Math.min(buffer.length, st.size - position), position);
+        if (!bytesRead) throw new Error("Source changed during copy");
+        let done = 0;
+        while (done < bytesRead) {
+          const written = await output.write(buffer, done, bytesRead - done);
+          if (!written.bytesWritten) throw new Error("Incomplete file copy");
+          done += written.bytesWritten;
+        }
+        position += bytesRead;
+      }
+    } catch (error) {
+      await output.close();
+      throw error;
+    }
+    await output.close();
+    created = false;
+  } finally {
+    await handle.close();
+    if (created) {
+      try { await fs.unlink(destination); } catch {}
+    }
+  }
+}
+
+async function remoteEntry(req) {
+  const root = await fs.realpath(req.root);
+  if (root === "/" || root !== await fs.realpath(process.cwd())) {
+    throw new Error("Remote operations require the selected agent project root");
+  }
+  const source = await safeRemotePath(req.root, req.path);
+  if (source === root || protectedGitPath(root, source)) {
+    throw new Error("Cannot modify the project root or Git internals");
+  }
+  const stat = await fs.lstat(source);
+  const directory = stat.isDirectory();
+  if ((!directory && !stat.isFile()) ||
+      (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+    throw new Error("Only owned regular files or directories may be modified");
+  }
+  const op = req.operation;
+  if (!["rename", "duplicate", "move"].includes(op)) {
+    throw new Error("Unsupported file operation");
+  }
+  if (op === "duplicate" && directory) {
+    throw new Error("Recursive folder duplication is not supported yet");
+  }
+  let destinationDir = path.posix.dirname(source);
+  let newName = path.posix.basename(source);
+  if (op === "rename") {
+    newName = req.name;
+    if (!validEntryName(newName)) throw new Error("Invalid new name");
+  } else if (op === "duplicate") {
+    const dot = newName.lastIndexOf(".");
+    const stem = dot > 0 ? newName.slice(0, dot) : newName;
+    const ext = dot > 0 ? newName.slice(dot) : "";
+    let found = false;
+    for (let i = 1; i <= 100; i++) {
+      const candidate = path.posix.join(destinationDir,
+        stem + " copy" + (i === 1 ? "" : " " + i) + ext);
+      try {
+        await fs.lstat(candidate);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        newName = path.posix.basename(candidate);
+        found = true;
+        break;
+      }
+    }
+    if (!found) throw new Error("No available duplicate name");
+  } else {
+    destinationDir = await safeRemotePath(req.root, req.destinationDir);
+    const targetStat = await fs.lstat(destinationDir);
+    if (!targetStat.isDirectory()) throw new Error("Destination is not a folder");
+    if (directory && within(source, destinationDir)) {
+      throw new Error("Cannot move a directory inside itself");
+    }
+  }
+  if (!validEntryName(newName)) throw new Error("Invalid destination name");
+  const destination = path.posix.join(destinationDir, newName);
+  if (!within(root, destination) || protectedGitPath(root, destination)) {
+    throw new Error("Destination is outside the allowed project");
+  }
+  if (source === destination) return { path: source, operation: op };
+  if (op === "duplicate") {
+    await exclusiveFileCopy(source, destination);
+  } else {
+    // POSIX rename can overwrite. Reserve a directory's destination first;
+    // files use an exclusive hard-link followed by unlink.
+    if (directory) {
+      await fs.mkdir(destination, { mode: 0o700 });
+      try {
+        await fs.rename(source, destination);
+      } catch (error) {
+        try { await fs.rmdir(destination); } catch {}
+        throw error;
+      }
+    } else {
+      if (stat.nlink !== 1) throw new Error("Cannot move a hard-linked file");
+      await fs.link(source, destination);
+      try { await fs.unlink(source); } catch (error) {
+        throw new Error("Move left a destination copy; verify files: " + error.message);
+      }
+    }
+  }
+  return { path: destination, operation: op };
+}
+
 async function remoteFilesRequest(req) {
   const command = req.type;
   const response = (success, data, error) => emit("O", JSON.stringify({
@@ -324,7 +464,8 @@ async function remoteFilesRequest(req) {
     if (typeof req.id !== "string" || req.id.length > 128) {
       throw new Error("Missing request identifier");
     }
-    if (!["herdr_fs_list", "herdr_fs_read", "herdr_fs_write", "herdr_fs_create"].includes(command)) {
+    if (!["herdr_fs_list", "herdr_fs_read", "herdr_fs_write", "herdr_fs_create",
+          "herdr_fs_entry"].includes(command)) {
       throw new Error("Unsupported filesystem operation");
     }
     if (command === "herdr_fs_write") {
@@ -333,6 +474,10 @@ async function remoteFilesRequest(req) {
     }
     if (command === "herdr_fs_create") {
       response(true, await remoteCreate(req));
+      return;
+    }
+    if (command === "herdr_fs_entry") {
+      response(true, await remoteEntry(req));
       return;
     }
     const selected = await safeRemotePath(req.root, req.path);
@@ -1034,7 +1179,8 @@ function inputLine() {
         if (request && (request.type === "herdr_fs_list" ||
                         request.type === "herdr_fs_read" ||
                         request.type === "herdr_fs_write" ||
-                        request.type === "herdr_fs_create")) {
+                        request.type === "herdr_fs_create" ||
+                        request.type === "herdr_fs_entry")) {
           void remoteFilesRequest(request);
         } else if (request && (request.type === "herdr_git_snapshot" ||
                                request.type === "herdr_git_diff" ||
