@@ -277,6 +277,43 @@ async function remoteWrite(req) {
   }
 }
 
+// Explicit, no-clobber creation inside an already validated directory.
+// The selected parent must belong to the exact running agent root.
+async function remoteCreate(req) {
+  if (await fs.realpath(process.cwd()) === "/") {
+    throw new Error("Remote creation requires a project directory, not /");
+  }
+  const name = req.name;
+  if (typeof name !== "string" || name.length === 0 || name.length > 255 ||
+      name === "." || name === ".." || name.includes("/") ||
+      name.includes("\\") || /[\x00-\x1f\x7f]/.test(name) ||
+      name === ".git" || name.startsWith(".herdr-save-")) {
+    throw new Error("Invalid remote entry name");
+  }
+  if (req.kind !== "file" && req.kind !== "directory") {
+    throw new Error("Invalid new entry type");
+  }
+  const parent = await safeRemotePath(req.root, req.path);
+  const stat = await fs.lstat(parent);
+  if (!stat.isDirectory()) throw new Error("Selected parent is not a directory");
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+    throw new Error("Cannot create in a directory not owned by the agent");
+  }
+  const destination = path.posix.join(parent, name);
+  if (!within(await fs.realpath(req.root), destination)) {
+    throw new Error("New entry is outside the project");
+  }
+  if (req.kind === "directory") {
+    await fs.mkdir(destination, { mode: 0o700 });
+  } else {
+    const handle = await fs.open(destination,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT |
+      fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    await handle.close();
+  }
+  return { path: destination, kind: req.kind };
+}
+
 async function remoteFilesRequest(req) {
   const command = req.type;
   const response = (success, data, error) => emit("O", JSON.stringify({
@@ -287,11 +324,15 @@ async function remoteFilesRequest(req) {
     if (typeof req.id !== "string" || req.id.length > 128) {
       throw new Error("Missing request identifier");
     }
-    if (!["herdr_fs_list", "herdr_fs_read", "herdr_fs_write"].includes(command)) {
+    if (!["herdr_fs_list", "herdr_fs_read", "herdr_fs_write", "herdr_fs_create"].includes(command)) {
       throw new Error("Unsupported filesystem operation");
     }
     if (command === "herdr_fs_write") {
       response(true, await remoteWrite(req));
+      return;
+    }
+    if (command === "herdr_fs_create") {
+      response(true, await remoteCreate(req));
       return;
     }
     const selected = await safeRemotePath(req.root, req.path);
