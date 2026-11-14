@@ -3,10 +3,12 @@
 //! This view never uses local Windows filesystem APIs or remote Pi bash.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -26,7 +28,7 @@ use super::backend::{
 };
 use gentle_core::git::status::{BranchStatus, StatusEntry as RemoteGitFile};
 use super::dock_ui::{file_entry_row, panel_header, panel_shell};
-use super::remote_tree::visible_rows;
+use super::remote_tree::{RemoteTreeRow, visible_rows};
 use super::tabs::FilePanelTab as RemoteTab;
 use super::viewer::MdMode;
 use crate::shared::ui;
@@ -398,6 +400,8 @@ pub struct RemoteFilesView {
     _git_events: Vec<Subscription>,
     focus: FocusHandle,
     tree_children: HashMap<String, Vec<RemoteEntry>>,
+    tree_rows: Rc<Vec<RemoteTreeRow>>,
+    tree_scroll: UniformListScrollHandle,
     tree_expanded: HashSet<String>,
     tree_loading: HashSet<String>,
     tree_selected_directory: Option<String>,
@@ -551,6 +555,8 @@ impl RemoteFilesView {
             _git_events: git_events,
             focus: cx.focus_handle(),
             tree_children: HashMap::new(),
+            tree_rows: Rc::new(Vec::new()),
+            tree_scroll: UniformListScrollHandle::new(),
             tree_expanded: HashSet::new(),
             tree_loading: HashSet::new(),
             tree_selected_directory: None,
@@ -687,6 +693,7 @@ impl RemoteFilesView {
         self.tree_loading.clear();
         self.tree_selected_directory = None;
         self.tree_selected_entry = None;
+        self.rebuild_remote_rows();
         self.error = None;
         self.truncated = false;
         self.loading = true;
@@ -708,6 +715,7 @@ impl RemoteFilesView {
                 match response {
                     Ok(listing) => {
                         this.tree_children.insert(this.current.clone(), listing.entries);
+                        this.rebuild_remote_rows();
                         this.truncated = listing.truncated;
                     }
                     Err(error) => this.error = Some(friendly_error(&error.to_string())),
@@ -716,6 +724,12 @@ impl RemoteFilesView {
             });
         }).detach();
         cx.notify();
+    }
+
+    fn rebuild_remote_rows(&mut self) {
+        self.tree_rows = Rc::new(visible_rows(
+            &self.root, &self.tree_children, &self.tree_expanded, &self.tree_loading,
+        ));
     }
 
     fn refresh_tree_folder(&mut self, folder: String, cx: &mut Context<Self>) {
@@ -815,6 +829,7 @@ impl RemoteFilesView {
                         if dest_parent != source_parent {
                             this.refresh_tree_folder(dest_parent.clone(), cx);
                         }
+                        this.rebuild_remote_rows();
                     }
                     Err(error) => this.error = Some(friendly_error(&error)),
                 }
@@ -870,11 +885,13 @@ impl RemoteFilesView {
     /// closing a central editor. Children are loaded only when requested.
     fn toggle_remote_directory(&mut self, path: String, cx: &mut Context<Self>) {
         if self.tree_expanded.remove(&path) {
+            self.rebuild_remote_rows();
             cx.notify();
             return;
         }
         self.tree_expanded.insert(path.clone());
         if self.tree_children.contains_key(&path) || self.tree_loading.contains(&path) {
+            self.rebuild_remote_rows();
             cx.notify();
             return;
         }
@@ -884,6 +901,7 @@ impl RemoteFilesView {
             return;
         };
         self.tree_loading.insert(path.clone());
+        self.rebuild_remote_rows();
         let generation = self.generation;
         let response = WorkspaceBackend::herdr(self.root.clone(), process)
             .list(WorkspacePath::Herdr(path.clone()), false);
@@ -906,6 +924,7 @@ impl RemoteFilesView {
                     }
                     Err(error) => this.error = Some(friendly_error(&error)),
                 }
+                this.rebuild_remote_rows();
                 cx.notify();
             });
         }).detach();
@@ -916,59 +935,87 @@ impl RemoteFilesView {
     /// Linux paths kept as Strings. Build rows separately to keep the GPUI
     /// Windows render stack bounded.
     fn render_remote_tree(&self, cx: &mut Context<Self>) -> AnyElement {
-        let nodes = visible_rows(
-            &self.root, &self.tree_children, &self.tree_expanded, &self.tree_loading,
-        );
-        let mut rows: Vec<AnyElement> = Vec::with_capacity(nodes.len());
-        for (index, node) in nodes.into_iter().enumerate() {
-            let directory = node.entry.kind == "directory";
-            let regular = node.entry.kind == "file";
-            let opened = node.expanded;
-            let path = node.path.clone();
-            let name = node.entry.name.clone();
-            let insert_path = node.path.clone();
-            rows.push(
-                file_entry_row(
-                    SharedString::from(format!("remote-tree-row-{index}")),
-                    node.depth,
-                    self.tree_selected_entry.as_ref()
-                        .is_some_and(|(selected, _)| selected == &node.path),
-                    &node.entry.name, directory, opened,
-                    false, None, None, false,
-                )
-                    .cursor_pointer()
-                    .when(node.loading, |row| {
-                        row.child(div().text_xs().text_color(ui::muted()).child("…"))
-                    })
-                    .child(
-                        Button::new(format!("remote-tree-insert-{index}"))
-                            .ghost().xsmall()
-                            .icon(Icon::new(IconName::Copy))
-                            .tooltip("Insert Linux path into agent prompt")
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.stop_propagation();
-                                cx.emit(RemoteFilesEvent::InsertPath(insert_path.clone()));
-                            })),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.tree_selected_entry = Some((path.clone(), directory));
-                        this.entry_name.update(cx, |input, cx| {
-                            input.set_value(name.clone(), window, cx);
-                        });
-                        if directory {
-                            this.tree_selected_directory = Some(path.clone());
-                            this.toggle_remote_directory(path.clone(), cx);
-                        } else if regular {
-                            this.tree_selected_directory = remote_parent(&this.root, &path);
-                            cx.emit(RemoteFilesEvent::OpenFile(path.clone()));
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
+        if self.tree_rows.is_empty() {
+            return div().flex_1().min_h_0().px_3().py_2()
+                .text_sm().text_color(ui::muted())
+                .child(if self.loading {
+                    "Loading remote folder…"
+                } else {
+                    "No entries in this folder"
+                })
+                .into_any_element();
         }
-        v_flex().children(rows).into_any_element()
+        div().relative().flex_1().min_h_0()
+            .child(
+                uniform_list(
+                    "remote-file-tree-rows",
+                    self.tree_rows.len(),
+                    cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                        let nodes = this.tree_rows.clone();
+                        nodes[range.clone()].iter().enumerate()
+                            .map(|(offset, node)| {
+                                this.render_remote_tree_row(node, range.start + offset, cx)
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .size_full()
+                .p_1p5()
+                .track_scroll(&self.tree_scroll),
+            )
+            .vertical_scrollbar(&self.tree_scroll)
+            .into_any_element()
     }
+
+    fn render_remote_tree_row(
+        &self, node: &RemoteTreeRow, index: usize, cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let directory = node.entry.kind == "directory";
+        let regular = node.entry.kind == "file";
+        let opened = node.expanded;
+        let path = node.path.clone();
+        let name = node.entry.name.clone();
+        let insert_path = node.path.clone();
+        file_entry_row(
+            SharedString::from(format!("remote-tree-row-{index}")),
+            node.depth,
+            self.tree_selected_entry.as_ref()
+                .is_some_and(|(selected, _)| selected == &node.path),
+            &node.entry.name, directory, opened,
+            false, None, None, false,
+        )
+        .cursor_pointer()
+        .when(node.loading, |row| {
+            row.child(div().text_xs().text_color(ui::muted()).child("…"))
+        })
+        .child(
+            Button::new(format!("remote-tree-insert-{index}"))
+                .ghost().xsmall()
+                .icon(Icon::new(IconName::Copy))
+                .tooltip("Insert Linux path into agent prompt")
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(RemoteFilesEvent::InsertPath(insert_path.clone()));
+                })),
+        )
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.tree_selected_entry = Some((path.clone(), directory));
+            this.entry_name.update(cx, |input, cx| {
+                input.set_value(name.clone(), window, cx);
+            });
+            if directory {
+                this.tree_selected_directory = Some(path.clone());
+                this.toggle_remote_directory(path.clone(), cx);
+            } else if regular {
+                this.tree_selected_directory = remote_parent(&this.root, &path);
+                cx.emit(RemoteFilesEvent::OpenFile(path.clone()));
+            }
+            this.rebuild_remote_rows();
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
 
     fn open(
         &mut self, path: String, is_directory: bool,
@@ -1559,7 +1606,7 @@ impl Render for RemoteFilesView {
         }
         let parent = remote_parent(&self.root, &self.current);
         let central = self.pane_path.is_some();
-        let mut content = v_flex().gap(px(1.));
+        let mut content = v_flex().gap(px(1.)).flex_1().min_h_0();
         if let Some(preview) = &self.preview {
             let copied = preview.path.clone();
             let rows: Vec<String> = preview.content.lines().take(600).map(str::to_owned).collect();
@@ -1865,7 +1912,7 @@ impl Render for RemoteFilesView {
             .child(
                 div()
                     .id("remote-file-tree-scroll")
-                    .flex_1().min_h_0().overflow_y_scroll()
+                    .flex_1().min_h_0().overflow_hidden()
                     .child(content),
             )
             .when(self.truncated, |panel| panel.child(
