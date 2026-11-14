@@ -47,6 +47,15 @@ evita ver datos fuera del área de trabajo elegida. La validación de
 habilita una consulta.
 
 Las respuestas se acotan a 200 archivos, 120 ramas y 96 KiB de diff.
+`git status` y `git branch` se consumen como registros delimitados y
+se detiene el proceso Git al detectar un registro adicional al límite.
+Así, un repositorio con cientos de miles de entradas no llena el buffer
+de salida de Node: Changes y Branches muestran resultados parciales y
+marcan el truncamiento en la interfaz. Cada registro se limita a 4096 bytes,
+con timeout de 8 segundos. El diff consulta el estado únicamente de la
+ruta seleccionada mediante un pathspec literal, sin leer nuevamente la
+salida de estado de todo el repositorio.
+
 Cuando hay más, el panel informa del truncamiento. Un archivo sin cambios
 no puede pedirse arbitrariamente mediante `herdr_git_diff`: el puente
 revalida que figure en `git status`. Los archivos sin seguimiento usan
@@ -104,3 +113,7 @@ usando: el test ya genera repositorios temporales y los elimina.
 6. Probar agente fuera de un repo: mostrar aviso, sin consulta a Git local.
 7. Verificar guardado remoto 5B, cambios en index/worktree y archivo sin
    seguimiento: el árbol Changes se actualiza tras Refresh.
+8. Verificar en un repositorio con más de 200 archivos sin seguimiento:
+   Changes debe mostrar los primeros 200 y avisar del truncamiento, sin
+   `stdout maxBuffer length exceeded`. Abrir el diff de uno que no figure
+   entre los primeros 200 debe funcionar por su consulta específica.
