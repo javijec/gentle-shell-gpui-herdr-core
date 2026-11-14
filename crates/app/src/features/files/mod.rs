@@ -3,6 +3,7 @@
 //! (editable, syntax-highlighted file — ⌘S saves — or read-only diff pane).
 
 mod changes;
+mod changes_ui;
 mod backend;
 mod remote;
 mod remote_git;

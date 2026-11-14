@@ -23,13 +23,12 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::status_color;
+use super::changes_ui::{ChangeSide as Side, change_row, section_header, side_entries, ROW_HEIGHT};
 use super::backend::{GitFileAction, GitFileMutation, WorkspaceBackend};
 use crate::features::git::{self, EntryKind, StatusEntry, WorkTree};
 use crate::shared::ui;
 
 const POLL: Duration = Duration::from_secs(3);
-const ROW_HEIGHT: f32 = 26.;
 /// The most diff handed to the model for a commit message.
 const DIFF_LIMIT: usize = 24_000;
 
@@ -41,12 +40,6 @@ pub enum ChangesEvent {
     OpenFile(PathBuf),
     /// [`ChangesView::change_count`] changed.
     Changed,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Side {
-    Unstaged,
-    Staged,
 }
 
 #[derive(Clone, PartialEq)]
@@ -248,18 +241,7 @@ impl ChangesView {
                 .filter(|e| e.kind == EntryKind::Untracked)
                 .count();
             for side in [Side::Unstaged, Side::Staged] {
-                let entries: Vec<(usize, char)> = tree
-                    .entries
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, e)| {
-                        match side {
-                            Side::Unstaged => e.unstaged(),
-                            Side::Staged => e.staged(),
-                        }
-                        .map(|badge| (i, badge))
-                    })
-                    .collect();
+                let entries = side_entries(&tree.entries, side);
                 if entries.is_empty() {
                     continue;
                 }
@@ -675,53 +657,26 @@ impl ChangesView {
     }
 
     fn render_section_header(&self, side: Side, count: usize, cx: &mut Context<Self>) -> Div {
-        let (label, action, id) = match side {
-            Side::Unstaged => ("Unstaged", "Stage all", "changes-stage-all"),
-            Side::Staged => ("Staged", "Unstage all", "changes-unstage-all"),
+        let (action, id) = match side {
+            Side::Unstaged => ("Stage all", "changes-stage-all"),
+            Side::Staged => ("Unstage all", "changes-unstage-all"),
         };
         let all = move |this: &mut Self, cx: &mut Context<Self>| match side {
             Side::Unstaged => this.git_op(git::stage_all, cx),
             Side::Staged => this.git_op(git::unstage_all, cx),
         };
         let weak = cx.entity().downgrade();
-        h_flex()
-            .h(px(ROW_HEIGHT))
-            .px_3()
-            .gap_2()
-            .child(
-                Checkbox::new(SharedString::from(format!("{id}-check")))
-                    .small()
-                    .checked(side == Side::Staged)
-                    .tooltip(action)
-                    .on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |this, cx| all(this, cx));
-                    }),
-            )
-            .child(
-                div()
-                    .text_size(px(13.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(ui::fg())
-                    .child(label),
-            )
-            .child(
-                div()
-                    .px_1p5()
-                    .rounded_md()
-                    .bg(ui::well())
-                    .font_family(ui::MONO)
-                    .text_size(px(10.5))
-                    .text_color(ui::muted())
-                    .child(count.to_string()),
-            )
-            .child(div().flex_1())
-            .child(
-                Button::new(id)
-                    .outline()
-                    .xsmall()
-                    .label(action)
-                    .on_click(cx.listener(move |this, _, _, cx| all(this, cx))),
-            )
+        let checkbox = Checkbox::new(SharedString::from(format!("{id}-check")))
+            .small()
+            .checked(side == Side::Staged)
+            .tooltip(action)
+            .on_click(move |_, _, cx| {
+                let _ = weak.update(cx, |this, cx| all(this, cx));
+            });
+        let button = Button::new(id)
+            .outline().xsmall().label(action)
+            .on_click(cx.listener(move |this, _, _, cx| all(this, cx)));
+        section_header(side, count, checkbox, button)
     }
 
     fn render_untracked(count: usize) -> Div {
@@ -841,12 +796,6 @@ impl ChangesView {
             .selected
             .as_ref()
             .is_some_and(|(s, path)| *s == side && *path == entry.path);
-        let (dir, name) = match entry.path.rsplit_once('/') {
-            Some((dir, name)) if indent == 0. => (format!("{dir}/"), name.to_string()),
-            Some((_, name)) => (String::new(), name.to_string()),
-            None => (String::new(), entry.path.clone()),
-        };
-        let deleted = badge == 'D';
         let id = format!("change-{side:?}-{}", entry.path);
         let weak = cx.entity().downgrade();
         let check = {
@@ -867,43 +816,9 @@ impl ChangesView {
         };
         let path = entry.path.clone();
         let menu_entry = entry.clone();
-        h_flex()
-            .id(SharedString::from(id))
-            .h(px(ROW_HEIGHT))
-            .mx_1p5()
-            .pl(px(6. + indent))
-            .pr_1p5()
-            .gap_2()
-            .rounded_md()
-            .cursor_pointer()
-            .when(selected, |d| d.bg(ui::raised()))
-            .when(!selected, |d| d.hover(|s| s.bg(ui::surface_hover())))
-            .child(check)
-            .child(status_badge(badge))
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(13.))
-                    .when(!dir.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(ui::faint())
-                                .child(dir),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w_full()
-                            .truncate()
-                            .text_color(if deleted { ui::muted() } else { ui::fg() })
-                            .when(deleted, |d| d.line_through())
-                            .child(name),
-                    ),
-            )
+        change_row(
+            SharedString::from(id), &entry.path, badge, selected, indent, check,
+        )
             .on_click(cx.listener(move |this, _, _, cx| this.click_entry(&path, side, cx)))
             .context_menu(move |menu, _, _| {
                 let entry = menu_entry.clone();
@@ -1154,29 +1069,6 @@ impl Render for ChangesView {
 }
 
 /// The boxed status letter: A, M, D, R, `?` untracked, `U` conflict.
-fn status_badge(badge: char) -> Div {
-    let color = if badge == 'U' {
-        ui::danger()
-    } else {
-        status_color(badge)
-    };
-    div()
-        .flex_none()
-        .size(px(16.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(color.opacity(0.5))
-        .bg(color.opacity(0.1))
-        .font_family(ui::MONO)
-        .text_size(px(10.))
-        .font_weight(FontWeight::BOLD)
-        .text_color(color)
-        .child(badge.to_string())
-}
-
 fn empty_state(icon: IconName, text: &'static str) -> AnyElement {
     v_flex()
         .flex_1()
