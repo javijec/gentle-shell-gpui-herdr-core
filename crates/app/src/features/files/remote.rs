@@ -20,6 +20,7 @@ use super::refs::{RefsEvent, RefsView};
 use super::changes::{ChangesEvent, ChangesView};
 use super::backend::{
     GitFileAction, GitFileMutation, HerdrGitGuard, WorkspaceBackend,
+    WorkspaceEntryAction,
     WorkspaceDirEntry as RemoteEntry, WorkspacePath,
     WorkspaceText as RemotePreview,
 };
@@ -361,6 +362,10 @@ pub struct RemoteFilesView {
     tree_expanded: HashSet<String>,
     tree_loading: HashSet<String>,
     tree_selected_directory: Option<String>,
+    tree_selected_entry: Option<(String, bool)>,
+    file_clipboard: Option<(String, bool)>,
+    entry_name: Entity<InputState>,
+    entry_busy: bool,
     create_name: Entity<InputState>,
     creating: bool,
     preview: Option<RemotePreview>,
@@ -438,6 +443,9 @@ impl RemoteFilesView {
         let create_name = cx.new(|cx| {
             InputState::new(window, cx).placeholder("New file or folder name")
         });
+        let entry_name = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Rename selected entry")
+        });
         let refs = cx.new(|cx| RefsView::new_remote(window, cx));
         let refs_events = cx.subscribe(&refs, |this, _, event: &RefsEvent, cx| {
             if let RefsEvent::SwitchRemoteBranch(branch) = event {
@@ -477,6 +485,9 @@ impl RemoteFilesView {
             cx.subscribe(&create_name, |_, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event { cx.notify(); }
             }),
+            cx.subscribe(&entry_name, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event { cx.notify(); }
+            }),
         ];
         let mut view = Self {
             session,
@@ -504,6 +515,10 @@ impl RemoteFilesView {
             tree_expanded: HashSet::new(),
             tree_loading: HashSet::new(),
             tree_selected_directory: None,
+            tree_selected_entry: None,
+            file_clipboard: None,
+            entry_name,
+            entry_busy: false,
             create_name,
             creating: false,
             preview: None,
@@ -632,6 +647,7 @@ impl RemoteFilesView {
         self.tree_expanded.clear();
         self.tree_loading.clear();
         self.tree_selected_directory = None;
+        self.tree_selected_entry = None;
         self.error = None;
         self.truncated = false;
         self.loading = true;
@@ -656,6 +672,112 @@ impl RemoteFilesView {
                         this.truncated = listing.truncated;
                     }
                     Err(error) => this.error = Some(friendly_error(&error.to_string())),
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    fn refresh_tree_folder(&mut self, folder: String, cx: &mut Context<Self>) {
+        self.tree_children.remove(&folder);
+        self.tree_expanded.remove(&folder);
+        self.toggle_remote_directory(folder, cx);
+    }
+
+    fn clipboard_remote_entry(&mut self, cut: bool, cx: &mut Context<Self>) {
+        if let Some((path, directory)) = &self.tree_selected_entry {
+            if !cut && *directory {
+                self.error = Some("Recursive directory copying is not supported yet".into());
+            } else {
+                self.file_clipboard = Some((path.clone(), cut));
+                self.error = None;
+            }
+            cx.notify();
+        }
+    }
+
+    fn rename_remote_entry(&mut self, cx: &mut Context<Self>) {
+        let new_name = self.entry_name.read(cx).value().trim().to_owned();
+        if !new_name.is_empty() {
+            self.run_remote_entry(WorkspaceEntryAction::Rename(new_name), cx);
+        }
+    }
+
+    fn paste_remote_entry(&mut self, cx: &mut Context<Self>) {
+        let Some((source, cut)) = self.file_clipboard.clone() else { return; };
+        let directory = self.tree_selected_directory.clone()
+            .unwrap_or_else(|| self.root.clone());
+        self.run_remote_entry_from(
+            source,
+            if cut {
+                WorkspaceEntryAction::Move(WorkspacePath::Herdr(directory))
+            } else {
+                WorkspaceEntryAction::CopyTo(WorkspacePath::Herdr(directory))
+            },
+            cx,
+        );
+    }
+
+    fn run_remote_entry(
+        &mut self, action: WorkspaceEntryAction, cx: &mut Context<Self>,
+    ) {
+        let Some((source, _)) = &self.tree_selected_entry else { return; };
+        self.run_remote_entry_from(source.clone(), action, cx);
+    }
+
+    fn run_remote_entry_from(
+        &mut self, source: String, action: WorkspaceEntryAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.entry_busy || self.creating || self.root == "/" || self.pane_path.is_some() {
+            return;
+        }
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.error = Some("Remote agent is disconnected".into());
+            cx.notify();
+            return;
+        };
+        let source_parent = remote_parent(&self.root, &source)
+            .unwrap_or_else(|| self.root.clone());
+        let dest_parent = match &action {
+            WorkspaceEntryAction::Move(WorkspacePath::Herdr(dir))
+                | WorkspaceEntryAction::CopyTo(WorkspacePath::Herdr(dir)) =>
+                dir.clone(),
+            _ => source_parent.clone(),
+        };
+        let operation = WorkspaceBackend::herdr(self.root.clone(), process)
+            .entry(WorkspacePath::Herdr(source.clone()), action);
+        self.entry_busy = true;
+        self.error = None;
+        cx.spawn(async move |this, cx| {
+            let result = operation.await;
+            let _ = this.update(cx, |this, cx| {
+                this.entry_busy = false;
+                match result {
+                    Ok(_) => {
+                        let stale_prefix = format!("{source}/");
+                        this.tree_children.retain(|path, _| {
+                            path != &source && !path.starts_with(&stale_prefix)
+                        });
+                        this.tree_expanded.retain(|path| {
+                            path != &source && !path.starts_with(&stale_prefix)
+                        });
+                        if this.tree_selected_entry.as_ref()
+                            .is_some_and(|(path, _)| path == &source)
+                        {
+                            this.tree_selected_entry = None;
+                        }
+                        if this.tree_selected_directory.as_deref() == Some(source.as_str()) {
+                            this.tree_selected_directory = None;
+                        }
+                        this.file_clipboard = None;
+                        this.refresh_tree_folder(source_parent.clone(), cx);
+                        if dest_parent != source_parent {
+                            this.refresh_tree_folder(dest_parent.clone(), cx);
+                        }
+                    }
+                    Err(error) => this.error = Some(friendly_error(&error)),
                 }
                 cx.notify();
             });
@@ -695,9 +817,7 @@ impl RemoteFilesView {
                         });
                         // Preserve all expanded folders; only re-query the
                         // parent that received this file or directory.
-                        this.tree_children.remove(&parent);
-                        this.tree_expanded.remove(&parent);
-                        this.toggle_remote_directory(parent.clone(), cx);
+                        this.refresh_tree_folder(parent.clone(), cx);
                     }
                     Err(error) => this.error = Some(friendly_error(&error)),
                 }
@@ -766,12 +886,14 @@ impl RemoteFilesView {
             let regular = node.entry.kind == "file";
             let opened = node.expanded;
             let path = node.path.clone();
+            let name = node.entry.name.clone();
             let insert_path = node.path.clone();
             rows.push(
                 file_entry_row(
                     SharedString::from(format!("remote-tree-row-{index}")),
                     node.depth,
-                    self.tree_selected_directory.as_deref() == Some(node.path.as_str()),
+                    self.tree_selected_entry.as_ref()
+                        .is_some_and(|(selected, _)| selected == &node.path),
                     &node.entry.name, directory, opened,
                     false, None, None, false,
                 )
@@ -789,13 +911,18 @@ impl RemoteFilesView {
                                 cx.emit(RemoteFilesEvent::InsertPath(insert_path.clone()));
                             })),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.tree_selected_entry = Some((path.clone(), directory));
+                        this.entry_name.update(cx, |input, cx| {
+                            input.set_value(name.clone(), window, cx);
+                        });
                         if directory {
                             this.tree_selected_directory = Some(path.clone());
                             this.toggle_remote_directory(path.clone(), cx);
                         } else if regular {
                             cx.emit(RemoteFilesEvent::OpenFile(path.clone()));
                         }
+                        cx.notify();
                     }))
                     .into_any_element(),
             );
