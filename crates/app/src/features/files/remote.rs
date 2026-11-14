@@ -24,9 +24,8 @@ use super::backend::{
     WorkspaceText as RemotePreview,
 };
 use gentle_core::git::status::{BranchStatus, StatusEntry as RemoteGitFile};
-use super::dock_ui::{file_row_shell, panel_header, panel_shell};
+use super::dock_ui::{file_entry_row, panel_header, panel_shell};
 use super::remote_tree::visible_rows;
-use super::file_icon;
 use super::tabs::FilePanelTab as RemoteTab;
 use super::viewer::MdMode;
 use crate::shared::ui;
@@ -674,35 +673,13 @@ impl RemoteFilesView {
             let opened = node.expanded;
             let path = node.path.clone();
             let insert_path = node.path.clone();
-            let (icon, tint) = if directory {
-                (if opened { IconName::FolderOpen } else { IconName::Folder }, ui::muted())
-            } else {
-                file_icon(&node.entry.name)
-            };
             rows.push(
-                file_row_shell(
+                file_entry_row(
                     SharedString::from(format!("remote-tree-row-{index}")),
-                    node.depth,
-                    false,
+                    node.depth, false, &node.entry.name, directory, opened,
+                    false, None, None, false,
                 )
                     .cursor_pointer()
-                    .child(
-                        div().w(px(14.)).flex().justify_center()
-                            .when(directory, |d| {
-                                d.child(Icon::new(if opened {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                }).xsmall().text_color(ui::faint()))
-                            }),
-                    )
-                    .child(Icon::new(icon).small().text_color(tint))
-                    .child(
-                        div().flex_1().min_w_0().truncate()
-                            .text_size(px(13.))
-                            .text_color(ui::fg())
-                            .child(node.entry.name),
-                    )
                     .when(node.loading, |row| {
                         row.child(div().text_xs().text_color(ui::muted()).child("…"))
                     })
