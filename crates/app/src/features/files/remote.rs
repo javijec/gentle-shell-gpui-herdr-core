@@ -370,9 +370,13 @@ mod remote_git_snapshot_tests {
 
 const MAX_EDIT_BYTES: usize = 128 * 1024;
 const CONTEXT: &str = "GentleRemoteFileView";
+const TREE_CONTEXT: &str = "GentleRemoteFilesTree";
 const SAVE_HINT: &str = if cfg!(target_os = "macos") { "⌘S" } else { "Ctrl+S" };
 
-actions!(herdr_file_view, [Save]);
+actions!(herdr_file_view, [
+    Save, TreeUp, TreeDown, TreeLeft, TreeRight, TreeOpen,
+    TreeRename, TreeCopy, TreeCut, TreePaste,
+]);
 
 pub struct RemoteFilesView {
     session: Entity<SessionView>,
@@ -466,11 +470,107 @@ impl RemoteFilesView {
     /// remote editor's focused UI. The action always saves through Herdr.
     pub fn bind_keys(cx: &mut App) {
         let key = if cfg!(target_os = "macos") { "cmd-s" } else { "ctrl-s" };
-        cx.bind_keys([KeyBinding::new(key, Save, Some(CONTEXT))]);
+        let copy = if cfg!(target_os = "macos") { "cmd-c" } else { "ctrl-c" };
+        let cut = if cfg!(target_os = "macos") { "cmd-x" } else { "ctrl-x" };
+        let paste = if cfg!(target_os = "macos") { "cmd-v" } else { "ctrl-v" };
+        cx.bind_keys([
+            KeyBinding::new(key, Save, Some(CONTEXT)),
+            KeyBinding::new("up", TreeUp, Some(TREE_CONTEXT)),
+            KeyBinding::new("down", TreeDown, Some(TREE_CONTEXT)),
+            KeyBinding::new("left", TreeLeft, Some(TREE_CONTEXT)),
+            KeyBinding::new("right", TreeRight, Some(TREE_CONTEXT)),
+            KeyBinding::new("enter", TreeOpen, Some(TREE_CONTEXT)),
+            KeyBinding::new("f2", TreeRename, Some(TREE_CONTEXT)),
+            KeyBinding::new(copy, TreeCopy, Some(TREE_CONTEXT)),
+            KeyBinding::new(cut, TreeCut, Some(TREE_CONTEXT)),
+            KeyBinding::new(paste, TreePaste, Some(TREE_CONTEXT)),
+        ]);
     }
 
     fn save_shortcut(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         self.save_edit(cx);
+    }
+
+    fn select_tree_row(
+        &mut self, next: bool, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if self.pane_path.is_some() || self.tree_rows.is_empty() { return; }
+        let current = self.tree_selected_entry.as_ref().and_then(|(path, _)| {
+            self.tree_rows.iter().position(|node| &node.path == path)
+        });
+        let index = match (current, next) {
+            (None, _) => 0,
+            (Some(i), true) => (i + 1).min(self.tree_rows.len() - 1),
+            (Some(i), false) => i.saturating_sub(1),
+        };
+        let node = &self.tree_rows[index];
+        let path = node.path.clone();
+        let is_directory = node.entry.kind == "directory";
+        let name = node.entry.name.clone();
+        self.tree_selected_entry = Some((path.clone(), is_directory));
+        self.tree_selected_directory = if is_directory {
+            Some(path)
+        } else {
+            remote_parent(&self.root, &path)
+        };
+        self.entry_name.update(cx, |field, cx| {
+            field.set_value(name, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn tree_up(&mut self, _: &TreeUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tree_row(false, window, cx);
+    }
+    fn tree_down(&mut self, _: &TreeDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tree_row(true, window, cx);
+    }
+    fn tree_open(&mut self, _: &TreeOpen, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((path, directory)) = self.tree_selected_entry.clone() {
+            if directory {
+                self.toggle_remote_directory(path, cx);
+            } else {
+                cx.emit(RemoteFilesEvent::OpenFile(path));
+            }
+        }
+    }
+    fn tree_left(&mut self, _: &TreeLeft, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((path, directory)) = self.tree_selected_entry.clone() else { return; };
+        if directory && self.tree_expanded.contains(&path) {
+            self.toggle_remote_directory(path, cx);
+        } else if let Some(parent) = remote_parent(&self.root, &path)
+            && let Some(i) = self.tree_rows.iter().position(|node| node.path == parent)
+        {
+            let node = &self.tree_rows[i];
+            let name = node.entry.name.clone();
+            self.tree_selected_entry = Some((parent.clone(), true));
+            self.tree_selected_directory = Some(parent);
+            self.entry_name.update(cx, |field, cx| {
+                field.set_value(name, window, cx);
+            });
+            cx.notify();
+        }
+    }
+    fn tree_right(&mut self, _: &TreeRight, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((path, true)) = self.tree_selected_entry.clone()
+            && !self.tree_expanded.contains(&path)
+        {
+            self.toggle_remote_directory(path, cx);
+        }
+    }
+    fn tree_rename(&mut self, _: &TreeRename, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tree_selected_entry.is_some() {
+            self.entry_name.update(cx, |field, cx| field.focus(window, cx));
+        }
+    }
+    fn tree_copy(&mut self, _: &TreeCopy, _: &mut Window, cx: &mut Context<Self>) {
+        self.clipboard_remote_entry(false, cx);
+    }
+    fn tree_cut(&mut self, _: &TreeCut, _: &mut Window, cx: &mut Context<Self>) {
+        self.clipboard_remote_entry(true, cx);
+    }
+    fn tree_paste(&mut self, _: &TreePaste, _: &mut Window, cx: &mut Context<Self>) {
+        self.paste_remote_entry(cx);
     }
 
     pub fn new(
@@ -1000,6 +1100,7 @@ impl RemoteFilesView {
         )
         .on_click(cx.listener(move |this, _, window, cx| {
             this.tree_selected_entry = Some((path.clone(), directory));
+            this.focus.focus(window, cx);
             this.entry_name.update(cx, |input, cx| {
                 input.set_value(name.clone(), window, cx);
             });
@@ -1759,9 +1860,18 @@ impl Render for RemoteFilesView {
         }
 
         panel_shell()
-            .key_context(CONTEXT)
+            .key_context(if central { CONTEXT } else { TREE_CONTEXT })
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::save_shortcut))
+            .on_action(cx.listener(Self::tree_up))
+            .on_action(cx.listener(Self::tree_down))
+            .on_action(cx.listener(Self::tree_left))
+            .on_action(cx.listener(Self::tree_right))
+            .on_action(cx.listener(Self::tree_open))
+            .on_action(cx.listener(Self::tree_rename))
+            .on_action(cx.listener(Self::tree_copy))
+            .on_action(cx.listener(Self::tree_cut))
+            .on_action(cx.listener(Self::tree_paste))
             .child(
                 panel_header()
                     .child(Icon::new(if central { IconName::FileCode }
