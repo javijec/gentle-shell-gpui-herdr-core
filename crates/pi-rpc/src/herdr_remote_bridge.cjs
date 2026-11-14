@@ -535,6 +535,8 @@ const MAX_GIT_BRANCHES = 120;
 const MAX_GIT_TAGS = 120;
 const MAX_GIT_STASHES = 120;
 const MAX_GIT_REF_DETAILS = 360;
+const MAX_GIT_WORKTREE_LINES = 600;
+const MAX_GIT_SUBMODULES = 120;
 const MAX_GIT_DIFF = 96 * 1024;
 
 function strictUtf8(bytes) {
@@ -780,7 +782,7 @@ async function gitRefState(toplevel) {
 async function remoteGit(req) {
   const { toplevel } = await gitRepository(req.root);
   if (req.type === "herdr_git_snapshot") {
-    const [status, branches, index, tags, stashes, details] = await Promise.all([
+    const [status, branches, index, tags, stashes, details, worktrees, submodules] = await Promise.all([
       runGitListing(toplevel, ["status", "--porcelain=v1", "-z",
         "--no-renames", "--untracked-files=all", "--ignore-submodules=all"],
         0, MAX_GIT_LIST),
@@ -796,6 +798,12 @@ async function remoteGit(req) {
       runGitListing(toplevel, ["for-each-ref",
         "--format=%(HEAD)%00%(refname)%00%(upstream:short)%00%(upstream:track)%00%(objectname:short)%00%(subject)",
         "refs/heads", "refs/remotes", "refs/tags"], 10, MAX_GIT_REF_DETAILS),
+      runGitListing(toplevel, ["worktree", "list", "--porcelain"],
+        10, MAX_GIT_WORKTREE_LINES),
+      runGitListing(toplevel, ["submodule", "status"],
+        10, MAX_GIT_SUBMODULES).catch(() => ({
+          output: Buffer.alloc(0), truncated: false,
+        })),
     ]);
     const files = parseGitEntries(status.output);
     const refs = parseGitBranches(branches.output);
@@ -812,6 +820,10 @@ async function remoteGit(req) {
       stashes: extraStashes.stashes, stashesTruncated: stashes.truncated,
       refDetails: strictUtf8(details.output),
       refDetailsTruncated: details.truncated,
+      worktreeData: strictUtf8(worktrees.output),
+      worktreesTruncated: worktrees.truncated,
+      submoduleData: strictUtf8(submodules.output),
+      submodulesTruncated: submodules.truncated,
       readOnly: true, writesEnabled: true,
     };
   }
