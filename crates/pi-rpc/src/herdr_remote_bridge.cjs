@@ -554,19 +554,22 @@ async function gitRefState(toplevel) {
 async function remoteGit(req) {
   const { toplevel } = await gitRepository(req.root);
   if (req.type === "herdr_git_snapshot") {
-    const [status, branches] = await Promise.all([
+    const [status, branches, index] = await Promise.all([
       runGitListing(toplevel, ["status", "--porcelain=v1", "-z",
         "--no-renames", "--untracked-files=all", "--ignore-submodules=all"],
         0, MAX_GIT_LIST),
       runGitListing(toplevel, ["branch", "--all", "--list",
         "--format=%(refname:short)%00%(HEAD)%00%(refname)"],
         10, MAX_GIT_BRANCHES),
+      runGitListing(toplevel, ["diff", "--cached", "--raw",
+        "-z", "--no-renames"], 0, MAX_GIT_LIST * 2),
     ]);
     const files = parseGitEntries(status.output);
     const refs = parseGitBranches(branches.output);
     const { headOid, currentBranch } = await gitRefState(toplevel);
     return {
       toplevel, headOid, currentBranch, files: files.entries,
+      indexToken: sha256(index.output), indexTruncated: index.truncated,
       filesTruncated: files.truncated || status.truncated,
       branches: refs.branches,
       branchesTruncated: refs.truncated || branches.truncated,
@@ -648,6 +651,20 @@ const GIT_MUTATIONS = [
   "herdr_git_stage", "herdr_git_unstage", "herdr_git_commit",
   "herdr_git_create_branch", "herdr_git_switch_branch",
 ];
+
+async function checkGitIndexRequest(req, toplevel) {
+  if (typeof req.expectedIndexToken !== "string" ||
+      !/^[a-f0-9]{64}$/.test(req.expectedIndexToken)) {
+    throw new Error("Missing remote Git index revision; refresh before writing");
+  }
+  const index = await runGitListing(toplevel, [
+    "diff", "--cached", "--raw", "-z", "--no-renames",
+  ], 0, MAX_GIT_LIST * 2);
+  if (index.truncated || sha256(index.output) !== req.expectedIndexToken) {
+    throw new Error("Conflict: staged Git index changed. Refresh before writing");
+  }
+  return index.output.length > 0;
+}
 
 function validateGitRefRequest(req, toplevel) {
   if (req.toplevel !== toplevel || toplevel === "/") {
@@ -736,6 +753,7 @@ async function remoteGitWrite(req) {
   gitWriteInFlight.add(toplevel);
   try {
     await checkGitRefRequest(req, toplevel);
+    const hasStaged = await checkGitIndexRequest(req, toplevel);
     if (req.type === "herdr_git_stage" || req.type === "herdr_git_unstage") {
       const relative = await selectedGitEntry(req, toplevel);
       const literal = ":(literal)" + relative;
@@ -769,10 +787,7 @@ async function remoteGitWrite(req) {
           message.includes("\0")) {
         throw new Error("Invalid commit description");
       }
-      const staged = await runGitListing(toplevel, [
-        "diff", "--cached", "--name-only", "-z",
-      ], 0, 1);
-      if (!staged.output.length) {
+      if (!hasStaged) {
         throw new Error("No staged changes to commit");
       }
       const args = ["commit", "--no-verify", "--no-gpg-sign", "-m", summary];
