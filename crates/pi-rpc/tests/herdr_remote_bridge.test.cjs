@@ -437,6 +437,79 @@ test("5F creates a file or folder only inside the selected Herdr root", {
   }
 });
 
+test("5F guarded remote file entry actions never overwrite or escape", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-entry-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-entry-outside-"));
+  try {
+    fs.mkdirSync(path.join(root, "src"));
+    fs.mkdirSync(path.join(root, "dest"));
+    fs.writeFileSync(path.join(root, "src", "main.rs"), "original\n");
+    fs.writeFileSync(path.join(root, "dest", "main.rs"), "existing\n");
+    fs.writeFileSync(path.join(outside, "secret"), "private");
+    fs.symlinkSync(outside, path.join(root, "external"), "dir");
+    const h = harness(root);
+    const act = async (id, operation, source, props = {}) => {
+      rpcInput(h, {
+        type: "herdr_fs_entry", id, root, path: source,
+        operation, ...props,
+      });
+      return fsReply(h, id);
+    };
+    let result = await act("entry-rename", "rename",
+      path.join(root, "src", "main.rs"), { name: "renamed.rs" });
+    assert.equal(result.success, true, result.error);
+    assert.equal(fs.existsSync(path.join(root, "src", "main.rs")), false);
+    assert.equal(fs.readFileSync(path.join(root, "src", "renamed.rs"), "utf8"), "original\n");
+    result = await act("entry-duplicate", "duplicate",
+      path.join(root, "src", "renamed.rs"));
+    assert.equal(result.success, true, result.error);
+    assert.equal(fs.readFileSync(path.join(root, "src", "renamed copy.rs"), "utf8"),
+      "original\n");
+    result = await act("entry-copy", "copy",
+      path.join(root, "src", "renamed.rs"), {
+        destinationDir: path.join(root, "dest"),
+      });
+    assert.equal(result.success, true, result.error);
+    assert.equal(fs.readFileSync(path.join(root, "dest", "renamed.rs"), "utf8"),
+      "original\n");
+    const conflict = await act("entry-conflict", "rename",
+      path.join(root, "src", "renamed.rs"), { name: "renamed copy.rs" });
+    assert.equal(conflict.success, false, "rename must not overwrite");
+    result = await act("entry-move", "move",
+      path.join(root, "src", "renamed.rs"), {
+        destinationDir: path.join(root, "dest"),
+      });
+    assert.equal(result.success, false, "move must refuse a duplicate name");
+    assert.equal(fs.readFileSync(path.join(root, "dest", "renamed.rs"), "utf8"),
+      "original\n");
+    result = await act("entry-folder", "rename",
+      path.join(root, "src"), { name: "source" });
+    assert.equal(result.success, true, result.error);
+    assert.equal(fs.existsSync(path.join(root, "source", "renamed copy.rs")), true);
+    const escape = await act("entry-escape", "copy",
+      path.join(root, "source", "renamed copy.rs"), { destinationDir: outside });
+    assert.equal(escape.success, false);
+    const symlink = await act("entry-symlink", "move",
+      path.join(root, "source", "renamed copy.rs"), {
+        destinationDir: path.join(root, "external"),
+      });
+    assert.equal(symlink.success, false);
+    assert.equal(fs.existsSync(path.join(outside, "renamed copy.rs")), false);
+    assert.equal((await act("entry-unsafe", "rename",
+      path.join(root, "source", "renamed copy.rs"), { name: "../outside" })).success,
+      false);
+    assert.equal((await act("entry-root", "rename", root, { name: "evil" })).success,
+      false);
+    assert.equal(h.childWrites.length, 1, "only initial Pi startup RPC was forwarded");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test("5C reports remote Git changes and branches without sending Pi commands", {
   skip: process.platform === "win32",
 }, async () => {
