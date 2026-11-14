@@ -4,7 +4,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Editor, EditorState, InputEvent};
+use gpui_kit::component::input::{Editor, EditorState, Input, InputState, InputEvent};
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -54,10 +54,14 @@ struct RemoteGitFile {
 struct RemoteGitBranch {
     name: String,
     current: bool,
+    local: bool,
 }
 
 struct RemoteGitSnapshot {
     toplevel: String,
+    head_oid: Option<String>,
+    current_branch: Option<String>,
+    writes_enabled: bool,
     files: Vec<RemoteGitFile>,
     branches: Vec<RemoteGitBranch>,
     files_truncated: bool,
@@ -106,10 +110,27 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
                 .ok_or("Invalid remote branch")?;
             let current = item["current"].as_bool()
                 .ok_or("Missing active branch state")?;
-            Ok(RemoteGitBranch { name: name.to_owned(), current })
+            Ok(RemoteGitBranch {
+                name: name.to_owned(), current,
+                local: item["local"].as_bool().unwrap_or(false),
+            })
         }).collect::<Result<Vec<_>, &'static str>>()?;
+    let head_oid = match data.get("headOid") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) if s.len() == 40
+            && s.bytes().all(|b| b.is_ascii_hexdigit()) => Some(s.to_owned()),
+        _ => return Err("Invalid remote Git HEAD"),
+    };
+    let current_branch = match data.get("currentBranch") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) if !s.is_empty()
+            && s.len() <= 512 && !s.chars().any(char::is_control) => Some(s.to_owned()),
+        _ => return Err("Invalid remote Git current branch"),
+    };
     Ok(RemoteGitSnapshot {
-        toplevel, files, branches,
+        toplevel, head_oid, current_branch,
+        writes_enabled: data["writesEnabled"].as_bool() == Some(true),
+        files, branches,
         files_truncated: data["filesTruncated"].as_bool().unwrap_or(false),
         branches_truncated: data["branchesTruncated"].as_bool().unwrap_or(false),
     })
@@ -135,6 +156,14 @@ pub struct RemoteFilesView {
     git_loading: bool,
     git_error: Option<String>,
     git_generation: u64,
+    git_busy: bool,
+    git_feedback: Option<String>,
+    git_summary: Entity<InputState>,
+    git_branch_name: Entity<InputState>,
+    git_confirm_commit: Option<String>,
+    git_confirm_create: Option<String>,
+    git_confirm_switch: Option<String>,
+    _git_events: Vec<Subscription>,
     focus: FocusHandle,
     entries: Vec<RemoteEntry>,
     preview: Option<RemotePreview>,
@@ -205,6 +234,20 @@ impl RemoteFilesView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let git_summary = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Commit summary (staged files)")
+        });
+        let git_branch_name = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("New local branch name")
+        });
+        let git_events = vec![
+            cx.subscribe(&git_summary, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event { cx.notify(); }
+            }),
+            cx.subscribe(&git_branch_name, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event { cx.notify(); }
+            }),
+        ];
         let mut view = Self {
             session,
             machine,
@@ -216,6 +259,14 @@ impl RemoteFilesView {
             git_loading: false,
             git_error: None,
             git_generation: 0,
+            git_busy: false,
+            git_feedback: None,
+            git_summary,
+            git_branch_name,
+            git_confirm_commit: None,
+            git_confirm_create: None,
+            git_confirm_switch: None,
+            _git_events: git_events,
             focus: cx.focus_handle(),
             entries: Vec::new(),
             preview: None,
@@ -643,6 +694,120 @@ impl RemoteFilesView {
             });
         }).detach();
         cx.notify();
+    }
+
+    // Writes never use the local Git module. The bridge rechecks repo identity,
+    // HEAD, branch and selected file states before running fixed Git verbs.
+    fn git_write(&mut self, command: serde_json::Value, cx: &mut Context<Self>) {
+        if self.git_busy || self.git_loading { return; }
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.git_error = Some("Remote agent disconnected; no Git changes were made.".into());
+            cx.notify();
+            return;
+        };
+        self.git_busy = true;
+        self.git_error = None;
+        self.git_feedback = None;
+        self.git_confirm_commit = None;
+        self.git_confirm_create = None;
+        self.git_confirm_switch = None;
+        let response = cx.background_executor().spawn(async move {
+            process.request(command).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = response.await;
+            let _ = this.update(cx, |this, cx| {
+                this.git_busy = false;
+                match result {
+                    Ok(_) => {
+                        this.git_feedback = Some("Remote Git updated. Status refreshed.".into());
+                        this.refresh_git(cx);
+                    }
+                    Err(error) => {
+                        this.git_error = Some(friendly_error(&error.to_string()));
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    fn git_file_action(&mut self, action: &'static str, path: String,
+        index: char, worktree: char, cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self.git.as_ref().filter(|s| s.writes_enabled) else { return; };
+        let command = json!({
+            "type": action, "root": self.root, "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
+            "path": path, "expectedIndex": index.to_string(),
+            "expectedWorktree": worktree.to_string(),
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_commit(&mut self, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|s| s.writes_enabled
+            && !s.files_truncated && s.files.iter()
+                .any(|entry| entry.index != ' ' && entry.index != '?'))
+        else { return; };
+        let summary = self.git_summary.read(cx).value().trim().to_owned();
+        if summary.is_empty() { return; }
+        if self.git_confirm_commit.as_deref() != Some(summary.as_str()) {
+            self.git_confirm_commit = Some(summary);
+            self.git_feedback = Some(
+                "Review the staged changes, then click Confirm commit.".into());
+            cx.notify();
+            return;
+        }
+        let command = json!({
+            "type": "herdr_git_commit", "root": self.root,
+            "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
+            "summary": summary,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_create_branch(&mut self, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|s| s.writes_enabled
+            && s.head_oid.is_some() && s.current_branch.is_some())
+        else { return; };
+        let branch = self.git_branch_name.read(cx).value().trim().to_owned();
+        if branch.is_empty() { return; }
+        if self.git_confirm_create.as_deref() != Some(branch.as_str()) {
+            self.git_confirm_create = Some(branch);
+            self.git_feedback = Some("Click Confirm create to add the local branch.".into());
+            cx.notify();
+            return;
+        }
+        let command = json!({
+            "type": "herdr_git_create_branch", "root": self.root,
+            "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
+            "branch": branch,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_switch_branch(&mut self, branch: String, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|s| s.writes_enabled
+            && s.head_oid.is_some() && s.current_branch.is_some())
+        else { return; };
+        if self.git_confirm_switch.as_deref() != Some(branch.as_str()) {
+            self.git_confirm_switch = Some(branch);
+            self.git_feedback = Some(
+                "Branch switching requires a clean tree. Click Confirm switch.".into());
+            cx.notify();
+            return;
+        }
+        let command = json!({
+            "type": "herdr_git_switch_branch", "root": self.root,
+            "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
+            "branch": branch,
+        });
+        self.git_write(command, cx);
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> Div {
