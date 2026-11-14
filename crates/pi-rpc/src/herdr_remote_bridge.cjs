@@ -387,10 +387,10 @@ async function remoteEntry(req) {
     throw new Error("Only owned regular files or directories may be modified");
   }
   const op = req.operation;
-  if (!["rename", "duplicate", "move"].includes(op)) {
+  if (!["rename", "duplicate", "move", "copy"].includes(op)) {
     throw new Error("Unsupported file operation");
   }
-  if (op === "duplicate" && directory) {
+  if ((op === "duplicate" || op === "copy") && directory) {
     throw new Error("Recursive folder duplication is not supported yet");
   }
   let destinationDir = path.posix.dirname(source);
@@ -398,14 +398,24 @@ async function remoteEntry(req) {
   if (op === "rename") {
     newName = req.name;
     if (!validEntryName(newName)) throw new Error("Invalid new name");
-  } else if (op === "duplicate") {
-    const dot = newName.lastIndexOf(".");
-    const stem = dot > 0 ? newName.slice(0, dot) : newName;
-    const ext = dot > 0 ? newName.slice(dot) : "";
+  } else if (op === "move" || op === "copy") {
+    destinationDir = await safeRemotePath(req.root, req.destinationDir);
+    const targetStat = await fs.lstat(destinationDir);
+    if (!targetStat.isDirectory()) throw new Error("Destination is not a folder");
+    if (op === "move" && directory && within(source, destinationDir)) {
+      throw new Error("Cannot move a directory inside itself");
+    }
+  }
+  if (op === "duplicate" || op === "copy") {
+    const base = newName;
+    const dot = base.lastIndexOf(".");
+    const stem = dot > 0 ? base.slice(0, dot) : base;
+    const ext = dot > 0 ? base.slice(dot) : "";
     let found = false;
-    for (let i = 1; i <= 100; i++) {
+    for (let i = 0; i <= 100; i++) {
       const candidate = path.posix.join(destinationDir,
-        stem + " copy" + (i === 1 ? "" : " " + i) + ext);
+        i === 0 && op === "copy" ? base :
+        stem + " copy" + (i <= 1 ? "" : " " + i) + ext);
       try {
         await fs.lstat(candidate);
       } catch (error) {
@@ -416,13 +426,6 @@ async function remoteEntry(req) {
       }
     }
     if (!found) throw new Error("No available duplicate name");
-  } else {
-    destinationDir = await safeRemotePath(req.root, req.destinationDir);
-    const targetStat = await fs.lstat(destinationDir);
-    if (!targetStat.isDirectory()) throw new Error("Destination is not a folder");
-    if (directory && within(source, destinationDir)) {
-      throw new Error("Cannot move a directory inside itself");
-    }
   }
   if (!validEntryName(newName)) throw new Error("Invalid destination name");
   const destination = path.posix.join(destinationDir, newName);
@@ -430,7 +433,7 @@ async function remoteEntry(req) {
     throw new Error("Destination is outside the allowed project");
   }
   if (source === destination) return { path: source, operation: op };
-  if (op === "duplicate") {
+  if (op === "duplicate" || op === "copy") {
     await exclusiveFileCopy(source, destination);
   } else {
     // POSIX rename can overwrite. Reserve a directory's destination first;

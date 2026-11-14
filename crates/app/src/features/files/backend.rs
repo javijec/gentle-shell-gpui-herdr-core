@@ -56,6 +56,7 @@ pub(super) enum WorkspaceEntryAction {
     Rename(String),
     Duplicate,
     Move(WorkspacePath),
+    CopyTo(WorkspacePath),
 }
 
 #[derive(Clone, Copy)]
@@ -259,6 +260,20 @@ impl WorkspaceBackend {
                             ops::copy_all(&source, &path).map_err(|e| e.to_string())?;
                             path
                         }
+                        WorkspaceEntryAction::CopyTo(WorkspacePath::Local(target)) => {
+                            ensure_local_path(&root, &target)?;
+                            let name = source.file_name().ok_or("Selected file has no name")?;
+                            let original = target.join(name);
+                            let path = if original.symlink_metadata().is_ok() {
+                                ops::copy_name(&original, source.is_dir(),
+                                    |path| path.symlink_metadata().is_ok())
+                            } else {
+                                original
+                            };
+                            ensure_local_path(&root, &path)?;
+                            ops::copy_all(&source, &path).map_err(|e| e.to_string())?;
+                            path
+                        }
                         WorkspaceEntryAction::Move(WorkspacePath::Local(target)) => {
                             ensure_local_path(&root, &target)?;
                             let name = source.file_name()
@@ -274,8 +289,9 @@ impl WorkspaceBackend {
                             }
                             path
                         }
-                        WorkspaceEntryAction::Move(_) => {
-                            return Err("Cannot move across workspace backends".into());
+                        WorkspaceEntryAction::Move(_) |
+                        WorkspaceEntryAction::CopyTo(_) => {
+                            return Err("Cannot transfer across workspace backends".into());
                         }
                     };
                     Ok(WorkspacePath::Local(path))
@@ -295,8 +311,13 @@ impl WorkspaceBackend {
                             ensure_herdr_path(&root, &target)?;
                             ("move", None, Some(target))
                         }
-                        WorkspaceEntryAction::Move(_) => {
-                            return Err("Cannot move between local and Herdr".into());
+                        WorkspaceEntryAction::CopyTo(WorkspacePath::Herdr(target)) => {
+                            ensure_herdr_path(&root, &target)?;
+                            ("copy", None, Some(target))
+                        }
+                        WorkspaceEntryAction::Move(_) |
+                        WorkspaceEntryAction::CopyTo(_) => {
+                            return Err("Cannot transfer between local and Herdr".into());
                         }
                     };
                     let reply = process.request(json!({
