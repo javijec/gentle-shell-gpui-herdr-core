@@ -806,7 +806,7 @@ async function remoteGitWrite(req) {
         // Refuse every switch when dirty, including untracked files.
         const dirty = await runGitListing(toplevel, [
           "status", "--porcelain=v1", "-z",
-          "--untracked-files=all", "--ignore-submodules=all",
+          "--untracked-files=all",
         ], 0, 1);
         if (dirty.output.length || dirty.truncated) {
           throw new Error("Switch requires a clean index and worktree");

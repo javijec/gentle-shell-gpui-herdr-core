@@ -38,9 +38,9 @@ modifique Git. Las escrituras tienen comandos privados separados:
 | `herdr_git_switch_branch` | `branch` |
 
 Todas las escrituras deben incluir `root`, `toplevel`,
-`expectedHead`, `expectedBranch`, además del `id` normal de RPC.
+`expectedHead`, `expectedBranch`, `expectedIndexToken`, además del `id` normal de RPC.
 La ruta del repositorio debe coincidir con la obtenida por el puente.
-El puente verifica de nuevo `HEAD` y la rama actual antes de mutar.
+El puente verifica de nuevo `HEAD`, la rama actual y la huella SHA-256 del diff crudo staged (`indexToken`) antes de mutar. Así, otro proceso no puede cambiar silenciosamente el índice staged entre el snapshot y la petición. La huella se calcula con lectura acotada; si supera el límite de 200 cambios staged, se deshabilitan las escrituras hasta reducir el conjunto.
 Las acciones por archivo también comprueban el estado Git observado
 (`index` / `worktree`), y rechazan rutas escapadas, externas, enlaces
 simbólicos y directorios.

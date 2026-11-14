@@ -142,6 +142,46 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
     })
 }
 
+#[cfg(test)]
+mod remote_git_snapshot_tests {
+    use super::parse_git_snapshot;
+    use serde_json::json;
+
+    #[test]
+    fn supports_guarded_5d_snapshots_and_old_read_only_bridge() {
+        let mut value = json!({
+            "toplevel": "/srv/workspaces/JaviPi",
+            "readOnly": true,
+            "writesEnabled": true,
+            "headOid": "a".repeat(40),
+            "currentBranch": "main",
+            "indexToken": "b".repeat(64),
+            "indexTruncated": false,
+            "files": [{ "path": "tracked.txt", "index": "M", "worktree": " " }],
+            "branches": [{ "name": "main", "current": true, "local": true }],
+        });
+        let result = parse_git_snapshot(&value).expect("valid 5D snapshot");
+        assert!(result.writes_enabled);
+        assert_eq!(result.index_token.as_deref(), Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+        assert!(result.branches[0].local);
+        value.as_object_mut().expect("object").remove("indexToken");
+        assert!(!parse_git_snapshot(&value).expect("missing token").writes_enabled);
+        value["readOnly"] = json!(false);
+        assert!(parse_git_snapshot(&value).is_err());
+    }
+
+    #[test]
+    fn rejects_paths_that_escape_linux_repository() {
+        let value = json!({
+            "toplevel": "/srv/workspaces/JaviPi",
+            "readOnly": true,
+            "files": [{ "path": "../outside", "index": "M", "worktree": " " }],
+            "branches": [],
+        });
+        assert!(parse_git_snapshot(&value).is_err());
+    }
+}
+
 const MAX_EDIT_BYTES: usize = 128 * 1024;
 const CONTEXT: &str = "GentleRemoteFileView";
 const SAVE_HINT: &str = if cfg!(target_os = "macos") { "⌘S" } else { "Ctrl+S" };
