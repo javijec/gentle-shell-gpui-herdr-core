@@ -15,6 +15,9 @@ use gpui_kit::*;
 use serde_json::json;
 
 use crate::features::session::SessionView;
+use crate::features::git::{RefEntry, RefsSnapshot};
+use gentle_core::git::refs::{HeadInfo, RefKind, Stash};
+use super::refs::{RefsEvent, RefsView};
 use super::backend::{
     GitFileAction, GitFileMutation, HerdrGitGuard, WorkspaceBackend,
     WorkspaceDirEntry as RemoteEntry, WorkspacePath,
@@ -172,6 +175,51 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
     })
 }
 
+/// Project a bounded Herdr Git read into the same native RefsSnapshot
+/// consumed by RefsView. Linux paths never become native PathBuf objects.
+fn shared_remote_refs(source: &RemoteGitSnapshot) -> RefsSnapshot {
+    let mut refs = RefsSnapshot::default();
+    refs.head = HeadInfo {
+        branch: source.current_branch.clone(),
+        sha: source.head_oid.as_ref().map(|oid| oid.chars().take(7).collect()),
+        dirty: !source.files.is_empty(),
+        ..HeadInfo::default()
+    };
+    for branch in &source.branches {
+        let entry = RefEntry {
+            kind: if branch.local { RefKind::Branch } else { RefKind::Remote },
+            name: branch.name.clone(),
+            current: branch.current,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            gone: false,
+            sha: String::new(),
+            subject: String::new(),
+        };
+        if branch.local {
+            refs.branches.push(entry);
+        } else {
+            refs.remotes.push(entry);
+        }
+    }
+    refs.tags = source.tags.iter().map(|tag| RefEntry {
+        kind: RefKind::Tag,
+        name: tag.clone(),
+        current: false,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        gone: false,
+        sha: String::new(),
+        subject: String::new(),
+    }).collect();
+    refs.stashes = source.stashes.iter().map(|stash| Stash {
+        name: stash.name.clone(), branch: None, message: stash.message.clone(),
+    }).collect();
+    refs
+}
+
 #[cfg(test)]
 mod remote_git_snapshot_tests {
     use super::parse_git_snapshot;
@@ -260,6 +308,8 @@ pub struct RemoteFilesView {
     git_feedback: Option<String>,
     git_summary: Entity<InputState>,
     git_branch_name: Entity<InputState>,
+    refs: Entity<RefsView>,
+    _refs_events: Subscription,
     git_filter: Entity<InputState>,
     git_collapsed: HashSet<RefSection>,
     git_confirm_commit: Option<String>,
@@ -346,6 +396,12 @@ impl RemoteFilesView {
             InputState::new(window, cx).placeholder("New local branch name")
         });
         let git_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter refs"));
+        let refs = cx.new(|cx| RefsView::new_remote(window, cx));
+        let refs_events = cx.subscribe(&refs, |this, _, event: &RefsEvent, cx| {
+            if let RefsEvent::SwitchRemoteBranch(branch) = event {
+                this.git_switch_branch(branch.clone(), cx);
+            }
+        });
         let git_events = vec![
             cx.subscribe(&git_summary, |_, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event { cx.notify(); }
@@ -372,6 +428,8 @@ impl RemoteFilesView {
             git_feedback: None,
             git_summary,
             git_branch_name,
+            refs,
+            _refs_events: refs_events,
             git_filter,
             git_collapsed: HashSet::new(),
             git_confirm_commit: None,
@@ -881,6 +939,10 @@ impl RemoteFilesView {
                 match result {
                     Ok(reply) => match parse_git_snapshot(&reply.data) {
                         Ok(snapshot) => {
+                            let refs = shared_remote_refs(&snapshot);
+                            this.refs.update(cx, |view, cx| {
+                                view.set_remote_refs(Some(refs), cx);
+                            });
                             this.git = Some(snapshot);
                             this.git_error = None;
                         }
@@ -893,6 +955,11 @@ impl RemoteFilesView {
                         this.git = None;
                         this.git_error = Some(friendly_error(&error.to_string()));
                     }
+                }
+                if this.git.is_none() {
+                    this.refs.update(cx, |view, cx| {
+                        view.set_remote_refs(None, cx);
+                    });
                 }
                 cx.notify();
             });
