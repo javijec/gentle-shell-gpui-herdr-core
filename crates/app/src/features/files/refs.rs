@@ -9,16 +9,18 @@ use std::time::Duration;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::ButtonVariant;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::features::git::{self, RefEntry, RefsSnapshot, StashAction, Worktree};
-use super::branches_ui::{BranchDisplay, branch_row};
+use super::branches_ui::{
+    BranchDisplay, RefSection as Section, branch_row, filter_field, matches_filter,
+    ref_section_header,
+};
 use crate::shared::ui;
 
 const POLL: Duration = Duration::from_secs(5);
@@ -30,29 +32,6 @@ pub enum RefsEvent {
     Changed,
     /// Open an agent tab in this worktree's folder.
     OpenAgent(PathBuf),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Section {
-    Branches,
-    Remotes,
-    Tags,
-    Stashes,
-    Worktrees,
-    Submodules,
-}
-
-impl Section {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Branches => "Branches",
-            Self::Remotes => "Remotes",
-            Self::Tags => "Tags",
-            Self::Stashes => "Stashes",
-            Self::Worktrees => "Worktrees",
-            Self::Submodules => "Submodules",
-        }
-    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -197,8 +176,7 @@ impl RefsView {
         if let Some(repo) = self.snapshot() {
             let typed = self.filter.read(cx).value();
             let typed = typed.trim();
-            let query = typed.to_lowercase();
-            let hit = |text: &str| query.is_empty() || text.to_lowercase().contains(&query);
+            let hit = |text: &str| matches_filter(typed, text);
             let refs = &repo.refs;
             if could_be_branch(typed) && !refs.branches.iter().any(|b| b.name == typed) {
                 lines.push(Line::NewWorktree);
@@ -416,39 +394,7 @@ impl RefsView {
         collapsed: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        h_flex()
-            .id(SharedString::from(format!("refs-section-{section:?}")))
-            .h(px(ROW_HEIGHT))
-            .mx_1p5()
-            .px_1p5()
-            .gap_1p5()
-            .rounded_md()
-            .cursor_pointer()
-            .hover(|s| s.bg(ui::surface_hover()))
-            .child(
-                Icon::new(if collapsed {
-                    IconName::ChevronRight
-                } else {
-                    IconName::ChevronDown
-                })
-                .xsmall()
-                .text_color(ui::faint()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(12.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(ui::muted())
-                    .child(section.label()),
-            )
-            .child(
-                div()
-                    .font_family(ui::MONO)
-                    .text_size(px(10.5))
-                    .text_color(ui::faint())
-                    .child(count.to_string()),
-            )
+        ref_section_header(section, count, collapsed)
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !this.collapsed.remove(&section) {
                     this.collapsed.insert(section);
@@ -847,17 +793,7 @@ impl Render for RefsView {
         v_flex()
             .size_full()
             .min_h_0()
-            .child(
-                div().flex_none().mx_2().mt_1().mb_1().child(
-                    ui::field()
-                        .h(px(30.))
-                        .child(Icon::new(IconName::Funnel).small().text_color(ui::faint()))
-                        .child(Input::new(&self.filter).appearance(false).small())
-                        .when(self.busy, |d| {
-                            d.child(Spinner::new().xsmall().color(ui::accent()))
-                        }),
-                ),
-            )
+            .child(filter_field(&self.filter, self.busy))
             .child(self.render_body(cx))
             .when_some(self.error.clone(), |d, error| {
                 d.child(

@@ -2,6 +2,8 @@
 //! revision-checked UTF-8 editing run through the existing injected bridge.
 //! This view never uses local Windows filesystem APIs or remote Pi bash.
 
+use std::collections::HashSet;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -20,7 +22,10 @@ use super::backend::{
 };
 use gentle_core::git::status::{EntryKind, StatusEntry as RemoteGitFile};
 use super::changes_ui::{ChangeSide, change_row, section_header, side_entries};
-use super::branches_ui::{BranchDisplay, branch_row};
+use super::branches_ui::{
+    BranchDisplay, RefSection, branch_matches, branch_row, filter_field,
+    ref_section_header,
+};
 use super::tabs::FilePanelTab as RemoteTab;
 use super::viewer::MdMode;
 use crate::shared::ui;
@@ -189,6 +194,8 @@ pub struct RemoteFilesView {
     git_feedback: Option<String>,
     git_summary: Entity<InputState>,
     git_branch_name: Entity<InputState>,
+    git_filter: Entity<InputState>,
+    git_collapsed: HashSet<RefSection>,
     git_confirm_commit: Option<String>,
     git_confirm_create: Option<String>,
     git_confirm_switch: Option<String>,
@@ -269,11 +276,15 @@ impl RemoteFilesView {
         let git_branch_name = cx.new(|cx| {
             InputState::new(window, cx).placeholder("New local branch name")
         });
+        let git_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter refs"));
         let git_events = vec![
             cx.subscribe(&git_summary, |_, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event { cx.notify(); }
             }),
             cx.subscribe(&git_branch_name, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event { cx.notify(); }
+            }),
+            cx.subscribe(&git_filter, |_, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event { cx.notify(); }
             }),
         ];
@@ -292,6 +303,8 @@ impl RemoteFilesView {
             git_feedback: None,
             git_summary,
             git_branch_name,
+            git_filter,
+            git_collapsed: HashSet::new(),
             git_confirm_commit: None,
             git_confirm_create: None,
             git_confirm_switch: None,
@@ -1049,12 +1062,53 @@ unstaged files stay untouched."))
                     self.push_git_commit_form(&mut rows, snapshot, cx);
                 }
             } else if self.tab == RemoteTab::Branches {
-                if snapshot.branches.is_empty() {
-                    rows.push(div().px_3().py_3().text_sm().text_color(ui::muted())
-                        .child("No Git branches").into_any_element());
+                let query = self.git_filter.read(cx).value().trim().to_owned();
+                let mut matched = 0usize;
+                // The 5D snapshot already distinguishes local and remote
+                // branches. Keep their original indices for guarded Switch.
+                for section in [RefSection::Branches, RefSection::Remotes] {
+                    let visible: Vec<usize> = snapshot.branches.iter()
+                        .enumerate()
+                        .filter(|(_, branch)| {
+                            branch_matches(section, branch.local, &branch.name, &query)
+                        })
+                        .map(|(index, _)| index)
+                        .collect();
+                    if visible.is_empty() {
+                        continue;
+                    }
+                    matched += visible.len();
+                    let collapsed = self.git_collapsed.contains(&section);
+                    rows.push(
+                        ref_section_header(section, visible.len(), collapsed)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.git_collapsed.remove(&section) {
+                                    this.git_collapsed.insert(section);
+                                }
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    );
+                    if !collapsed {
+                        for index in visible {
+                            if let Some(branch) = snapshot.branches.get(index) {
+                                self.push_git_branch_row(
+                                    &mut rows, branch, index, writable, cx,
+                                );
+                            }
+                        }
+                    }
                 }
-                for (index, branch) in snapshot.branches.iter().enumerate() {
-                    self.push_git_branch_row(&mut rows, branch, index, writable, cx);
+                if matched == 0 {
+                    rows.push(
+                        div().px_3().py_3().text_sm().text_color(ui::muted())
+                            .child(if query.is_empty() {
+                                "No Git branches"
+                            } else {
+                                "No refs match in the loaded branch list"
+                            })
+                            .into_any_element(),
+                    );
                 }
                 if snapshot.branches_truncated {
                     rows.push(div().px_3().py_2().text_xs()
@@ -1099,6 +1153,9 @@ unstaged files stay untouched."))
                     ),
             )
             .child(self.render_tabs(cx))
+            .when(self.tab == RemoteTab::Branches, |panel| {
+                panel.child(filter_field(&self.git_filter, self.git_loading || self.git_busy))
+            })
             .when(self.git_loading, |panel| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child("Reading status from remote Git…"),
