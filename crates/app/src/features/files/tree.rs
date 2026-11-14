@@ -19,6 +19,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::changes::{ChangesEvent, ChangesView};
+use super::dock_ui::{file_row_shell as row_shell, panel_header, panel_shell};
 use super::listing::Entry;
 use super::backend::{WorkspaceBackend, WorkspacePath};
 use super::ops::{self, ClipMode};
@@ -1355,12 +1356,10 @@ impl Render for FileTreeView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let files = self.tab == Tab::Files;
         let tree = cx.entity().downgrade();
-        let header = h_flex()
-            .h(px(40.))
+        let header = panel_header()
             .pl_3()
             .pr_1p5()
             .gap_0p5()
-            .flex_none()
             .child(Icon::new(IconName::Folder).small().text_color(ui::muted()))
             .child(
                 div()
@@ -1418,9 +1417,7 @@ impl Render for FileTreeView {
             .child(self.tab_button(Tab::Branches, 0, cx));
         // The workspace's sidebar slot paints the rounded glass; a fill here
         // would show square corners past it (GPUI clips to rectangles).
-        v_flex()
-            .size_full()
-            .min_h_0()
+        panel_shell()
             .child(header)
             .child(tabs)
             .child(match self.tab {
@@ -1440,19 +1437,6 @@ impl Render for FileTreeView {
 }
 
 /// The frame every tree row shares: height, indent, hover and selection.
-fn row_shell(id: SharedString, depth: usize, highlighted: bool) -> Stateful<Div> {
-    h_flex()
-        .id(id)
-        .h(px(ROW_HEIGHT))
-        .w_full()
-        .pl(px(6. + depth as f32 * INDENT))
-        .pr_2()
-        .gap_1p5()
-        .rounded_md()
-        .when(highlighted, |d| d.bg(ui::raised()))
-        .when(!highlighted, |d| d.hover(|s| s.bg(ui::surface_hover())))
-}
-
 fn empty_state(icon: IconName, text: &'static str) -> Div {
     v_flex()
         .flex_1()

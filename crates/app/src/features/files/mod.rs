@@ -4,6 +4,7 @@
 
 mod changes;
 mod changes_ui;
+mod dock_ui;
 mod branches_ui;
 mod backend;
 mod remote;

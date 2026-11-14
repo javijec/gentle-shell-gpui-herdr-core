@@ -22,6 +22,7 @@ use super::backend::{
 };
 use gentle_core::git::status::{EntryKind, StatusEntry as RemoteGitFile};
 use super::changes_ui::{ChangeSide, change_row, section_header, side_entries};
+use super::dock_ui::{file_row_shell, panel_header, panel_shell};
 use super::branches_ui::{
     BranchDisplay, RefSection, branch_matches, branch_row, filter_field,
     matches_filter, ref_row, ref_section_header,
@@ -1253,11 +1254,9 @@ unstaged files stay untouched."))
     /// 5D previously built every interactive row and both editors inside
     /// this one render frame, overflowing the Windows UI thread stack.
     fn render_git_panel(&self, cx: &mut Context<Self>) -> Div {
-        v_flex()
-            .size_full()
-            .min_h_0()
+        panel_shell()
             .child(
-                h_flex().h(px(40.)).px_2().gap_1().flex_none()
+                panel_header()
                     .child(Icon::new(IconName::GitBranch).small().text_color(ui::petal()))
                     .child(div().flex_1().min_w_0().truncate().text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
@@ -1495,11 +1494,9 @@ impl Render for RemoteFilesView {
                 let click_path = path.clone();
                 let insert_path = path;
                 content = content.child(
-                    h_flex()
-                        .id(("remote-file-row", index))
-                        .h(px(26.)).px_2().gap(px(5.))
-                        .cursor_pointer()
-                        .hover(|row| row.bg(ui::surface_hover()))
+                    file_row_shell(
+                        SharedString::from(format!("remote-file-row-{index}")), 0, false,
+                    ).cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if is_dir {
                                 this.load_directory(click_path.clone(), cx);
@@ -1528,14 +1525,12 @@ impl Render for RemoteFilesView {
             }
         }
 
-        v_flex()
+        panel_shell()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::save_shortcut))
-            .size_full()
-            .min_h_0()
             .child(
-                h_flex().h(px(40.)).px_2().gap_1().flex_none()
+                panel_header()
                     .child(Icon::new(if central { IconName::FileCode }
                         else { IconName::Layers })
                         .small().text_color(ui::petal()))
