@@ -982,7 +982,9 @@ impl RemoteFilesView {
                 dir.clone(),
             _ => source_parent.clone(),
         };
-        let should_clear_clipboard = matches!(&action, WorkspaceEntryAction::Move(_));
+        let should_clear_clipboard = matches!(
+            &action, WorkspaceEntryAction::Rename(_) | WorkspaceEntryAction::Move(_)
+        );
         let operation = WorkspaceBackend::herdr(self.root.clone(), process)
             .entry(WorkspacePath::Herdr(source.clone()), action);
         self.entry_busy = true;
@@ -1008,10 +1010,7 @@ impl RemoteFilesView {
                         if this.tree_selected_directory.as_deref() == Some(source.as_str()) {
                             this.tree_selected_directory = None;
                         }
-                        if should_clear_clipboard || this.file_clipboard.as_ref()
-                            .is_some_and(|(path, _)| path == &source
-                                && this.tree_selected_entry.is_none())
-                        {
+                        if should_clear_clipboard {
                             this.file_clipboard = None;
                         }
                         this.refresh_tree_folder(source_parent.clone(), cx);
