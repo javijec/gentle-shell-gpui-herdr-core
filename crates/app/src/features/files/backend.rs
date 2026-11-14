@@ -14,7 +14,7 @@ use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
 use crate::features::git;
-use super::listing;
+use super::{listing, ops};
 
 pub(super) type BackendFuture<T> =
     Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'static>>;
@@ -49,6 +49,13 @@ pub(super) struct WorkspaceText {
     pub path: String,
     pub content: String,
     pub revision: Option<String>,
+}
+
+#[derive(Clone)]
+pub(super) enum WorkspaceEntryAction {
+    Rename(String),
+    Duplicate,
+    Move(WorkspacePath),
 }
 
 #[derive(Clone, Copy)]
@@ -223,6 +230,96 @@ impl WorkspaceBackend {
         })
     }
 
+    /// Rename, duplicate or move a file/folder via the same typed backend.
+    /// Herdr never falls back to native Windows paths or filesystem calls.
+    pub fn entry(
+        self, source: WorkspacePath, action: WorkspaceEntryAction,
+    ) -> BackendFuture<WorkspacePath> {
+        Box::pin(async move {
+            match (self, source) {
+                (Self::Local { root }, WorkspacePath::Local(source)) => {
+                    ensure_local_path(&root, &source)?;
+                    if source == root {
+                        return Err("Cannot modify the selected workspace root".into());
+                    }
+                    let path = match action {
+                        WorkspaceEntryAction::Rename(name) => {
+                            validate_entry_name(&name)?;
+                            let parent = source.parent()
+                                .ok_or("Selected file has no parent directory")?;
+                            let path = parent.join(name);
+                            ensure_local_path(&root, &path)?;
+                            ops::rename(&source, &path).map_err(|e| e.to_string())?;
+                            path
+                        }
+                        WorkspaceEntryAction::Duplicate => {
+                            let path = ops::copy_name(&source, source.is_dir(),
+                                |path| path.symlink_metadata().is_ok());
+                            ensure_local_path(&root, &path)?;
+                            ops::copy_all(&source, &path).map_err(|e| e.to_string())?;
+                            path
+                        }
+                        WorkspaceEntryAction::Move(WorkspacePath::Local(target)) => {
+                            ensure_local_path(&root, &target)?;
+                            let name = source.file_name()
+                                .ok_or("Selected file has no name")?;
+                            let path = target.join(name);
+                            ensure_local_path(&root, &path)?;
+                            if path != source {
+                                if path.symlink_metadata().is_ok() {
+                                    return Err("Destination already exists".into());
+                                }
+                                ops::move_entry(&source, &path)
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            path
+                        }
+                        WorkspaceEntryAction::Move(_) => {
+                            return Err("Cannot move across workspace backends".into());
+                        }
+                    };
+                    Ok(WorkspacePath::Local(path))
+                }
+                (Self::Herdr { root, process }, WorkspacePath::Herdr(source)) => {
+                    ensure_herdr_path(&root, &source)?;
+                    if source == root {
+                        return Err("Cannot modify the selected remote workspace root".into());
+                    }
+                    let (operation, name, destination) = match action {
+                        WorkspaceEntryAction::Rename(name) => {
+                            validate_entry_name(&name)?;
+                            ("rename", Some(name), None)
+                        }
+                        WorkspaceEntryAction::Duplicate => ("duplicate", None, None),
+                        WorkspaceEntryAction::Move(WorkspacePath::Herdr(target)) => {
+                            ensure_herdr_path(&root, &target)?;
+                            ("move", None, Some(target))
+                        }
+                        WorkspaceEntryAction::Move(_) => {
+                            return Err("Cannot move between local and Herdr".into());
+                        }
+                    };
+                    let reply = process.request(json!({
+                        "type": "herdr_fs_entry",
+                        "root": root,
+                        "path": source,
+                        "operation": operation,
+                        "name": name,
+                        "destinationDir": destination,
+                    })).await.map_err(|e| e.to_string())?;
+                    let path = reply.data["path"].as_str()
+                        .ok_or("Invalid remote file operation response")?.to_owned();
+                    ensure_herdr_path(&root, &path)?;
+                    if path == root {
+                        return Err("Remote operation returned the project root".into());
+                    }
+                    Ok(WorkspacePath::Herdr(path))
+                }
+                _ => Err("Workspace path does not belong to the selected backend".into()),
+            }
+        })
+    }
+
     /// Existing-file UTF-8 save, fenced by a SHA-256 read revision.
     /// Herdr enforces the guard again server-side, including symlink checks.
     pub fn write(
@@ -329,6 +426,18 @@ impl WorkspaceBackend {
                 }
             }
         })
+    }
+}
+
+fn validate_entry_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 255 || name == "." || name == ".."
+        || name == ".git" || name.starts_with(".herdr-save-")
+        || name.contains('/') || name.contains('\\')
+        || name.chars().any(char::is_control)
+    {
+        Err("Invalid file or folder name".into())
+    } else {
+        Ok(())
     }
 }
 
