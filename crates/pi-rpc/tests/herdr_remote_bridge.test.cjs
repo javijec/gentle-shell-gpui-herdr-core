@@ -401,6 +401,42 @@ function gitInit(root) {
   return git;
 }
 
+test("5F creates a file or folder only inside the selected Herdr root", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-create-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-create-outside-"));
+  try {
+    const h = harness(root);
+    const create = async (id, parent, name, kind) => {
+      rpcInput(h, {
+        type: "herdr_fs_create", id, root, path: parent, name, kind,
+      });
+      return await fsReply(h, id);
+    };
+    const directory = await create("create-dir", root, "src", "directory");
+    assert.equal(directory.success, true, directory.error);
+    assert.equal(fs.statSync(path.join(root, "src")).isDirectory(), true);
+    const file = await create("create-file", path.join(root, "src"), "main.rs", "file");
+    assert.equal(file.success, true, file.error);
+    assert.equal(fs.readFileSync(path.join(root, "src/main.rs"), "utf8"), "");
+    assert.equal((await create("create-duplicate",
+      path.join(root, "src"), "main.rs", "file")).success, false);
+    assert.equal((await create("create-traverse",
+      root, "../outside", "directory")).success, false);
+    assert.equal((await create("create-git", root, ".git", "directory")).success, false);
+    fs.symlinkSync(outside, path.join(root, "external"), "dir");
+    assert.equal((await create("create-symlink",
+      path.join(root, "external"), "escape", "file")).success, false);
+    assert.equal(fs.existsSync(path.join(outside, "escape")), false);
+    assert.equal(h.childWrites.length, 1, "no additional Pi agent RPC operations");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test("5C reports remote Git changes and branches without sending Pi commands", {
   skip: process.platform === "win32",
 }, async () => {
