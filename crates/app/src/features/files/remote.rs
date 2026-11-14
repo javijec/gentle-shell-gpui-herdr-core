@@ -1129,14 +1129,33 @@ unstaged files stay untouched."))
                 let mut matched = 0usize;
                 // The 5D snapshot already distinguishes local and remote
                 // branches. Keep their original indices for guarded Switch.
-                for section in [RefSection::Branches, RefSection::Remotes] {
-                    let visible: Vec<usize> = snapshot.branches.iter()
-                        .enumerate()
-                        .filter(|(_, branch)| {
-                            branch_matches(section, branch.local, &branch.name, &query)
-                        })
-                        .map(|(index, _)| index)
-                        .collect();
+                for section in [
+                    RefSection::Branches, RefSection::Remotes,
+                    RefSection::Tags, RefSection::Stashes,
+                ] {
+                    let visible: Vec<usize> = match section {
+                        RefSection::Branches | RefSection::Remotes => snapshot.branches.iter()
+                            .enumerate()
+                            .filter(|(_, branch)| {
+                                branch_matches(section, branch.local, &branch.name, &query)
+                            })
+                            .map(|(index, _)| index)
+                            .collect(),
+                        RefSection::Tags => snapshot.tags.iter()
+                            .enumerate()
+                            .filter(|(_, tag)| matches_filter(&query, tag))
+                            .map(|(index, _)| index)
+                            .collect(),
+                        RefSection::Stashes => snapshot.stashes.iter()
+                            .enumerate()
+                            .filter(|(_, stash)| {
+                                matches_filter(&query, &stash.name)
+                                    || matches_filter(&query, &stash.message)
+                            })
+                            .map(|(index, _)| index)
+                            .collect(),
+                        _ => Vec::new(),
+                    };
                     if visible.is_empty() {
                         continue;
                     }
@@ -1154,10 +1173,44 @@ unstaged files stay untouched."))
                     );
                     if !collapsed {
                         for index in visible {
-                            if let Some(branch) = snapshot.branches.get(index) {
-                                self.push_git_branch_row(
-                                    &mut rows, branch, index, writable, cx,
-                                );
+                            match section {
+                                RefSection::Branches | RefSection::Remotes => {
+                                    if let Some(branch) = snapshot.branches.get(index) {
+                                        self.push_git_branch_row(
+                                            &mut rows, branch, index, writable, cx,
+                                        );
+                                    }
+                                }
+                                RefSection::Tags => {
+                                    if let Some(tag) = snapshot.tags.get(index) {
+                                        rows.push(ref_row(
+                                            SharedString::from(format!("remote-ref-tag-{index}")),
+                                            IconName::Tag,
+                                            ui::muted(),
+                                            tag.clone(),
+                                            ui::fg(),
+                                            None,
+                                        ).into_any_element());
+                                    }
+                                }
+                                RefSection::Stashes => {
+                                    if let Some(stash) = snapshot.stashes.get(index) {
+                                        rows.push(ref_row(
+                                            SharedString::from(format!("remote-ref-stash-{index}")),
+                                            IconName::Archive,
+                                            ui::muted(),
+                                            stash.message.clone(),
+                                            ui::fg(),
+                                            Some(div()
+                                                .font_family(ui::MONO)
+                                                .text_size(px(10.5))
+                                                .text_color(ui::faint())
+                                                .child(stash.name.clone())
+                                                .into_any_element()),
+                                        ).into_any_element());
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -1166,9 +1219,9 @@ unstaged files stay untouched."))
                     rows.push(
                         div().px_3().py_3().text_sm().text_color(ui::muted())
                             .child(if query.is_empty() {
-                                "No Git branches"
+                                "No Git references"
                             } else {
-                                "No refs match in the loaded branch list"
+                                "No refs match in the loaded snapshot"
                             })
                             .into_any_element(),
                     );
@@ -1177,6 +1230,16 @@ unstaged files stay untouched."))
                     rows.push(div().px_3().py_2().text_xs()
                         .text_color(ui::warning())
                         .child("Showing first 120 branches").into_any_element());
+                }
+                if snapshot.tags_truncated {
+                    rows.push(div().px_3().py_2().text_xs()
+                        .text_color(ui::warning())
+                        .child("Showing first 120 tags").into_any_element());
+                }
+                if snapshot.stashes_truncated {
+                    rows.push(div().px_3().py_2().text_xs()
+                        .text_color(ui::warning())
+                        .child("Showing first 120 stashes").into_any_element());
                 }
                 if writable {
                     self.push_git_create_branch_form(&mut rows, snapshot, cx);
