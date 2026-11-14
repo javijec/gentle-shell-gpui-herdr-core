@@ -988,11 +988,10 @@ impl RemoteFilesView {
                             this.refs.update(cx, |view, cx| {
                                 view.set_remote_refs(Some(refs), cx);
                             });
+                            let writable = snapshot.writes_enabled
+                                && !snapshot.files_truncated && this.root != "/";
                             this.changes.update(cx, |view, cx| {
-                                view.set_remote_tree(
-                                    Some(tree), snapshot.writes_enabled
-                                        && !snapshot.files_truncated && this.root != "/", cx,
-                                );
+                                view.set_remote_tree(Some(tree), writable, cx);
                             });
                             this.git = Some(snapshot);
                             this.git_error = None;
