@@ -43,7 +43,13 @@ function harness(cwd = "/srv/workspaces/JaviPi") {
   const requireMock = (name) => {
     if (name === "node:child_process") {
       return {
-        spawn: (...args) => { calls.push(args); return child; },
+        spawn: (...args) => {
+          if (args[0] === "git") {
+            return require("node:child_process").spawn(...args);
+          }
+          calls.push(args);
+          return child;
+        },
         // Git queries spawn only the git executable in real OS tests;
         // the agent remains a fake process and receives no Git RPC.
         execFile: (...args) => require("node:child_process").execFile(...args),
@@ -516,4 +522,42 @@ test("5C never forwards Git requests with invalid roots to the Pi agent", async 
   const reply = await fsReply(h, "git-bad-root");
   assert.equal(reply.success, false);
   assert.equal(h.childWrites.length, before);
+});
+
+test("5C caps very large Git status without maxBuffer errors and diffs late paths", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-many-"));
+  try {
+    gitInit(root);
+    // Shared long nested path makes 240 entries exceed the old 384-KiB
+    // execFile maxBuffer limit while keeping each filename valid on ext4.
+    let folder = root;
+    for (let i = 0; i < 8; i++) {
+      folder = path.join(folder, "nested-" + i + "-" + "x".repeat(215));
+      fs.mkdirSync(folder);
+    }
+    for (let i = 0; i < 240; i++) {
+      fs.writeFileSync(path.join(folder, "untracked-" + i + ".txt"), "hi\n");
+    }
+    const h = harness(root);
+    const before = h.childWrites.length;
+    rpcInput(h, { type: "herdr_git_snapshot", id: "git-many", root });
+    const snapshot = await fsReply(h, "git-many");
+    assert.equal(snapshot.success, true, snapshot.error);
+    assert.equal(snapshot.data.files.length, 200);
+    assert.equal(snapshot.data.filesTruncated, true);
+    assert.equal(snapshot.data.readOnly, true);
+
+    // The file's own status is small despite the huge full-tree status.
+    const last = path.join(folder, "untracked-239.txt");
+    rpcInput(h, { type: "herdr_git_diff", id: "git-late", root, path: last });
+    const diff = await fsReply(h, "git-late");
+    assert.equal(diff.success, true, diff.error);
+    assert.match(diff.data.patch, /\+hi/);
+    assert.equal(h.childWrites.length, before);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
