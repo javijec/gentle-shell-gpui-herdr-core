@@ -96,6 +96,8 @@ pub struct ChangesView {
     repo: Option<Option<Repo>>,
     remote: bool,
     remote_tree: Option<WorkTree>,
+    remote_writable: bool,
+    remote_busy: bool,
     remote_confirm_commit: Option<String>,
     tree_mode: bool,
     collapsed: HashSet<(Side, String)>,
@@ -141,6 +143,8 @@ impl ChangesView {
             repo: None,
             remote: false,
             remote_tree: None,
+            remote_writable: false,
+            remote_busy: false,
             remote_confirm_commit: None,
             tree_mode: false,
             collapsed: HashSet::new(),
@@ -190,12 +194,13 @@ impl ChangesView {
     }
 
     pub(super) fn set_remote_tree(
-        &mut self, tree: Option<WorkTree>, cx: &mut Context<Self>,
+        &mut self, tree: Option<WorkTree>, writable: bool, cx: &mut Context<Self>,
     ) {
         if !self.remote {
             return;
         }
         self.remote_tree = tree;
+        self.remote_writable = writable;
         self.remote_confirm_commit = None;
         self.relayout();
         cx.notify();
@@ -213,6 +218,13 @@ impl ChangesView {
     /// Files with any change, staged or not (one per path).
     pub fn change_count(&self) -> usize {
         self.tree().map_or(0, |tree| tree.entries.len())
+    }
+
+    pub(super) fn set_remote_busy(&mut self, busy: bool, cx: &mut Context<Self>) {
+        if self.remote {
+            self.remote_busy = busy;
+            cx.notify();
+        }
     }
 
     fn tree(&self) -> Option<&WorkTree> {
@@ -362,6 +374,7 @@ impl ChangesView {
 
     fn toggle(&mut self, entry: &StatusEntry, side: Side, cx: &mut Context<Self>) {
         if self.remote {
+            if !self.remote_writable || self.remote_busy { return; }
             cx.emit(ChangesEvent::RemoteStage {
                 path: entry.path.clone(),
                 index: entry.index,
@@ -871,7 +884,8 @@ impl ChangesView {
                     Checkbox::new(SharedString::from(format!("{id}-check")))
                         .small()
                         .checked(side == Side::Staged)
-                        .disabled(entry.kind == EntryKind::Conflict)
+                        .disabled(entry.kind == EntryKind::Conflict
+                            || !self.remote_writable || self.remote_busy)
                         .on_click(move |_, _, cx| {
                             let _ = weak.update(cx, |this, cx| {
                                 this.toggle(&selection, side, cx)
@@ -1041,7 +1055,8 @@ impl ChangesView {
                 .child(Button::new("changes-remote-commit")
                     .primary().small().w_full()
                     .label(if confirmed { "Confirm commit" } else { "Commit" })
-                    .disabled(!staged || summary.is_empty())
+                    .disabled(!staged || summary.is_empty() || !self.remote_writable
+                        || self.remote_busy)
                     .on_click(cx.listener(|this, _, _, cx| this.submit_remote_commit(cx))))
                 .when(confirmed, |row| row.child(
                     div().text_xs().text_color(ui::warning())
