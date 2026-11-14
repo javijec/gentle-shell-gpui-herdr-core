@@ -527,6 +527,7 @@ const MAX_GIT_LIST = 200;
 const MAX_GIT_BRANCHES = 120;
 const MAX_GIT_TAGS = 120;
 const MAX_GIT_STASHES = 120;
+const MAX_GIT_REF_DETAILS = 360;
 const MAX_GIT_DIFF = 96 * 1024;
 
 function strictUtf8(bytes) {
@@ -772,7 +773,7 @@ async function gitRefState(toplevel) {
 async function remoteGit(req) {
   const { toplevel } = await gitRepository(req.root);
   if (req.type === "herdr_git_snapshot") {
-    const [status, branches, index, tags, stashes] = await Promise.all([
+    const [status, branches, index, tags, stashes, details] = await Promise.all([
       runGitListing(toplevel, ["status", "--porcelain=v1", "-z",
         "--no-renames", "--untracked-files=all", "--ignore-submodules=all"],
         0, MAX_GIT_LIST),
@@ -785,6 +786,9 @@ async function remoteGit(req) {
         "--format=%(refname:short)", "refs/tags"], 10, MAX_GIT_TAGS),
       runGitListing(toplevel, ["stash", "list",
         "--format=%gd%x00%gs"], 10, MAX_GIT_STASHES),
+      runGitListing(toplevel, ["for-each-ref",
+        "--format=%(HEAD)%00%(refname)%00%(upstream:short)%00%(upstream:track)%00%(objectname:short)%00%(subject)",
+        "refs/heads", "refs/remotes", "refs/tags"], 10, MAX_GIT_REF_DETAILS),
     ]);
     const files = parseGitEntries(status.output);
     const refs = parseGitBranches(branches.output);
@@ -799,6 +803,8 @@ async function remoteGit(req) {
       branchesTruncated: refs.truncated || branches.truncated,
       tags: extraTags.tags, tagsTruncated: tags.truncated,
       stashes: extraStashes.stashes, stashesTruncated: stashes.truncated,
+      refDetails: strictUtf8(details.output),
+      refDetailsTruncated: details.truncated,
       readOnly: true, writesEnabled: true,
     };
   }
