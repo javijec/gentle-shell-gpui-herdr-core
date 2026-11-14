@@ -979,6 +979,7 @@ impl RemoteFilesView {
                 dir.clone(),
             _ => source_parent.clone(),
         };
+        let should_clear_clipboard = matches!(&action, WorkspaceEntryAction::Move(_));
         let operation = WorkspaceBackend::herdr(self.root.clone(), process)
             .entry(WorkspacePath::Herdr(source.clone()), action);
         self.entry_busy = true;
@@ -1004,7 +1005,12 @@ impl RemoteFilesView {
                         if this.tree_selected_directory.as_deref() == Some(source.as_str()) {
                             this.tree_selected_directory = None;
                         }
-                        this.file_clipboard = None;
+                        if should_clear_clipboard || this.file_clipboard.as_ref()
+                            .is_some_and(|(path, _)| path == &source
+                                && this.tree_selected_entry.is_none())
+                        {
+                            this.file_clipboard = None;
+                        }
                         this.refresh_tree_folder(source_parent.clone(), cx);
                         if dest_parent != source_parent {
                             this.refresh_tree_folder(dest_parent.clone(), cx);
@@ -1022,7 +1028,7 @@ impl RemoteFilesView {
     fn create_remote_entry(
         &mut self, directory: bool, window: &mut Window, cx: &mut Context<Self>,
     ) {
-        if self.creating || self.root == "/" || self.pane_path.is_some() {
+        if self.creating || self.entry_busy || self.root == "/" || self.pane_path.is_some() {
             return;
         }
         let name = self.create_name.read(cx).value().trim().to_owned();
@@ -1573,7 +1579,9 @@ impl RemoteFilesView {
             snapshot.writes_enabled && !snapshot.files_truncated
                 && snapshot.files.iter().any(|entry| entry.staged().is_some())
         }) else { return; };
-        if summary.trim().is_empty() || summary.len() > 4096 { return; }
+        if summary.trim().is_empty() || summary.len() > 120
+            || summary.chars().any(char::is_control)
+        { return; }
         let command = json!({
             "type": "herdr_git_commit", "root": self.root,
             "toplevel": snapshot.toplevel,
@@ -2015,7 +2023,7 @@ impl Render for RemoteFilesView {
                         .ghost().xsmall()
                         .icon(Icon::new(IconName::FilePlus))
                         .tooltip("New file in selected folder (or workspace root)")
-                        .disabled(self.creating || self.root == "/")
+                        .disabled(self.creating || self.entry_busy || self.root == "/")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.create_remote_entry(false, window, cx)
                         })))
@@ -2023,7 +2031,7 @@ impl Render for RemoteFilesView {
                         .ghost().xsmall()
                         .icon(Icon::new(IconName::FolderPlus))
                         .tooltip("New folder in selected folder (or workspace root)")
-                        .disabled(self.creating || self.root == "/")
+                        .disabled(self.creating || self.entry_busy || self.root == "/")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.create_remote_entry(true, window, cx)
                         }))),

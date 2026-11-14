@@ -1075,8 +1075,8 @@ impl ChangesView {
                 .child(Button::new("changes-remote-commit")
                     .primary().small().w_full()
                     .label(if confirmed { "Confirm commit" } else { "Commit" })
-                    .disabled(!staged || summary.is_empty() || !self.remote_writable
-                        || self.remote_busy)
+                    .disabled(!staged || summary.is_empty() || summary.len() > 120
+                        || !self.remote_writable || self.remote_busy)
                     .on_click(cx.listener(|this, _, _, cx| this.submit_remote_commit(cx))))
                 .when(confirmed, |row| row.child(
                     div().text_xs().text_color(ui::warning())
