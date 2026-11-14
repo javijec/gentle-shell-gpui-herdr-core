@@ -641,7 +641,7 @@ impl RemoteFilesView {
         let parent = self.tree_selected_directory.clone()
             .unwrap_or_else(|| self.root.clone());
         let operation = WorkspaceBackend::herdr(self.root.clone(), process)
-            .create(WorkspacePath::Herdr(parent), name, directory);
+            .create(WorkspacePath::Herdr(parent.clone()), name, directory);
         self.creating = true;
         self.error = None;
         cx.spawn_in(window, async move |this, cx| {
@@ -653,7 +653,11 @@ impl RemoteFilesView {
                         this.create_name.update(cx, |field, cx| {
                             field.set_value(String::new(), window, cx)
                         });
-                        this.load_directory(this.root.clone(), cx);
+                        // Preserve all expanded folders; only re-query the
+                        // parent that received this file or directory.
+                        this.tree_children.remove(&parent);
+                        this.tree_expanded.remove(&parent);
+                        this.toggle_remote_directory(parent.clone(), cx);
                     }
                     Err(error) => this.error = Some(friendly_error(&error)),
                 }
