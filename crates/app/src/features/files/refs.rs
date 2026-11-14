@@ -53,6 +53,7 @@ enum Line {
         collapsed: bool,
     },
     Ref(Section, usize),
+    RemoteWorktree(usize),
     NewWorktree,
 }
 
@@ -66,12 +67,24 @@ fn matching<T>(items: &[T], hit: impl Fn(&T) -> bool) -> Vec<usize> {
         .collect()
 }
 
+/// Remote worktree metadata is strictly display-only. POSIX paths must
+/// remain strings and are never converted to native Windows PathBuf.
+#[derive(Clone, Debug)]
+pub(super) struct RemoteWorktreeDisplay {
+    pub path: String,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub locked: bool,
+    pub prunable: bool,
+}
+
 pub struct RefsView {
     root: PathBuf,
     /// `None` until the first read, `Some(None)` outside a git work tree.
     repo: Option<Option<Repo>>,
     remote: bool,
     remote_refs: Option<RefsSnapshot>,
+    remote_worktrees: Vec<RemoteWorktreeDisplay>,
     remote_pending_branch: Option<String>,
     filter: Entity<InputState>,
     collapsed: HashSet<Section>,
@@ -101,6 +114,7 @@ impl RefsView {
             repo: None,
             remote: false,
             remote_refs: None,
+            remote_worktrees: Vec::new(),
             remote_pending_branch: None,
             filter,
             collapsed: HashSet::new(),
@@ -141,12 +155,14 @@ impl RefsView {
     }
 
     pub(super) fn set_remote_refs(
-        &mut self, refs: Option<RefsSnapshot>, cx: &mut Context<Self>,
+        &mut self, refs: Option<RefsSnapshot>,
+        worktrees: Vec<RemoteWorktreeDisplay>, cx: &mut Context<Self>,
     ) {
         if !self.remote {
             return;
         }
         self.remote_refs = refs;
+        self.remote_worktrees = worktrees;
         self.remote_pending_branch = None;
         self.relayout(cx);
         cx.notify();
@@ -244,9 +260,16 @@ impl RefsView {
                 ),
                 (
                     Section::Worktrees,
-                    matching(&refs.worktrees, |w| {
-                        hit(&w.path.to_string_lossy()) || w.branch.as_deref().is_some_and(hit)
-                    }),
+                    if self.remote {
+                        matching(&self.remote_worktrees, |w| {
+                            hit(&w.path) || w.branch.as_deref().is_some_and(hit)
+                        })
+                    } else {
+                        matching(&refs.worktrees, |w| {
+                            hit(&w.path.to_string_lossy())
+                                || w.branch.as_deref().is_some_and(hit)
+                        })
+                    },
                 ),
                 (
                     Section::Submodules,
@@ -264,7 +287,13 @@ impl RefsView {
                     collapsed,
                 });
                 if !collapsed {
-                    lines.extend(items.into_iter().map(|ix| Line::Ref(section, ix)));
+                    lines.extend(items.into_iter().map(|ix| {
+                        if self.remote && section == Section::Worktrees {
+                            Line::RemoteWorktree(ix)
+                        } else {
+                            Line::Ref(section, ix)
+                        }
+                    }));
                 }
             }
         }
@@ -463,6 +492,25 @@ impl RefsView {
                 collapsed,
             } => return self.render_section_header(section, count, collapsed, cx),
             Line::Ref(section, ix) => (section, ix),
+            Line::RemoteWorktree(ix) => {
+                let Some(tree) = self.remote_worktrees.get(ix) else {
+                    return div().h(px(ROW_HEIGHT)).into_any_element();
+                };
+                let title = tree.branch.clone().or_else(|| tree.head.clone())
+                    .unwrap_or_else(|| "Bare worktree".to_owned());
+                let status = if tree.prunable {
+                    " · prunable"
+                } else if tree.locked {
+                    " · locked"
+                } else {
+                    ""
+                };
+                return row(
+                    SharedString::from(format!("remote-worktree-{ix}")),
+                    IconName::FolderGit, ui::muted(), title, ui::fg(),
+                    Some(detail(format!("{}{}", tree.path, status))),
+                ).into_any_element();
+            }
             Line::NewWorktree => return self.render_new_worktree(cx),
         };
         let rendered = self.refs().and_then(|refs| {
