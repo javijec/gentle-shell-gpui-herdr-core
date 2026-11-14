@@ -407,7 +407,7 @@ function runGitListing(directory, args, separator, maxRecords) {
     const timer = setTimeout(() => {
       timeoutExpired = true;
       child.kill("SIGKILL");
-    }, 8000);
+    }, 15000);
     child.stdout.on("data", (chunk) => {
       if (truncated || failure || timeoutExpired) return;
       pending = Buffer.concat([pending, chunk]);
