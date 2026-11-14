@@ -704,7 +704,7 @@ impl ChangesView {
                     .xsmall()
                     .icon(Icon::new(IconName::Archive))
                     .tooltip("Stash all changes")
-                    .disabled(!has_changes)
+                    .disabled(!has_changes || self.remote)
                     .on_click(cx.listener(|this, _, window, cx| this.open_stash(window, cx))),
             )
     }
@@ -714,6 +714,16 @@ impl ChangesView {
             Side::Unstaged => ("Stage all", "changes-stage-all"),
             Side::Staged => ("Unstage all", "changes-unstage-all"),
         };
+        if self.remote {
+            return section_header(
+                side, count,
+                Checkbox::new(SharedString::from(format!("remote-{id}-check")))
+                    .small().checked(side == Side::Staged).disabled(true),
+                Button::new(format!("remote-{id}"))
+                    .outline().xsmall().label(action).disabled(true)
+                    .tooltip("Bulk operations require guarded remote Git support"),
+            );
+        }
         let all = move |this: &mut Self, cx: &mut Context<Self>| match side {
             Side::Unstaged => this.git_op(git::stage_all, cx),
             Side::Staged => this.git_op(git::unstage_all, cx),
@@ -849,6 +859,34 @@ impl ChangesView {
             .selected
             .as_ref()
             .is_some_and(|(s, path)| *s == side && *path == entry.path);
+        if self.remote {
+            let id = format!("remote-change-{side:?}-{}", entry.path);
+            let weak = cx.entity().downgrade();
+            let selection = entry.clone();
+            let control = div()
+                .id(SharedString::from(format!("{id}-check-wrap")))
+                .flex_none()
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(
+                    Checkbox::new(SharedString::from(format!("{id}-check")))
+                        .small()
+                        .checked(side == Side::Staged)
+                        .disabled(entry.kind == EntryKind::Conflict)
+                        .on_click(move |_, _, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.toggle(&selection, side, cx)
+                            });
+                        }),
+                );
+            let path = entry.path.clone();
+            return change_row(
+                SharedString::from(id), &entry.path, badge, selected, indent, control,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.click_entry(&path, side, cx)
+            }))
+            .into_any_element();
+        }
         let id = format!("change-{side:?}-{}", entry.path);
         let weak = cx.entity().downgrade();
         let check = {
@@ -930,10 +968,17 @@ impl ChangesView {
     }
 
     fn render_list(&self, cx: &mut Context<Self>) -> AnyElement {
-        let tree = match &self.repo {
-            None => return empty_state(IconName::RefreshCw, "Reading git status…"),
-            Some(None) => return empty_state(IconName::GitBranch, "Not a git repository"),
-            Some(Some(repo)) => &repo.tree,
+        let tree = if self.remote {
+            match &self.remote_tree {
+                Some(tree) => tree,
+                None => return empty_state(IconName::RefreshCw, "Reading remote git status…"),
+            }
+        } else {
+            match &self.repo {
+                None => return empty_state(IconName::RefreshCw, "Reading git status…"),
+                Some(None) => return empty_state(IconName::GitBranch, "Not a git repository"),
+                Some(Some(repo)) => &repo.tree,
+            }
         };
         if tree.entries.is_empty() {
             return empty_state(IconName::CircleCheck, "Working tree clean");
@@ -962,7 +1007,47 @@ impl ChangesView {
             .into_any_element()
     }
 
+    fn submit_remote_commit(&mut self, cx: &mut Context<Self>) {
+        if !self.remote || !self.tree().is_some_and(|tree| {
+            tree.entries.iter().any(|entry| entry.staged().is_some())
+        }) {
+            return;
+        }
+        let summary = self.summary_text(cx);
+        if summary.is_empty() {
+            return;
+        }
+        if self.remote_confirm_commit.as_deref() == Some(summary.as_str()) {
+            self.remote_confirm_commit = None;
+            cx.emit(ChangesEvent::RemoteCommit(summary));
+        } else {
+            self.remote_confirm_commit = Some(summary);
+        }
+        cx.notify();
+    }
+
     fn render_commit(&self, cx: &mut Context<Self>) -> Div {
+        if self.remote {
+            let summary = self.summary_text(cx);
+            let staged = self.tree().is_some_and(|tree| {
+                tree.entries.iter().any(|entry| entry.staged().is_some())
+            });
+            let confirmed = !summary.is_empty()
+                && self.remote_confirm_commit.as_deref() == Some(summary.as_str());
+            return v_flex()
+                .flex_none().mx_2().mb_2().mt_1().px_3().py_2().gap_1()
+                .rounded_xl().bg(ui::surface())
+                .child(Input::new(&self.summary).appearance(false))
+                .child(Button::new("changes-remote-commit")
+                    .primary().small().w_full()
+                    .label(if confirmed { "Confirm commit" } else { "Commit" })
+                    .disabled(!staged || summary.is_empty())
+                    .on_click(cx.listener(|this, _, _, cx| this.submit_remote_commit(cx))))
+                .when(confirmed, |row| row.child(
+                    div().text_xs().text_color(ui::warning())
+                        .child("Review staged changes before confirming the remote commit"),
+                ));
+        }
         let ready = matches!(self.repo, Some(Some(_)));
         let staged = self
             .tree()
@@ -1115,7 +1200,7 @@ impl Render for ChangesView {
                 )
             })
             .child(self.render_list(cx))
-            .when(matches!(self.repo, Some(Some(_))), |d| {
+            .when(self.remote_tree.is_some() || matches!(self.repo, Some(Some(_))), |d| {
                 d.child(self.render_commit(cx))
             })
     }
