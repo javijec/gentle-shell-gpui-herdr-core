@@ -426,6 +426,18 @@ test("5F creates a file or folder only inside the selected Herdr root", {
     assert.equal((await create("create-traverse",
       root, "../outside", "directory")).success, false);
     assert.equal((await create("create-git", root, ".git", "directory")).success, false);
+    fs.mkdirSync(path.join(root, ".git"));
+    fs.writeFileSync(path.join(root, ".git", "config"), "[core]\\n");
+    assert.equal((await create("create-in-git", path.join(root, ".git"),
+      "unsafe", "file")).success, false);
+    rpcInput(h, {
+      type: "herdr_fs_write", id: "write-git-config", root,
+      path: path.join(root, ".git", "config"), content: "tampered",
+      expectedRevision: "a".repeat(64),
+    });
+    assert.equal((await fsReply(h, "write-git-config")).success, false);
+    assert.equal(fs.existsSync(path.join(root, ".git", "unsafe")), false);
+
     fs.symlinkSync(outside, path.join(root, "external"), "dir");
     assert.equal((await create("create-symlink",
       path.join(root, "external"), "escape", "file")).success, false);
