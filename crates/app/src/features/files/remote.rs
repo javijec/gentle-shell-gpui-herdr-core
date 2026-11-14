@@ -464,6 +464,9 @@ impl RemoteFilesView {
                 ChangesEvent::RemoteCommit(summary) => {
                     this.git_commit_message(summary.clone(), cx);
                 }
+                ChangesEvent::RemoteBulkStage { stage } => {
+                    this.git_bulk_stage(*stage, cx);
+                }
                 _ => {}
             }
         });
@@ -1142,6 +1145,33 @@ impl RemoteFilesView {
     }
 
     /// A confirmed commit from the shared ChangesView; retain Herdr guards.
+    /// A bulk operation checks a complete, untruncated, reviewed snapshot
+    /// on the bridge before staging only literal file paths.
+    fn git_bulk_stage(&mut self, stage: bool, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|snapshot| {
+            snapshot.writes_enabled && !snapshot.files_truncated
+                && !snapshot.files.is_empty() && snapshot.files.len() <= 80
+                && snapshot.index_token.is_some()
+        }) else { return; };
+        let expected_files: Vec<serde_json::Value> = snapshot.files.iter()
+            .map(|entry| json!({
+                "path": entry.path,
+                "index": entry.index.to_string(),
+                "worktree": entry.worktree.to_string(),
+            }))
+            .collect();
+        let command = json!({
+            "type": if stage { "herdr_git_stage_all" } else { "herdr_git_unstage_all" },
+            "root": self.root,
+            "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "expectedFiles": expected_files,
+        });
+        self.git_write(command, cx);
+    }
+
     fn git_commit_message(&mut self, summary: String, cx: &mut Context<Self>) {
         let Some(snapshot) = self.git.as_ref().filter(|snapshot| {
             snapshot.writes_enabled && !snapshot.files_truncated

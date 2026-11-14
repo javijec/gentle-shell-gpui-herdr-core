@@ -44,6 +44,7 @@ pub enum ChangesEvent {
     RemoteStage { path: String, index: char, worktree: char, stage: bool },
     RemoteOpenDiff(String),
     RemoteCommit(String),
+    RemoteBulkStage { stage: bool },
 }
 
 #[derive(Clone, PartialEq)]
@@ -728,13 +729,32 @@ impl ChangesView {
             Side::Staged => ("Unstage all", "changes-unstage-all"),
         };
         if self.remote {
+            let enabled = self.remote_writable && !self.remote_busy
+                && self.tree().is_some_and(|tree| tree.entries.len() <= 80);
+            let stage = side == Side::Unstaged;
+            let weak = cx.entity().downgrade();
             return section_header(
                 side, count,
                 Checkbox::new(SharedString::from(format!("remote-{id}-check")))
-                    .small().checked(side == Side::Staged).disabled(true),
+                    .small().checked(!stage).disabled(!enabled)
+                    .tooltip(action)
+                    .on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            cx.emit(ChangesEvent::RemoteBulkStage { stage });
+                            this.remote_confirm_commit = None;
+                        });
+                    }),
                 Button::new(format!("remote-{id}"))
-                    .outline().xsmall().label(action).disabled(true)
-                    .tooltip("Bulk operations require guarded remote Git support"),
+                    .outline().xsmall().label(action).disabled(!enabled)
+                    .tooltip(if enabled {
+                        "Applies only to the exact reviewed Git snapshot"
+                    } else {
+                        "Refresh status: bulk changes require at most 80 files"
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.remote_confirm_commit = None;
+                        cx.emit(ChangesEvent::RemoteBulkStage { stage });
+                    })),
             );
         }
         let all = move |this: &mut Self, cx: &mut Context<Self>| match side {

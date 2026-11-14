@@ -212,7 +212,8 @@ impl FileTreeView {
                 // The native ChangesView never dispatches Herdr mutations.
                 ChangesEvent::RemoteStage { .. }
                 | ChangesEvent::RemoteOpenDiff(_)
-                | ChangesEvent::RemoteCommit(_) => {},
+                | ChangesEvent::RemoteCommit(_)
+                | ChangesEvent::RemoteBulkStage { .. } => {},
             }),
             cx.subscribe(&refs, |_, _, event: &RefsEvent, cx| match event {
                 RefsEvent::OpenAgent(path) => cx.emit(FileTreeEvent::OpenAgent(path.clone())),
