@@ -18,6 +18,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::features::git::{self, RefEntry, RefsSnapshot, StashAction, Worktree};
+use super::branches_ui::{BranchDisplay, branch_row};
 use crate::shared::ui;
 
 const POLL: Duration = Duration::from_secs(5);
@@ -733,20 +734,6 @@ impl RefsView {
     }
 
     fn render_branch(&self, branch: &RefEntry, cx: &mut Context<Self>) -> AnyElement {
-        let trailing = if branch.gone {
-            Some(ui::chip("gone", ui::warning()).into_any_element())
-        } else if branch.ahead > 0 || branch.behind > 0 {
-            Some(ahead_behind(branch.ahead, branch.behind).into_any_element())
-        } else if branch.current {
-            Some(
-                Icon::new(IconName::Check)
-                    .xsmall()
-                    .text_color(ui::accent())
-                    .into_any_element(),
-            )
-        } else {
-            None
-        };
         let name = branch.name.clone();
         let menu_name = branch.name.clone();
         let current = branch.current;
@@ -758,17 +745,10 @@ impl RefsView {
                 .any(|w| w.branch.as_deref() == Some(branch.name.as_str()))
         });
         let weak = cx.entity().downgrade();
-        row(
+        branch_row(
             SharedString::from(format!("refs-branch-{}", branch.name)),
-            IconName::GitBranch,
-            if current { ui::accent() } else { ui::muted() },
-            branch.name.clone(),
-            if current {
-                ui::fg()
-            } else {
-                ui::fg().opacity(0.85)
-            },
-            trailing,
+            BranchDisplay::from_local(branch),
+            None,
         )
         .when(current, |d| d.font_weight(FontWeight::SEMIBOLD))
         .when(!current, |d| d.cursor_pointer())
