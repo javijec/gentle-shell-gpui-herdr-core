@@ -61,6 +61,7 @@ struct RemoteGitSnapshot {
     toplevel: String,
     head_oid: Option<String>,
     current_branch: Option<String>,
+    index_token: Option<String>,
     writes_enabled: bool,
     files: Vec<RemoteGitFile>,
     branches: Vec<RemoteGitBranch>,
@@ -117,7 +118,7 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
         }).collect::<Result<Vec<_>, &'static str>>()?;
     let head_oid = match data.get("headOid") {
         None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(s)) if s.len() == 40
+        Some(serde_json::Value::String(s)) if (s.len() == 40 || s.len() == 64)
             && s.bytes().all(|b| b.is_ascii_hexdigit()) => Some(s.to_owned()),
         _ => return Err("Invalid remote Git HEAD"),
     };
@@ -127,9 +128,14 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
             && s.len() <= 512 && !s.chars().any(char::is_control) => Some(s.to_owned()),
         _ => return Err("Invalid remote Git current branch"),
     };
+    let index_token = data["indexToken"].as_str()
+        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_owned);
+    let writes_enabled = data["writesEnabled"].as_bool() == Some(true)
+        && index_token.is_some()
+        && data["indexTruncated"].as_bool() != Some(true);
     Ok(RemoteGitSnapshot {
-        toplevel, head_oid, current_branch,
-        writes_enabled: data["writesEnabled"].as_bool() == Some(true),
+        toplevel, head_oid, current_branch, index_token, writes_enabled,
         files, branches,
         files_truncated: data["filesTruncated"].as_bool().unwrap_or(false),
         branches_truncated: data["branchesTruncated"].as_bool().unwrap_or(false),
@@ -654,6 +660,9 @@ impl RemoteFilesView {
     }
 
     fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        self.git_confirm_commit = None;
+        self.git_confirm_create = None;
+        self.git_confirm_switch = None;
         self.git_generation = self.git_generation.wrapping_add(1);
         let generation = self.git_generation;
         self.git_loading = true;
@@ -740,6 +749,7 @@ impl RemoteFilesView {
         let command = json!({
             "type": action, "root": self.root, "toplevel": snapshot.toplevel,
             "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
             "path": path, "expectedIndex": index.to_string(),
             "expectedWorktree": worktree.to_string(),
         });
@@ -764,6 +774,7 @@ impl RemoteFilesView {
             "type": "herdr_git_commit", "root": self.root,
             "toplevel": snapshot.toplevel,
             "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
             "summary": summary,
         });
         self.git_write(command, cx);
@@ -785,6 +796,7 @@ impl RemoteFilesView {
             "type": "herdr_git_create_branch", "root": self.root,
             "toplevel": snapshot.toplevel,
             "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
             "branch": branch,
         });
         self.git_write(command, cx);
@@ -805,6 +817,7 @@ impl RemoteFilesView {
             "type": "herdr_git_switch_branch", "root": self.root,
             "toplevel": snapshot.toplevel,
             "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
             "branch": branch,
         });
         self.git_write(command, cx);
