@@ -184,7 +184,8 @@ function rpcInput(h, value) {
 }
 
 async function fsReply(h, id) {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  // Busy ARM64 disks may need more than 1 second to scan a large worktree.
+  for (let attempt = 0; attempt < 2000; attempt++) {
     const stream = Buffer.concat(readFrames(h.stdout)
       .filter((frame) => frame.kind === "O")
       .map((frame) => frame.payload)).toString();
