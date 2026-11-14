@@ -28,10 +28,6 @@ use super::changes_ui::{ChangeSide, change_row, section_header, side_entries};
 use super::dock_ui::{file_row_shell, panel_header, panel_shell};
 use super::remote_tree::visible_rows;
 use super::file_icon;
-use super::branches_ui::{
-    BranchDisplay, RefSection, branch_matches, branch_row, filter_field,
-    matches_filter, ref_row, ref_section_header,
-};
 use super::tabs::FilePanelTab as RemoteTab;
 use super::viewer::MdMode;
 use crate::shared::ui;
@@ -310,8 +306,6 @@ pub struct RemoteFilesView {
     git_branch_name: Entity<InputState>,
     refs: Entity<RefsView>,
     _refs_events: Subscription,
-    git_filter: Entity<InputState>,
-    git_collapsed: HashSet<RefSection>,
     git_confirm_commit: Option<String>,
     git_confirm_create: Option<String>,
     git_confirm_switch: Option<String>,
@@ -395,7 +389,6 @@ impl RemoteFilesView {
         let git_branch_name = cx.new(|cx| {
             InputState::new(window, cx).placeholder("New local branch name")
         });
-        let git_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter refs"));
         let refs = cx.new(|cx| RefsView::new_remote(window, cx));
         let refs_events = cx.subscribe(&refs, |this, _, event: &RefsEvent, cx| {
             if let RefsEvent::SwitchRemoteBranch(branch) = event {
@@ -407,9 +400,6 @@ impl RemoteFilesView {
                 if let InputEvent::Change = event { cx.notify(); }
             }),
             cx.subscribe(&git_branch_name, |_, _, event: &InputEvent, cx| {
-                if let InputEvent::Change = event { cx.notify(); }
-            }),
-            cx.subscribe(&git_filter, |_, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event { cx.notify(); }
             }),
         ];
@@ -430,8 +420,6 @@ impl RemoteFilesView {
             git_branch_name,
             refs,
             _refs_events: refs_events,
-            git_filter,
-            git_collapsed: HashSet::new(),
             git_confirm_commit: None,
             git_confirm_create: None,
             git_confirm_switch: None,
@@ -1226,33 +1214,6 @@ unstaged files stay untouched."))
         );
     }
 
-    fn push_git_branch_row(
-        &self, rows: &mut Vec<AnyElement>, branch: &RemoteGitBranch,
-        index: usize, writable: bool, cx: &mut Context<Self>,
-    ) {
-        let name = branch.name.clone();
-        let confirmed = self.git_confirm_switch.as_deref() == Some(name.as_str());
-        let action = (writable && branch.local && !branch.current).then(|| {
-            Button::new(format!("remote-git-switch-{index}"))
-                .ghost()
-                .xsmall()
-                .label(if confirmed { "Confirm switch" } else { "Switch" })
-                .disabled(self.git_busy || self.git_loading)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.git_switch_branch(name.clone(), cx);
-                }))
-                .into_any_element()
-        });
-        rows.push(
-            branch_row(
-                SharedString::from(format!("remote-git-branch-{index}")),
-                BranchDisplay::from_remote(&branch.name, branch.current),
-                action,
-            )
-            .into_any_element(),
-        );
-    }
-
     fn push_git_create_branch_form(
         &self, rows: &mut Vec<AnyElement>, snapshot: &RemoteGitSnapshot,
         cx: &mut Context<Self>,
@@ -1318,126 +1279,6 @@ unstaged files stay untouched."))
                 }
                 if writable {
                     self.push_git_commit_form(&mut rows, snapshot, cx);
-                }
-            } else if self.tab == RemoteTab::Branches {
-                let query = self.git_filter.read(cx).value().trim().to_owned();
-                let mut matched = 0usize;
-                // The 5D snapshot already distinguishes local and remote
-                // branches. Keep their original indices for guarded Switch.
-                for section in [
-                    RefSection::Branches, RefSection::Remotes,
-                    RefSection::Tags, RefSection::Stashes,
-                ] {
-                    let visible: Vec<usize> = match section {
-                        RefSection::Branches | RefSection::Remotes => snapshot.branches.iter()
-                            .enumerate()
-                            .filter(|(_, branch)| {
-                                branch_matches(section, branch.local, &branch.name, &query)
-                            })
-                            .map(|(index, _)| index)
-                            .collect(),
-                        RefSection::Tags => snapshot.tags.iter()
-                            .enumerate()
-                            .filter(|(_, tag)| matches_filter(&query, tag))
-                            .map(|(index, _)| index)
-                            .collect(),
-                        RefSection::Stashes => snapshot.stashes.iter()
-                            .enumerate()
-                            .filter(|(_, stash)| {
-                                matches_filter(&query, &stash.name)
-                                    || matches_filter(&query, &stash.message)
-                            })
-                            .map(|(index, _)| index)
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    if visible.is_empty() {
-                        continue;
-                    }
-                    matched += visible.len();
-                    let collapsed = self.git_collapsed.contains(&section);
-                    rows.push(
-                        ref_section_header(section, visible.len(), collapsed)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.git_collapsed.remove(&section) {
-                                    this.git_collapsed.insert(section);
-                                }
-                                cx.notify();
-                            }))
-                            .into_any_element(),
-                    );
-                    if !collapsed {
-                        for index in visible {
-                            match section {
-                                RefSection::Branches | RefSection::Remotes => {
-                                    if let Some(branch) = snapshot.branches.get(index) {
-                                        self.push_git_branch_row(
-                                            &mut rows, branch, index, writable, cx,
-                                        );
-                                    }
-                                }
-                                RefSection::Tags => {
-                                    if let Some(tag) = snapshot.tags.get(index) {
-                                        rows.push(ref_row(
-                                            SharedString::from(format!("remote-ref-tag-{index}")),
-                                            IconName::Tag,
-                                            ui::muted(),
-                                            tag.clone(),
-                                            ui::fg(),
-                                            None,
-                                        ).into_any_element());
-                                    }
-                                }
-                                RefSection::Stashes => {
-                                    if let Some(stash) = snapshot.stashes.get(index) {
-                                        rows.push(ref_row(
-                                            SharedString::from(format!("remote-ref-stash-{index}")),
-                                            IconName::Archive,
-                                            ui::muted(),
-                                            stash.message.clone(),
-                                            ui::fg(),
-                                            Some(div()
-                                                .font_family(ui::MONO)
-                                                .text_size(px(10.5))
-                                                .text_color(ui::faint())
-                                                .child(stash.name.clone())
-                                                .into_any_element()),
-                                        ).into_any_element());
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                if matched == 0 {
-                    rows.push(
-                        div().px_3().py_3().text_sm().text_color(ui::muted())
-                            .child(if query.is_empty() {
-                                "No Git references"
-                            } else {
-                                "No refs match in the loaded snapshot"
-                            })
-                            .into_any_element(),
-                    );
-                }
-                if snapshot.branches_truncated {
-                    rows.push(div().px_3().py_2().text_xs()
-                        .text_color(ui::warning())
-                        .child("Showing first 120 branches").into_any_element());
-                }
-                if snapshot.tags_truncated {
-                    rows.push(div().px_3().py_2().text_xs()
-                        .text_color(ui::warning())
-                        .child("Showing first 120 tags").into_any_element());
-                }
-                if snapshot.stashes_truncated {
-                    rows.push(div().px_3().py_2().text_xs()
-                        .text_color(ui::warning())
-                        .child("Showing first 120 stashes").into_any_element());
-                }
-                if writable {
-                    self.push_git_create_branch_form(&mut rows, snapshot, cx);
                 }
             }
         }
