@@ -374,6 +374,91 @@ function runGit(directory, args, allowedDiffExit = false) {
   });
 }
 
+// Stream large status/branch listings instead of buffering the full Git
+// output. A busy repository may have millions of untracked files: collect
+// at most N complete records plus one sentinel, then stop Git. This is not
+// a transport failure; it is an explicitly marked partial snapshot.
+function runGitListing(directory, args, separator, maxRecords) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", [
+      "--no-optional-locks",
+      "-c", "core.fsmonitor=false",
+      "-c", "diff.external=",
+      "-c", "diff.trustExitCode=false",
+      "-C", directory, ...args,
+    ], {
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        GIT_PAGER: "cat",
+        GIT_EXTERNAL_DIFF: "0",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    });
+    const MAX_RECORD_BYTES = 4096;
+    const MAX_STDERR = 1024;
+    const records = [];
+    let pending = Buffer.alloc(0);
+    let stderr = "";
+    let truncated = false;
+    let failure = null;
+    let timeoutExpired = false;
+    const timer = setTimeout(() => {
+      timeoutExpired = true;
+      child.kill("SIGKILL");
+    }, 8000);
+    child.stdout.on("data", (chunk) => {
+      if (truncated || failure || timeoutExpired) return;
+      pending = Buffer.concat([pending, chunk]);
+      let cut;
+      while ((cut = pending.indexOf(separator)) !== -1) {
+        const record = pending.subarray(0, cut);
+        pending = pending.subarray(cut + 1);
+        if (record.length > MAX_RECORD_BYTES) {
+          failure = "Remote Git record exceeds the 4096-byte safety limit";
+          child.kill("SIGKILL");
+          return;
+        }
+        // The extra record tells us whether more than maxRecords exist.
+        if (records.length === maxRecords) {
+          truncated = true;
+          child.kill("SIGTERM");
+          return;
+        }
+        records.push(Buffer.concat([record, Buffer.from([separator])]));
+      }
+      if (pending.length > MAX_RECORD_BYTES) {
+        failure = "Remote Git record exceeds the 4096-byte safety limit";
+        child.kill("SIGKILL");
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      if (stderr.length < MAX_STDERR) {
+        stderr += chunk.toString("utf8").slice(0, MAX_STDERR - stderr.length);
+      }
+    });
+    child.on("error", (error) => {
+      failure = error.message;
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (failure) {
+        reject(new Error("Remote Git query failed: " + failure));
+      } else if (timeoutExpired) {
+        reject(new Error("Remote Git query timed out after 8 seconds"));
+      } else if (!truncated && code !== 0) {
+        reject(new Error("Remote Git query failed: " +
+          (stderr.trim() || "Git exit code " + code).slice(0, 300)));
+      } else if (!truncated && pending.length) {
+        reject(new Error("Remote Git query returned an incomplete record"));
+      } else {
+        resolve({ output: Buffer.concat(records), truncated });
+      }
+    });
+  });
+}
+
 async function gitRepository(root) {
   const selected = await safeRemotePath(root, root);
   const actualRoot = await fs.realpath(selected);
@@ -433,16 +518,20 @@ async function remoteGit(req) {
   const { toplevel } = await gitRepository(req.root);
   if (req.type === "herdr_git_snapshot") {
     const [status, branches] = await Promise.all([
-      runGit(toplevel, ["status", "--porcelain=v1", "-z",
-        "--no-renames", "--untracked-files=all", "--ignore-submodules=all"]),
-      runGit(toplevel, ["branch", "--all", "--list",
-        "--format=%(refname:short)%00%(HEAD)"]),
+      runGitListing(toplevel, ["status", "--porcelain=v1", "-z",
+        "--no-renames", "--untracked-files=all", "--ignore-submodules=all"],
+        0, MAX_GIT_LIST),
+      runGitListing(toplevel, ["branch", "--all", "--list",
+        "--format=%(refname:short)%00%(HEAD)"],
+        10, MAX_GIT_BRANCHES),
     ]);
-    const files = parseGitEntries(status);
-    const refs = parseGitBranches(branches);
+    const files = parseGitEntries(status.output);
+    const refs = parseGitBranches(branches.output);
     return {
-      toplevel, files: files.entries, filesTruncated: files.truncated,
-      branches: refs.branches, branchesTruncated: refs.truncated,
+      toplevel, files: files.entries,
+      filesTruncated: files.truncated || status.truncated,
+      branches: refs.branches,
+      branchesTruncated: refs.truncated || branches.truncated,
       readOnly: true,
     };
   }
@@ -459,9 +548,12 @@ async function remoteGit(req) {
   }
   // Do not expose arbitrary files through Git diff. Only paths currently
   // reported as changed may be inspected.
+  // Scope the membership check to one literal path. The full repository
+  // status could exceed maxBuffer even when this one file has a tiny diff.
   const status = parseGitEntries(await runGit(toplevel, [
     "status", "--porcelain=v1", "-z", "--no-renames",
     "--untracked-files=all", "--ignore-submodules=all",
+    "--", ":(literal)" + relative,
   ]));
   const entry = status.entries.find((x) => x.path === relative);
   if (!entry) {
