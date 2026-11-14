@@ -1,6 +1,6 @@
 //! Shared visual primitives for a local or Herdr Files dock.
 //! Backend-bound callbacks live in the owning view; no filesystem or Git IO.
-use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::component::{Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 

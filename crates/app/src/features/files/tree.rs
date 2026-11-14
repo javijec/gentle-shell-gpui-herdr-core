@@ -25,13 +25,11 @@ use super::backend::{WorkspaceBackend, WorkspacePath};
 use super::ops::{self, ClipMode};
 use super::refs::{RefsEvent, RefsView};
 use super::tabs::FilePanelTab as Tab;
-use super::{file_icon, status_color};
+use super::file_icon;
 use crate::features::git::GitSnapshot;
 use crate::shared::ui;
 
 const CONTEXT: &str = "FileTree";
-const ROW_HEIGHT: f32 = 26.;
-const INDENT: f32 = 14.;
 const POLL: Duration = Duration::from_secs(3);
 
 const REVEAL: &str = if cfg!(target_os = "macos") {
