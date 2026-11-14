@@ -320,7 +320,6 @@ pub struct RemoteFilesView {
     git_confirm_switch: Option<String>,
     _git_events: Vec<Subscription>,
     focus: FocusHandle,
-    entries: Vec<RemoteEntry>,
     tree_children: HashMap<String, Vec<RemoteEntry>>,
     tree_expanded: HashSet<String>,
     tree_loading: HashSet<String>,
@@ -343,6 +342,7 @@ pub struct RemoteFilesView {
 
 impl EventEmitter<RemoteFilesEvent> for RemoteFilesView {}
 
+#[cfg(test)]
 fn remote_child(directory: &str, name: &str) -> String {
     if directory == "/" {
         format!("/{name}")
@@ -460,7 +460,6 @@ impl RemoteFilesView {
             git_confirm_switch: None,
             _git_events: git_events,
             focus: cx.focus_handle(),
-            entries: Vec::new(),
             tree_children: HashMap::new(),
             tree_expanded: HashSet::new(),
             tree_loading: HashSet::new(),
@@ -589,7 +588,6 @@ impl RemoteFilesView {
         self.editor = None;
         self.markdown = None;
         self._editor_events = None;
-        self.entries.clear();
         self.tree_children.clear();
         self.tree_expanded.clear();
         self.tree_loading.clear();
@@ -614,7 +612,6 @@ impl RemoteFilesView {
                 this.loading = false;
                 match response {
                     Ok(listing) => {
-                        this.entries = listing.entries.clone();
                         this.tree_children.insert(this.current.clone(), listing.entries);
                         this.truncated = listing.truncated;
                     }
