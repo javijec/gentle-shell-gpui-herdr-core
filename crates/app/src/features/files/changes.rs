@@ -24,6 +24,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::status_color;
+use super::backend::{GitFileAction, GitFileMutation, WorkspaceBackend};
 use crate::features::git::{self, EntryKind, StatusEntry, WorkTree};
 use crate::shared::ui;
 
@@ -340,13 +341,43 @@ impl ChangesView {
     }
 
     fn toggle(&mut self, entry: &StatusEntry, side: Side, cx: &mut Context<Self>) {
-        let mut paths = vec![entry.path.clone()];
-        // Unstaging a rename has to bring its source back to the index too.
-        paths.extend(entry.orig.clone());
-        match side {
-            Side::Unstaged => self.git_op(move |top| git::stage(top, &paths), cx),
-            Side::Staged => self.git_op(move |top| git::unstage(top, &paths), cx),
-        }
+        let Some(toplevel) = self.toplevel() else { return; };
+        let action = match side {
+            Side::Unstaged => GitFileAction::Stage,
+            Side::Staged => GitFileAction::Unstage,
+        };
+        let request = GitFileMutation {
+            path: entry.path.clone(),
+            // Unstaging a rename must restore its source in the index too.
+            source: entry.orig.clone(),
+            index: entry.index,
+            worktree: entry.worktree,
+            herdr_guard: None,
+        };
+        let backend = WorkspaceBackend::local(toplevel);
+        self.git_op_backend(backend.git_file(action, request), cx);
+    }
+
+    fn git_op_backend(
+        &mut self,
+        operation: impl std::future::Future<Output = Result<(), String>>
+            + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(toplevel) = self.toplevel() else { return; };
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let (result, tree) = cx.background_executor().spawn(async move {
+                let result = operation.await;
+                let tree = Repo::read(&root, toplevel);
+                (result, tree)
+            }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.error = result.err();
+                this.apply(tree, cx);
+                cx.notify();
+            });
+        }).detach();
     }
 
     fn click_entry(&mut self, path: &str, side: Side, cx: &mut Context<Self>) {

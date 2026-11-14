@@ -12,6 +12,11 @@ use gpui_kit::*;
 use serde_json::json;
 
 use crate::features::session::SessionView;
+use super::backend::{
+    GitFileAction, GitFileMutation, HerdrGitGuard, WorkspaceBackend,
+    WorkspaceDirEntry as RemoteEntry, WorkspacePath,
+    WorkspaceText as RemotePreview,
+};
 use gentle_core::git::status::StatusEntry as RemoteGitFile;
 use super::tabs::FilePanelTab as RemoteTab;
 use super::viewer::MdMode;
@@ -24,20 +29,6 @@ pub enum RemoteFilesEvent {
     /// Request a native central diff for a changed Linux file.
     OpenDiff(String),
     Close,
-}
-
-#[derive(Clone)]
-struct RemoteEntry {
-    name: String,
-    kind: String,
-}
-
-struct RemotePreview {
-    path: String,
-    content: String,
-    /// Missing on old bridges: keep browsing read-only instead of inventing
-    /// a revision that could overwrite a changed remote file.
-    revision: Option<String>,
 }
 
 struct RemoteGitBranch {
@@ -436,10 +427,8 @@ impl RemoteFilesView {
             cx.notify();
             return;
         };
-        let response = process.request(json!({
-            "type": "herdr_fs_list", "root": self.root,
-            "path": directory
-        }));
+        let response = WorkspaceBackend::herdr(self.root.clone(), process)
+            .list(WorkspacePath::Herdr(directory), false);
         cx.spawn(async move |this, cx| {
             let response = response.await;
             let _ = this.update(cx, |this, cx| {
@@ -448,20 +437,9 @@ impl RemoteFilesView {
                 }
                 this.loading = false;
                 match response {
-                    Ok(reply) => {
-                        let data = reply.data;
-                        this.entries = data["entries"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|entry| {
-                                Some(RemoteEntry {
-                                    name: entry["name"].as_str()?.to_owned(),
-                                    kind: entry["kind"].as_str()?.to_owned(),
-                                })
-                            })
-                            .collect();
-                        this.truncated = data["truncated"].as_bool().unwrap_or(false);
+                    Ok(listing) => {
+                        this.entries = listing.entries;
+                        this.truncated = listing.truncated;
                     }
                     Err(error) => this.error = Some(friendly_error(&error.to_string())),
                 }
@@ -494,9 +472,8 @@ impl RemoteFilesView {
             cx.notify();
             return;
         };
-        let response = process.request(json!({
-            "type": "herdr_fs_read", "root": self.root, "path": path
-        }));
+        let response = WorkspaceBackend::herdr(self.root.clone(), process)
+            .read(WorkspacePath::Herdr(path.clone()));
         cx.spawn_in(window, async move |this, cx| {
             let response = response.await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -505,29 +482,18 @@ impl RemoteFilesView {
                 }
                 this.loading = false;
                 match response {
-                    Ok(reply) => {
-                        if let Some(content) = reply.data["content"].as_str() {
-                            let is_markdown = this.pane_path.is_some()
-                                && std::path::Path::new(&path).extension()
-                                    .is_some_and(|e| e.eq_ignore_ascii_case("md")
-                                        || e.eq_ignore_ascii_case("mdx"));
-                            this.markdown = is_markdown.then(|| (
-                                MdMode::last(),
-                                cx.new(|cx| TextViewState::markdown(content, cx)),
-                            ));
-                            this.preview = Some(RemotePreview {
-                                path,
-                                content: content.to_owned(),
-                                revision: reply.data["revision"].as_str()
-                                    .filter(|r| r.len() == 64
-                                        && r.bytes().all(|byte| byte.is_ascii_hexdigit()))
-                                    .map(str::to_owned),
-                            });
-                            if this.pane_path.is_some() {
-                                this.start_edit(window, cx);
-                            }
-                        } else {
-                            this.error = Some("Invalid remote file response".into());
+                    Ok(preview) => {
+                        let is_markdown = this.pane_path.is_some()
+                            && std::path::Path::new(&preview.path).extension()
+                                .is_some_and(|e| e.eq_ignore_ascii_case("md")
+                                    || e.eq_ignore_ascii_case("mdx"));
+                        this.markdown = is_markdown.then(|| (
+                            MdMode::last(),
+                            cx.new(|cx| TextViewState::markdown(&preview.content, cx)),
+                        ));
+                        this.preview = Some(preview);
+                        if this.pane_path.is_some() {
+                            this.start_edit(window, cx);
                         }
                     }
                     Err(error) => this.error = Some(friendly_error(&error.to_string())),
@@ -734,24 +700,33 @@ impl RemoteFilesView {
         cx.notify();
     }
 
-    // Writes never use the local Git module. The bridge rechecks repo identity,
-    // HEAD, branch and selected file states before running fixed Git verbs.
+    // Stage and Unstage share a typed backend with local Git. The remaining
+    // 5D actions retain their guarded bridge calls until migrated.
     fn git_write(&mut self, command: serde_json::Value, cx: &mut Context<Self>) {
-        if self.git_busy || self.git_loading { return; }
         let Some(process) = self.session.read(cx).remote_fs_process() else {
             self.git_error = Some("Remote agent disconnected; no Git changes were made.".into());
             cx.notify();
             return;
         };
+        self.git_write_future(async move {
+            process.request(command).await.map(|_| ())
+                .map_err(|error| error.to_string())
+        }, cx);
+    }
+
+    fn git_write_future(
+        &mut self, operation: impl std::future::Future<Output = Result<(), String>>
+            + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.git_busy || self.git_loading { return; }
         self.git_busy = true;
         self.git_error = None;
         self.git_feedback = None;
         self.git_confirm_commit = None;
         self.git_confirm_create = None;
         self.git_confirm_switch = None;
-        let response = cx.background_executor().spawn(async move {
-            process.request(command).await
-        });
+        let response = cx.background_executor().spawn(operation);
         cx.spawn(async move |this, cx| {
             let result = response.await;
             let _ = this.update(cx, |this, cx| {
@@ -771,18 +746,27 @@ impl RemoteFilesView {
         cx.notify();
     }
 
-    fn git_file_action(&mut self, action: &'static str, path: String,
+    fn git_file_action(&mut self, action: GitFileAction, path: String,
         index: char, worktree: char, cx: &mut Context<Self>,
     ) {
         let Some(snapshot) = self.git.as_ref().filter(|s| s.writes_enabled) else { return; };
-        let command = json!({
-            "type": action, "root": self.root, "toplevel": snapshot.toplevel,
-            "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
-            "expectedIndexToken": snapshot.index_token,
-            "path": path, "expectedIndex": index.to_string(),
-            "expectedWorktree": worktree.to_string(),
-        });
-        self.git_write(command, cx);
+        let Some(index_token) = snapshot.index_token.clone() else { return; };
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.git_error = Some("Remote agent disconnected; no Git changes were made.".into());
+            cx.notify();
+            return;
+        };
+        let backend = WorkspaceBackend::herdr(self.root.clone(), process);
+        let request = GitFileMutation {
+            path, source: None, index, worktree,
+            herdr_guard: Some(HerdrGitGuard {
+                toplevel: snapshot.toplevel.clone(),
+                head_oid: snapshot.head_oid.clone(),
+                current_branch: snapshot.current_branch.clone(),
+                index_token,
+            }),
+        };
+        self.git_write_future(backend.git_file(action, request), cx);
     }
 
     fn git_commit(&mut self, cx: &mut Context<Self>) {
@@ -883,8 +867,8 @@ impl RemoteFilesView {
         let target = format!("{}/{}",
             snapshot.toplevel.trim_end_matches('/'), entry.path);
         let diff_target = target.clone();
-        let stage_target = target.clone();
-        let unstage_target = target;
+        let stage_target = entry.path.clone();
+        let unstage_target = entry.path.clone();
         let badge = format!("{}{}", entry.index, entry.worktree);
         let index_state = entry.index;
         let worktree_state = entry.worktree;
@@ -911,7 +895,7 @@ impl RemoteFilesView {
                         .ghost().xsmall().label("Stage")
                         .disabled(self.git_busy || self.git_loading)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.git_file_action("herdr_git_stage",
+                            this.git_file_action(GitFileAction::Stage,
                                 stage_target.clone(), index_state, worktree_state, cx);
                         })),
                 ))
@@ -920,7 +904,7 @@ impl RemoteFilesView {
                         .ghost().xsmall().label("Unstage")
                         .disabled(self.git_busy || self.git_loading)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.git_file_action("herdr_git_unstage",
+                            this.git_file_action(GitFileAction::Unstage,
                                 unstage_target.clone(), index_state, worktree_state, cx);
                         })),
                 ))
