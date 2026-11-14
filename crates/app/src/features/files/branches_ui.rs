@@ -42,6 +42,19 @@ pub(super) fn matches_filter(filter: &str, name: &str) -> bool {
     query.is_empty() || name.to_lowercase().contains(&query.to_lowercase())
 }
 
+/// Classify Herdr's local/remotes branch records using the same section
+/// identities and filter rule as the native Branches view.
+pub(super) fn branch_matches(
+    section: RefSection, local: bool, name: &str, filter: &str,
+) -> bool {
+    let correct_section = match section {
+        RefSection::Branches => local,
+        RefSection::Remotes => !local,
+        _ => false,
+    };
+    correct_section && matches_filter(filter, name)
+}
+
 /// One filter shell for both native and Herdr reference panes. The input
 /// belongs to the owner so switching remote agents never reuses old state.
 pub(super) fn filter_field(filter: &Entity<InputState>, busy: bool) -> Div {
@@ -171,7 +184,7 @@ fn ahead_behind(ahead: u32, behind: u32) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{BranchDisplay, RefSection, matches_filter};
+    use super::{BranchDisplay, RefSection, branch_matches, matches_filter};
 
     #[test]
     fn branch_filter_is_shared_and_case_insensitive() {
@@ -181,6 +194,11 @@ mod tests {
         assert!(!matches_filter("release", "feature/my-tool"));
         assert_eq!(RefSection::Branches.label(), "Branches");
         assert_eq!(RefSection::Remotes.label(), "Remotes");
+        assert!(branch_matches(RefSection::Branches, true, "main", ""));
+        assert!(!branch_matches(RefSection::Branches, false, "origin/main", ""));
+        assert!(branch_matches(RefSection::Remotes, false, "origin/main", "ORIGIN"));
+        assert!(!branch_matches(RefSection::Remotes, true, "main", ""));
+        assert!(!branch_matches(RefSection::Tags, true, "v1.0", ""));
     }
 
     #[test]

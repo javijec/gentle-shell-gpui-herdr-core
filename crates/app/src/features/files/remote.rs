@@ -23,7 +23,7 @@ use super::backend::{
 use gentle_core::git::status::{EntryKind, StatusEntry as RemoteGitFile};
 use super::changes_ui::{ChangeSide, change_row, section_header, side_entries};
 use super::branches_ui::{
-    BranchDisplay, RefSection, branch_row, filter_field, matches_filter,
+    BranchDisplay, RefSection, branch_matches, branch_row, filter_field,
     ref_section_header,
 };
 use super::tabs::FilePanelTab as RemoteTab;
@@ -1067,11 +1067,10 @@ unstaged files stay untouched."))
                 // The 5D snapshot already distinguishes local and remote
                 // branches. Keep their original indices for guarded Switch.
                 for section in [RefSection::Branches, RefSection::Remotes] {
-                    let local = section == RefSection::Branches;
                     let visible: Vec<usize> = snapshot.branches.iter()
                         .enumerate()
                         .filter(|(_, branch)| {
-                            branch.local == local && matches_filter(&query, &branch.name)
+                            branch_matches(section, branch.local, &branch.name, &query)
                         })
                         .map(|(index, _)| index)
                         .collect();
@@ -1106,7 +1105,7 @@ unstaged files stay untouched."))
                             .child(if query.is_empty() {
                                 "No Git branches"
                             } else {
-                                "No refs match this filter"
+                                "No refs match in the loaded branch list"
                             })
                             .into_any_element(),
                     );
