@@ -562,3 +562,201 @@ test("5C caps very large Git status without maxBuffer errors and diffs late path
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+// 5D mutations use the exact HEAD/branch from the preceding Git snapshot.
+async function gitSnapshot(h, root, id) {
+  rpcInput(h, { type: "herdr_git_snapshot", id, root });
+  const result = await fsReply(h, id);
+  assert.equal(result.success, true, result.error);
+  return result.data;
+}
+
+async function gitWrite(h, root, snapshot, type, id, props = {}) {
+  rpcInput(h, {
+    type, id, root, toplevel: snapshot.toplevel,
+    expectedHead: snapshot.headOid, expectedBranch: snapshot.currentBranch,
+    ...props,
+  });
+  return fsReply(h, id);
+}
+
+test("5D stages and unstages exactly one selected file without modifying worktree", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-write-"));
+  try {
+    gitInit(root);
+    const file = path.join(root, "tracked.txt");
+    fs.writeFileSync(file, "edited in Linux\n");
+    fs.writeFileSync(path.join(root, "other.txt"), "leave me untracked\n");
+    const h = harness(root);
+    let snapshot = await gitSnapshot(h, root, "write-s1");
+    assert.match(snapshot.headOid, /^[a-f0-9]{40}$/);
+    const first = snapshot.files.find(x => x.path === "tracked.txt");
+    assert.equal((await gitWrite(h, root, snapshot, "herdr_git_stage", "write-a", {
+      path: file, expectedIndex: first.index, expectedWorktree: first.worktree,
+    })).success, true);
+
+    snapshot = await gitSnapshot(h, root, "write-s2");
+    const staged = snapshot.files.find(x => x.path === "tracked.txt");
+    assert.equal(staged.index, "M");
+    const undone = await gitWrite(h, root, snapshot, "herdr_git_unstage", "write-u", {
+      path: file, expectedIndex: staged.index, expectedWorktree: staged.worktree,
+    });
+    assert.equal(undone.success, true, undone.error);
+    snapshot = await gitSnapshot(h, root, "write-s3");
+    assert.equal(snapshot.files.find(x => x.path === "tracked.txt").index, " ");
+    assert.equal(fs.readFileSync(file, "utf8"), "edited in Linux\n");
+    assert.ok(snapshot.files.some(x => x.path === "other.txt"));
+    assert.equal(h.childWrites.length, 1, "mutations must not execute Pi RPC or bash");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("5D commits staged files only, with an explicit message and guarded HEAD", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const cp = require("node:child_process");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-commit-"));
+  try {
+    gitInit(root);
+    const file = path.join(root, "tracked.txt");
+    fs.writeFileSync(file, "staged version\n");
+    const h = harness(root);
+    let snap = await gitSnapshot(h, root, "commit-s1");
+    const entry = snap.files.find(x => x.path === "tracked.txt");
+    assert.equal((await gitWrite(h, root, snap, "herdr_git_stage", "commit-stage", {
+      path: file, expectedIndex: entry.index, expectedWorktree: entry.worktree,
+    })).success, true);
+    fs.writeFileSync(file, "unstaged after stage\n");
+    snap = await gitSnapshot(h, root, "commit-s2");
+    const noMessage = await gitWrite(h, root, snap, "herdr_git_commit", "commit-empty", {
+      summary: "",
+    });
+    assert.equal(noMessage.success, false);
+    const done = await gitWrite(h, root, snap, "herdr_git_commit", "commit-real", {
+      summary: "feat: remote stage", description: "Safe stage 5D test",
+    });
+    assert.equal(done.success, true, done.error);
+    const log = cp.execFileSync("git", ["-C", root, "log", "-1", "--format=%s"]).toString();
+    assert.equal(log.trim(), "feat: remote stage");
+    assert.equal(cp.execFileSync("git", ["-C", root, "show", "HEAD:tracked.txt"]).toString(),
+      "staged version\n");
+    assert.equal(fs.readFileSync(file, "utf8"), "unstaged after stage\n");
+    const stale = await gitWrite(h, root, snap, "herdr_git_commit", "commit-stale", {
+      summary: "must fail",
+    });
+    assert.equal(stale.success, false);
+    assert.match(stale.error, /HEAD or branch changed/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("5D supports first-commit stage and unstage without deleting new files", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const cp = require("node:child_process");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-unborn-"));
+  try {
+    cp.execFileSync("git", ["-C", root, "init", "-q", "-b", "main"]);
+    const file = path.join(root, "initial.txt");
+    fs.writeFileSync(file, "initial\n");
+    const h = harness(root);
+    let snap = await gitSnapshot(h, root, "unborn-s1");
+    assert.equal(snap.headOid, null);
+    const item = snap.files.find(x => x.path === "initial.txt");
+    assert.equal((await gitWrite(h, root, snap, "herdr_git_stage", "unborn-stage", {
+      path: file, expectedIndex: item.index, expectedWorktree: item.worktree,
+    })).success, true);
+    snap = await gitSnapshot(h, root, "unborn-s2");
+    const staged = snap.files.find(x => x.path === "initial.txt");
+    const unstaged = await gitWrite(h, root, snap, "herdr_git_unstage", "unborn-unstage", {
+      path: file, expectedIndex: staged.index, expectedWorktree: staged.worktree,
+    });
+    assert.equal(unstaged.success, true, unstaged.error);
+    assert.equal(fs.readFileSync(file, "utf8"), "initial\n");
+    assert.equal((await gitSnapshot(h, root, "unborn-s3"))
+      .files.find(x => x.path === "initial.txt").index, "?");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("5D creates local branches and refuses switching while dirty", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const cp = require("node:child_process");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-branch-"));
+  try {
+    gitInit(root);
+    const h = harness(root);
+    let snap = await gitSnapshot(h, root, "branch-s1");
+    assert.equal((await gitWrite(h, root, snap, "herdr_git_create_branch", "branch-new", {
+      branch: "feature/5d",
+    })).success, true);
+    fs.writeFileSync(path.join(root, "untracked.txt"), "dirty\n");
+    let dirty = await gitSnapshot(h, root, "branch-s2");
+    const refused = await gitWrite(h, root, dirty,
+      "herdr_git_switch_branch", "branch-deny", { branch: "feature/5d" });
+    assert.equal(refused.success, false);
+    assert.match(refused.error, /clean index and worktree/);
+    fs.unlinkSync(path.join(root, "untracked.txt"));
+    snap = await gitSnapshot(h, root, "branch-s3");
+    const switched = await gitWrite(h, root, snap,
+      "herdr_git_switch_branch", "branch-switch", { branch: "feature/5d" });
+    assert.equal(switched.success, true, switched.error);
+    assert.equal(cp.execFileSync("git", ["-C", root, "branch", "--show-current"])
+      .toString().trim(), "feature/5d");
+    assert.equal(h.childWrites.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("5D denies stale status, symlinks, unselected paths and invalid refs", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-write-deny-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-write-outside-"));
+  try {
+    gitInit(root);
+    const file = path.join(root, "tracked.txt");
+    fs.writeFileSync(file, "changed\n");
+    fs.writeFileSync(path.join(outside, "secret"), "secret\n");
+    fs.symlinkSync(path.join(outside, "secret"), path.join(root, "alias"));
+    const h = harness(root);
+    const snapshot = await gitSnapshot(h, root, "deny-s1");
+    const state = snapshot.files.find(x => x.path === "tracked.txt");
+    const bad = [
+      { id: "deny-stage-old", path: file, expectedIndex: "M",
+        expectedWorktree: state.worktree },
+      { id: "deny-stage-external", path: path.join(outside, "secret"),
+        expectedIndex: "?", expectedWorktree: "?" },
+      { id: "deny-stage-alias", path: path.join(root, "alias"),
+        expectedIndex: "?", expectedWorktree: "?" },
+      { id: "deny-stage-drive", path: "C:\\Windows\\hello.txt",
+        expectedIndex: "?", expectedWorktree: "?" },
+    ];
+    for (const item of bad) {
+      const result = await gitWrite(h, root, snapshot, "herdr_git_stage", item.id, item);
+      assert.equal(result.success, false, item.id);
+    }
+    const withoutGuards = await gitWrite(h, root, snapshot, "herdr_git_stage",
+      "deny-no-head", { path: file, expectedIndex: state.index,
+        expectedWorktree: state.worktree, expectedHead: undefined });
+    assert.equal(withoutGuards.success, false);
+    assert.equal(fs.readFileSync(path.join(outside, "secret"), "utf8"), "secret\n");
+    assert.equal(h.childWrites.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
