@@ -857,6 +857,7 @@ impl RemoteFilesView {
     fn render_git_panel(&self, cx: &mut Context<Self>) -> Div {
         let mut rows: Vec<AnyElement> = Vec::new();
         if let Some(snapshot) = &self.git {
+            let writable = snapshot.writes_enabled && self.root != "/";
             rows.push(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child(snapshot.toplevel.clone()).into_any_element(),
@@ -869,22 +870,47 @@ impl RemoteFilesView {
                 for (index, entry) in snapshot.files.iter().enumerate() {
                     let target = format!("{}/{}",
                         snapshot.toplevel.trim_end_matches('/'), entry.path);
+                    let diff_target = target.clone();
+                    let stage_target = target.clone();
+                    let unstage_target = target;
                     let badge = format!("{}{}", entry.index, entry.worktree);
+                    let index_state = entry.index;
+                    let worktree_state = entry.worktree;
+                    let can_stage = writable && (entry.worktree != ' ' || entry.index == '?');
+                    let can_unstage = writable && entry.index != ' ' && entry.index != '?';
                     rows.push(
                         h_flex()
                             .id(("remote-git-change", index))
-                            .h(px(28.))
-                            .px_2()
-                            .gap_2()
-                            .cursor_pointer()
-                            .hover(|row| row.bg(ui::surface_hover()))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(RemoteFilesEvent::OpenDiff(target.clone()));
-                            }))
-                            .child(div().w(px(28.)).font_family(ui::MONO)
+                            .h(px(32.)).px_2().gap_1()
+                            .child(div().w(px(26.)).font_family(ui::MONO)
                                 .text_xs().text_color(ui::warning()).child(badge))
-                            .child(div().flex_1().min_w_0().truncate()
-                                .text_xs().child(entry.path.clone()))
+                            .child(
+                                div().flex_1().min_w_0().truncate().text_xs()
+                                    .cursor_pointer()
+                                    .hover(|row| row.bg(ui::surface_hover()))
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(RemoteFilesEvent::OpenDiff(diff_target.clone()));
+                                    }))
+                                    .child(entry.path.clone()),
+                            )
+                            .when(can_stage, |row| row.child(
+                                Button::new(format!("remote-git-stage-{index}"))
+                                    .ghost().xsmall().label("Stage")
+                                    .disabled(self.git_busy || self.git_loading)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.git_file_action("herdr_git_stage",
+                                            stage_target.clone(), index_state, worktree_state, cx);
+                                    })),
+                            ))
+                            .when(can_unstage, |row| row.child(
+                                Button::new(format!("remote-git-unstage-{index}"))
+                                    .ghost().xsmall().label("Unstage")
+                                    .disabled(self.git_busy || self.git_loading)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.git_file_action("herdr_git_unstage",
+                                            unstage_target.clone(), index_state, worktree_state, cx);
+                                    })),
+                            ))
                             .into_any_element(),
                     );
                 }
@@ -893,16 +919,47 @@ impl RemoteFilesView {
                         .text_color(ui::warning())
                         .child("Showing first 200 changed files").into_any_element());
                 }
+                if writable {
+                    let staged_count = snapshot.files.iter()
+                        .filter(|entry| entry.index != ' ' && entry.index != '?').count();
+                    let summary = self.git_summary.read(cx).value().trim().to_owned();
+                    let confirmed = self.git_confirm_commit.as_deref() == Some(summary.as_str());
+                    rows.push(
+                        v_flex().px_3().py_3().gap_2().border_t_1()
+                            .border_color(ui::border())
+                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD)
+                                .child(format!("Commit staged changes ({staged_count} visible)")))
+                            .child(div().text_xs().text_color(ui::muted())
+                                .child("Only staged Git changes are committed; unstaged files stay untouched."))
+                            .child(Input::new(&self.git_summary).small())
+                            .child(
+                                Button::new("remote-git-commit")
+                                    .primary().small().w_full()
+                                    .label(if confirmed { "Confirm commit" } else { "Review commit" })
+                                    .disabled(self.git_busy || self.git_loading
+                                        || summary.is_empty() || staged_count == 0
+                                        || snapshot.files_truncated)
+                                    .on_click(cx.listener(|this, _, _, cx| this.git_commit(cx))),
+                            )
+                            .when(snapshot.files_truncated, |v| v.child(
+                                div().text_xs().text_color(ui::warning())
+                                    .child("Refresh in a smaller worktree before committing."),
+                            ))
+                            .into_any_element(),
+                    );
+                }
             } else {
                 if snapshot.branches.is_empty() {
                     rows.push(div().px_3().py_3().text_sm().text_color(ui::muted())
                         .child("No Git branches").into_any_element());
                 }
                 for (index, branch) in snapshot.branches.iter().enumerate() {
+                    let name = branch.name.clone();
+                    let confirmed = self.git_confirm_switch.as_deref() == Some(name.as_str());
                     rows.push(
                         h_flex()
                             .id(("remote-git-branch", index))
-                            .h(px(28.)).px_3().gap_2()
+                            .h(px(32.)).px_3().gap_2()
                             .child(Icon::new(IconName::GitBranch).small()
                                 .text_color(if branch.current {
                                     ui::success()
@@ -916,6 +973,15 @@ impl RemoteFilesView {
                                 div().text_xs().text_color(ui::success())
                                     .child("HEAD"),
                             ))
+                            .when(writable && branch.local && !branch.current, |row| row.child(
+                                Button::new(format!("remote-git-switch-{index}"))
+                                    .ghost().xsmall()
+                                    .label(if confirmed { "Confirm switch" } else { "Switch" })
+                                    .disabled(self.git_busy || self.git_loading)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.git_switch_branch(name.clone(), cx);
+                                    })),
+                            ))
                             .into_any_element(),
                     );
                 }
@@ -923,6 +989,31 @@ impl RemoteFilesView {
                     rows.push(div().px_3().py_2().text_xs()
                         .text_color(ui::warning())
                         .child("Showing first 120 branches").into_any_element());
+                }
+                if writable {
+                    let name = self.git_branch_name.read(cx).value().trim().to_owned();
+                    let confirmed = self.git_confirm_create.as_deref() == Some(name.as_str());
+                    rows.push(
+                        v_flex().px_3().py_3().gap_2().border_t_1()
+                            .border_color(ui::border())
+                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD)
+                                .child("Create local branch from HEAD"))
+                            .child(Input::new(&self.git_branch_name).small())
+                            .child(
+                                Button::new("remote-git-create-branch")
+                                    .ghost().small().w_full()
+                                    .label(if confirmed { "Confirm create" } else { "Create branch" })
+                                    .disabled(self.git_busy || self.git_loading || name.is_empty()
+                                        || snapshot.head_oid.is_none()
+                                        || snapshot.current_branch.is_none())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.git_create_branch(cx);
+                                    })),
+                            )
+                            .child(div().text_xs().text_color(ui::muted())
+                                .child("Switch refuses staged, unstaged and untracked changes."))
+                            .into_any_element(),
+                    );
                 }
             }
         }
@@ -939,6 +1030,7 @@ impl RemoteFilesView {
                         Button::new("remote-git-refresh")
                             .ghost().xsmall()
                             .icon(Icon::new(IconName::RefreshCw))
+                            .disabled(self.git_busy || self.git_loading)
                             .tooltip("Refresh remote Git status and branches")
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_git(cx))),
                     )
@@ -955,9 +1047,17 @@ impl RemoteFilesView {
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child("Reading status from remote Git…"),
             ))
+            .when(self.git_busy, |panel| panel.child(
+                div().px_3().py_2().text_xs().text_color(ui::muted())
+                    .child("Applying guarded remote Git operation…"),
+            ))
             .when_some(self.git_error.clone(), |panel, error| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::warning())
                     .child(error),
+            ))
+            .when_some(self.git_feedback.clone(), |panel, feedback| panel.child(
+                div().px_3().py_2().text_xs().text_color(ui::muted())
+                    .child(feedback),
             ))
             .child(
                 div().id("remote-git-scroll").flex_1().min_h_0()
@@ -968,7 +1068,11 @@ impl RemoteFilesView {
                 div().h(px(26.)).flex_none().border_t_1()
                     .border_color(ui::border()).px_3().text_size(px(10.))
                     .text_color(ui::muted())
-                    .child("Remote Git · read-only · click a change to view diff"),
+                    .child(if self.git.as_ref().is_some_and(|s| s.writes_enabled) {
+                        "Remote Git · guarded writes · no push/discard"
+                    } else {
+                        "Remote Git · read-only · open a new 5D agent for writes"
+                    }),
             )
     }
 
