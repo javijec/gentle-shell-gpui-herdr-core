@@ -15,7 +15,7 @@ use serde_json::json;
 
 use crate::features::session::SessionView;
 use crate::features::git::{RefEntry, RefsSnapshot, WorkTree};
-use gentle_core::git::refs::{HeadInfo, RefKind, Stash};
+use gentle_core::git::refs::{HeadInfo, RefKind, Stash, parse_refs};
 use super::refs::{RefsEvent, RefsView};
 use super::changes::{ChangesEvent, ChangesView};
 use super::backend::{
@@ -61,6 +61,7 @@ struct RemoteGitSnapshot {
     branches: Vec<RemoteGitBranch>,
     tags: Vec<String>,
     stashes: Vec<RemoteGitStash>,
+    ref_details: Vec<RefEntry>,
     files_truncated: bool,
     branches_truncated: bool,
     tags_truncated: bool,
@@ -142,6 +143,20 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
         }).collect::<Result<Vec<_>, &'static str>>()?,
         _ => return Err("Invalid remote Git stashes"),
     };
+    let ref_details = match data.get("refDetails") {
+        None => Vec::new(), // Older bridge without extended ref information
+        Some(serde_json::Value::String(raw)) if raw.len() <= 1_500_000 => {
+            let parsed = parse_refs(raw);
+            if parsed.len() > 360 || parsed.iter().any(|entry| {
+                entry.name.is_empty() || entry.name.len() > 512
+                    || entry.name.chars().any(char::is_control)
+            }) {
+                return Err("Invalid remote Git reference metadata");
+            }
+            parsed
+        }
+        _ => return Err("Invalid remote Git reference metadata"),
+    };
     let head_oid = match data.get("headOid") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(s)) if (s.len() == 40 || s.len() == 64)
@@ -162,7 +177,7 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
         && data["indexTruncated"].as_bool() != Some(true);
     Ok(RemoteGitSnapshot {
         toplevel, head_oid, current_branch, index_token, writes_enabled,
-        files, branches, tags, stashes,
+        files, branches, tags, stashes, ref_details,
         files_truncated: data["filesTruncated"].as_bool().unwrap_or(false),
         branches_truncated: data["branchesTruncated"].as_bool().unwrap_or(false),
         tags_truncated: data["tagsTruncated"].as_bool().unwrap_or(false),
@@ -192,34 +207,38 @@ fn shared_remote_refs(source: &RemoteGitSnapshot) -> RefsSnapshot {
         ..HeadInfo::default()
     };
     for branch in &source.branches {
-        let entry = RefEntry {
-            kind: if branch.local { RefKind::Branch } else { RefKind::Remote },
-            name: branch.name.clone(),
-            current: branch.current,
-            upstream: None,
-            ahead: 0,
-            behind: 0,
-            gone: false,
-            sha: String::new(),
-            subject: String::new(),
-        };
+        let kind = if branch.local { RefKind::Branch } else { RefKind::Remote };
+        let mut entry = source.ref_details.iter()
+            .find(|details| details.kind == kind && details.name == branch.name)
+            .cloned()
+            .unwrap_or_else(|| RefEntry {
+                kind, name: branch.name.clone(), current: branch.current,
+                upstream: None, ahead: 0, behind: 0, gone: false,
+                sha: String::new(), subject: String::new(),
+            });
+        // The branch list is authoritative about HEAD in this snapshot.
+        entry.current = branch.current;
         if branch.local {
             refs.branches.push(entry);
         } else {
             refs.remotes.push(entry);
         }
     }
-    refs.tags = source.tags.iter().map(|tag| RefEntry {
-        kind: RefKind::Tag,
-        name: tag.clone(),
-        current: false,
-        upstream: None,
-        ahead: 0,
-        behind: 0,
-        gone: false,
-        sha: String::new(),
-        subject: String::new(),
+    refs.tags = source.tags.iter().map(|tag| {
+        source.ref_details.iter()
+            .find(|entry| entry.kind == RefKind::Tag && entry.name == *tag)
+            .cloned()
+            .unwrap_or_else(|| RefEntry {
+                kind: RefKind::Tag, name: tag.clone(), current: false,
+                upstream: None, ahead: 0, behind: 0, gone: false,
+                sha: String::new(), subject: String::new(),
+            })
     }).collect();
+    if let Some(head) = refs.branches.iter().find(|entry| entry.current) {
+        refs.head.upstream = head.upstream.clone();
+        refs.head.ahead = head.ahead;
+        refs.head.behind = head.behind;
+    }
     refs.stashes = source.stashes.iter().map(|stash| Stash {
         name: stash.name.clone(), branch: None, message: stash.message.clone(),
     }).collect();
@@ -230,6 +249,26 @@ fn shared_remote_refs(source: &RemoteGitSnapshot) -> RefsSnapshot {
 mod remote_git_snapshot_tests {
     use super::{parse_git_snapshot, shared_remote_refs, shared_remote_worktree};
     use serde_json::json;
+
+    #[test]
+    fn enriches_remote_refs_from_bounded_native_format() {
+        let data = json!({
+            "toplevel": "/srv/workspaces/JaviPi",
+            "readOnly": true,
+            "files": [],
+            "branches": [{"name":"main","current":true,"local":true}],
+            "tags": [{"name":"v1"}],
+            "refDetails": concat!(
+                "*\0refs/heads/main\0origin/main\0[ahead 2, behind 1]\0abc1234\0feature\n",
+                " \0refs/tags/v1\0\0\0def1234\0release\n",
+            ),
+        });
+        let bridge = parse_git_snapshot(&data).expect("valid enriched metadata");
+        let refs = shared_remote_refs(&bridge);
+        assert_eq!(refs.head.upstream.as_deref(), Some("origin/main"));
+        assert_eq!((refs.head.ahead, refs.head.behind), (2, 1));
+        assert_eq!(refs.tags[0].subject, "release");
+    }
 
     #[test]
     fn typed_herdr_snapshots_feed_the_same_native_refs_and_changes_views() {
