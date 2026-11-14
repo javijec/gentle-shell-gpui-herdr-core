@@ -964,6 +964,9 @@ impl RemoteFilesView {
     fn refresh_git(&mut self, cx: &mut Context<Self>) {
         self.git_confirm_create = None;
         self.git_confirm_switch = None;
+        self.refs.update(cx, |view, cx| {
+            view.mark_remote_switch(None, cx);
+        });
         self.git_generation = self.git_generation.wrapping_add(1);
         let generation = self.git_generation;
         self.git_loading = true;
@@ -1052,6 +1055,9 @@ impl RemoteFilesView {
         self.git_feedback = None;
         self.git_confirm_create = None;
         self.git_confirm_switch = None;
+        self.refs.update(cx, |view, cx| {
+            view.mark_remote_switch(None, cx);
+        });
         let response = cx.background_executor().spawn(operation);
         cx.spawn(async move |this, cx| {
             let result = response.await;
@@ -1143,9 +1149,13 @@ impl RemoteFilesView {
             && s.head_oid.is_some() && s.current_branch.is_some())
         else { return; };
         if self.git_confirm_switch.as_deref() != Some(branch.as_str()) {
-            self.git_confirm_switch = Some(branch);
+            self.git_confirm_switch = Some(branch.clone());
+            self.refs.update(cx, |view, cx| {
+                view.mark_remote_switch(Some(branch), cx);
+            });
             self.git_feedback = Some(
-                "Branch switching requires a clean tree. Click Confirm switch.".into());
+                "Branch switching requires a clean tree. Click the same branch again to confirm."
+                    .into());
             cx.notify();
             return;
         }
