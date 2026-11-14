@@ -4,7 +4,9 @@
 
 mod changes;
 mod remote;
+mod remote_git;
 pub use remote::{RemoteFilesEvent, RemoteFilesView};
+pub use remote_git::RemoteGitDiffView;
 mod listing;
 mod ops;
 mod refs;

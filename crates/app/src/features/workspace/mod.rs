@@ -18,7 +18,9 @@ use gpui_kit::component::{Icon, Sizable as _, TitleBar, WindowExt as _, h_flex, 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::features::files::{FileTreeView, RemoteFilesEvent, RemoteFilesView};
+use crate::features::files::{
+    FileTreeView, RemoteFilesEvent, RemoteFilesView, RemoteGitDiffView,
+};
 use crate::features::machines::{
     model as machine_model, MachinesEvent, MachinesView,
     RemoteDirectoryEvent, RemoteDirectoryPicker,
