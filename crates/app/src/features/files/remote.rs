@@ -227,8 +227,45 @@ fn shared_remote_refs(source: &RemoteGitSnapshot) -> RefsSnapshot {
 
 #[cfg(test)]
 mod remote_git_snapshot_tests {
-    use super::parse_git_snapshot;
+    use super::{parse_git_snapshot, shared_remote_refs, shared_remote_worktree};
     use serde_json::json;
+
+    #[test]
+    fn typed_herdr_snapshots_feed_the_same_native_refs_and_changes_views() {
+        let data = json!({
+            "toplevel": "/srv/workspaces/JaviPi",
+            "readOnly": true,
+            "writesEnabled": true,
+            "headOid": "a".repeat(40),
+            "currentBranch": "main",
+            "indexToken": "b".repeat(64),
+            "files": [
+                {"path": "src/main.rs", "index": "M", "worktree": "M"},
+                {"path": "new.txt", "index": "?", "worktree": "?"}
+            ],
+            "branches": [
+                {"name": "main", "current": true, "local": true},
+                {"name": "dev", "current": false, "local": true},
+                {"name": "origin/main", "current": false, "local": false}
+            ],
+            "tags": [{"name": "v1.0"}],
+            "stashes": [{"name": "stash@{0}", "message": "On main: save"}]
+        });
+        let bridge = parse_git_snapshot(&data).expect("valid agent snapshot");
+        let changes = shared_remote_worktree(&bridge);
+        let refs = shared_remote_refs(&bridge);
+        assert_eq!(changes.entries.len(), 2);
+        assert_eq!(changes.branch.head.as_deref(), Some("main"));
+        assert_eq!((changes.entries[0].staged(), changes.entries[0].unstaged()),
+            (Some('M'), Some('M')));
+        assert_eq!(refs.branches.len(), 2);
+        assert_eq!(refs.remotes.len(), 1);
+        assert_eq!(refs.tags.len(), 1);
+        assert_eq!(refs.stashes.len(), 1);
+        assert_eq!(refs.head.branch.as_deref(), Some("main"));
+        assert_eq!(refs.remotes[0].name, "origin/main");
+        assert_eq!(refs.stashes[0].name, "stash@{0}");
+    }
 
     #[test]
     fn tags_and_stashes_accept_new_snapshots_and_validate_records() {
