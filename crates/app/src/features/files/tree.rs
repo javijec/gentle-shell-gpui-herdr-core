@@ -215,6 +215,8 @@ impl FileTreeView {
             cx.subscribe(&refs, |_, _, event: &RefsEvent, cx| match event {
                 RefsEvent::OpenAgent(path) => cx.emit(FileTreeEvent::OpenAgent(path.clone())),
                 RefsEvent::Changed => cx.notify(),
+                // A remote action cannot originate in the local RefsView.
+                RefsEvent::SwitchRemoteBranch(_) => {},
             }),
         ];
         let mut this = Self {
