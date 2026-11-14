@@ -281,9 +281,12 @@ impl WorkspaceBackend {
 }
 
 fn ensure_local_path(root: &Path, selected: &Path) -> Result<(), String> {
-    let real_root = root.canonicalize().map_err(|error| error.to_string())?;
-    let real_selected = selected.canonicalize().map_err(|error| error.to_string())?;
-    if !real_selected.starts_with(real_root) {
+    // Preserve the native tree's deliberate navigation into symlinked
+    // directories. Remote paths have a stricter server-side realpath guard.
+    // Path::starts_with compares whole components, not string prefixes.
+    if !selected.starts_with(root)
+        || selected.components().any(|part| part == std::path::Component::ParentDir)
+    {
         return Err("Path is outside the selected local workspace".into());
     }
     Ok(())
@@ -326,6 +329,14 @@ mod tests {
         for path in ["../outside", "/absolute", "src/../outside", "C:/Windows", ""] {
             assert!(safe_git_relative(path).is_err(), "{path}");
         }
+    }
+
+    #[test]
+    fn local_workspace_paths_are_component_scoped() {
+        let root = Path::new("workspace");
+        assert!(ensure_local_path(root, Path::new("workspace/docs")).is_ok());
+        assert!(ensure_local_path(root, Path::new("workspace-other/docs")).is_err());
+        assert!(ensure_local_path(root, Path::new("workspace/../secret")).is_err());
     }
 
     #[test]
