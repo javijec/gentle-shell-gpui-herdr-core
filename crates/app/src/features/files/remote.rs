@@ -24,7 +24,7 @@ use gentle_core::git::status::{EntryKind, StatusEntry as RemoteGitFile};
 use super::changes_ui::{ChangeSide, change_row, section_header, side_entries};
 use super::branches_ui::{
     BranchDisplay, RefSection, branch_matches, branch_row, filter_field,
-    ref_section_header,
+    matches_filter, ref_row, ref_section_header,
 };
 use super::tabs::FilePanelTab as RemoteTab;
 use super::viewer::MdMode;
@@ -45,6 +45,11 @@ struct RemoteGitBranch {
     local: bool,
 }
 
+struct RemoteGitStash {
+    name: String,
+    message: String,
+}
+
 struct RemoteGitSnapshot {
     toplevel: String,
     head_oid: Option<String>,
@@ -53,8 +58,12 @@ struct RemoteGitSnapshot {
     writes_enabled: bool,
     files: Vec<RemoteGitFile>,
     branches: Vec<RemoteGitBranch>,
+    tags: Vec<String>,
+    stashes: Vec<RemoteGitStash>,
     files_truncated: bool,
     branches_truncated: bool,
+    tags_truncated: bool,
+    stashes_truncated: bool,
 }
 
 /// The JSON shape is not trusted just because it came from an RPC bridge.
@@ -104,6 +113,34 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
                 local: item["local"].as_bool().unwrap_or(false),
             })
         }).collect::<Result<Vec<_>, &'static str>>()?;
+    // Older running 5D agents omit tags and stashes. Treat omitted fields
+    // as unsupported/empty without weakening validation of supplied data.
+    let tags = match data.get("tags") {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(items)) => items.iter().take(120).map(|item| {
+            item["name"].as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 512
+                    && !s.chars().any(char::is_control))
+                .map(str::to_owned)
+                .ok_or("Invalid remote Git tag")
+        }).collect::<Result<Vec<_>, &'static str>>()?,
+        _ => return Err("Invalid remote Git tags"),
+    };
+    let stashes = match data.get("stashes") {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(items)) => items.iter().take(120).map(|item| {
+            let name = item["name"].as_str()
+                .filter(|s| s.starts_with("stash@{") && s.ends_with('}')
+                    && s.len() <= 64 && s[7..s.len()-1].bytes().all(|b| b.is_ascii_digit())
+                    && s.len() > 8)
+                .ok_or("Invalid remote Git stash name")?;
+            let message = item["message"].as_str()
+                .filter(|s| s.len() <= 2048 && !s.chars().any(char::is_control))
+                .ok_or("Invalid remote Git stash message")?;
+            Ok(RemoteGitStash { name: name.to_owned(), message: message.to_owned() })
+        }).collect::<Result<Vec<_>, &'static str>>()?,
+        _ => return Err("Invalid remote Git stashes"),
+    };
     let head_oid = match data.get("headOid") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(s)) if (s.len() == 40 || s.len() == 64)
@@ -124,9 +161,11 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
         && data["indexTruncated"].as_bool() != Some(true);
     Ok(RemoteGitSnapshot {
         toplevel, head_oid, current_branch, index_token, writes_enabled,
-        files, branches,
+        files, branches, tags, stashes,
         files_truncated: data["filesTruncated"].as_bool().unwrap_or(false),
         branches_truncated: data["branchesTruncated"].as_bool().unwrap_or(false),
+        tags_truncated: data["tagsTruncated"].as_bool().unwrap_or(false),
+        stashes_truncated: data["stashesTruncated"].as_bool().unwrap_or(false),
     })
 }
 
@@ -134,6 +173,30 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
 mod remote_git_snapshot_tests {
     use super::parse_git_snapshot;
     use serde_json::json;
+
+    #[test]
+    fn tags_and_stashes_accept_new_snapshots_and_validate_records() {
+        let mut value = json!({
+            "toplevel": "/srv/workspaces/JaviPi",
+            "readOnly": true,
+            "files": [],
+            "branches": [],
+            "tags": [{"name":"v1.0"}],
+            "stashes": [{"name":"stash@{0}", "message":"On main: my edit"}],
+            "tagsTruncated": true,
+            "stashesTruncated": false,
+        });
+        let parsed = parse_git_snapshot(&value).expect("valid refs");
+        assert_eq!(parsed.tags, vec!["v1.0"]);
+        assert_eq!(parsed.stashes[0].name, "stash@{0}");
+        assert!(parsed.tags_truncated);
+        assert!(!parsed.stashes_truncated);
+        value["stashes"][0]["name"] = json!("stash@{nope}");
+        assert!(parse_git_snapshot(&value).is_err());
+        value["stashes"] = json!([]);
+        value["tags"] = json!({"malformed":true});
+        assert!(parse_git_snapshot(&value).is_err());
+    }
 
     #[test]
     fn supports_guarded_5d_snapshots_and_old_read_only_bridge() {
