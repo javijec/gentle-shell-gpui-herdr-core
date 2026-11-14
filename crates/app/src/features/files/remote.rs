@@ -938,7 +938,8 @@ impl RemoteFilesView {
                             .child(div().w(px(26.)).font_family(ui::MONO)
                                 .text_xs().text_color(ui::warning()).child(badge))
                             .child(
-                                div().flex_1().min_w_0().truncate().text_xs()
+                                div().id(("remote-git-diff-link", index))
+                                    .flex_1().min_w_0().truncate().text_xs()
                                     .cursor_pointer()
                                     .hover(|row| row.bg(ui::surface_hover()))
                                     .on_click(cx.listener(move |_, _, _, cx| {
