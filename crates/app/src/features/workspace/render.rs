@@ -8,7 +8,7 @@ const TITLE_BAR_HEIGHT: f32 = 36.;
 
 /// Narrow draggable seam between the dock and its workspace. Same native
 /// drag protocol as split-pane dividers, with a grab indicator on hover.
-fn dock_resize_handle(side: DockSide) -> Div {
+fn dock_resize_handle(side: DockSide) -> impl IntoElement {
     let id = match side {
         DockSide::Machines => "resize-machines-dock",
         DockSide::Files => "resize-files-dock",
