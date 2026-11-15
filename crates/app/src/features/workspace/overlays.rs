@@ -370,9 +370,11 @@ impl Workspace {
         if !crate::features::terminal::herdr_enabled() {
             return;
         }
-        if let Some((Overlay::Machines(view), _)) = &self.overlay {
+        if matches!(&self.overlay, Some((Overlay::Machines(_), _))) {
             if register {
-                view.update(cx, |view, cx| view.begin_add_machine(window, cx));
+                if let Some((Overlay::Machines(view), _)) = &self.overlay {
+                    view.update(cx, |view, cx| view.begin_add_machine(window, cx));
+                }
             } else {
                 self.close_overlay(window, cx);
             }
