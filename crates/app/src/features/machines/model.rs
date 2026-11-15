@@ -37,15 +37,6 @@ impl Terminal {
         self.state == "live"
     }
 
-    pub fn belongs_to(&self, machine: Option<&str>) -> bool {
-        match machine {
-            None => !self.address.contains('/'),
-            Some(machine) => self.address
-                .split_once('/')
-                .is_some_and(|(prefix, _)| prefix == machine),
-        }
-    }
-
     pub fn display_title(&self) -> &str {
         if self.title.trim().is_empty() {
             &self.address
@@ -369,11 +360,8 @@ mod tests {
         let remote = parse_terminal(&json!({
             "address":"javipi/t10","state":"live","title":"bash"
         })).unwrap();
-        assert!(local.belongs_to(None));
-        assert!(!local.belongs_to(Some("javipi")));
-        assert!(remote.belongs_to(Some("javipi")));
-        assert!(!remote.belongs_to(None));
-        assert!(!remote.belongs_to(Some("vps")));
+        assert!(!local.address.contains('/'));
+        assert_eq!(remote.address.split_once('/').map(|(host, _)| host), Some("javipi"));
         assert_eq!(remote.display_title(), "bash");
         assert!(remote.live());
         assert!(!remote.gentle_shell);
