@@ -209,7 +209,9 @@ impl PaletteView {
             Category::Branches => self.branches.is_none(),
             _ => false,
         };
-        let text = if loading {
+        let text = if self.remote_error.is_some() {
+            "Remote indexing failed"
+        } else if loading {
             if self.category == Category::Files {
                 "Indexing files…"
             } else {
@@ -227,7 +229,13 @@ impl PaletteView {
             .text_sm()
             .text_color(ui::muted())
             .when(loading, |d| d.child(Spinner::new().small()))
-            .child(text)
+            .child(self.remote_error.clone().unwrap_or_else(|| {
+                if self.remote_truncated && !loading {
+                    "Remote results are truncated; use Files or Branches to see more".into()
+                } else {
+                    text.into()
+                }
+            }))
             .into_any_element()
     }
 }
