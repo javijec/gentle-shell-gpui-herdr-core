@@ -1524,6 +1524,16 @@ impl RemoteFilesView {
 
     /// Open the same Changes screen for a remote session as for a local one,
     /// without ever touching the Windows worktree.
+    /// The architecture-docs screen is a local installer. For a remote
+    /// agent, open its own docs folder instead of reading Windows docs.
+    pub fn show_remote_docs(&mut self, cx: &mut Context<Self>) {
+        self.set_tab(RemoteTab::Files, cx);
+        if self.root != "/" {
+            let docs = format!("{}/docs", self.root.trim_end_matches('/'));
+            self.load_directory(docs, cx);
+        }
+    }
+
     pub fn show_changes(&mut self, cx: &mut Context<Self>) {
         self.set_tab(RemoteTab::Changes, cx);
         if self.git.is_none() {
