@@ -1157,7 +1157,7 @@ async function remoteGit(req) {
     ], 10, MAX_GIT_BRANCHES);
     const branches = strictUtf8(references.output).split("\n").filter(Boolean);
     if (branches.some((name) => name.length > 512 ||
-          /[\\x00-\\x1f\\x7f]/.test(name))) {
+          /[\x00-\x1f\x7f]/.test(name))) {
       throw new Error("Invalid remote history branch");
     }
     if (req.branch !== null && req.branch !== undefined &&
