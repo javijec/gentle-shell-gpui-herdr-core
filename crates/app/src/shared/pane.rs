@@ -8,6 +8,15 @@ use gpui_kit::assets::IconName;
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
+/// A file pane asks to show another file in its place: a link to a local
+/// Markdown file clicked in its preview. `pane` is the pane item's view.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = gentle, no_json)]
+pub struct ShowInPane {
+    pub pane: EntityId,
+    pub path: PathBuf,
+}
+
 /// What a pane shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -16,6 +25,8 @@ pub enum PaneKind {
     Agent,
     Terminal,
     File,
+    /// A repository's Commit History ([`crate::features::history::HistoryView`]).
+    History,
 }
 
 impl PaneKind {
@@ -24,6 +35,7 @@ impl PaneKind {
             PaneKind::Agent => IconName::Bot,
             PaneKind::Terminal => IconName::SquareTerminal,
             PaneKind::File => IconName::FileText,
+            PaneKind::History => IconName::GitGraph,
         }
     }
 }
@@ -48,7 +60,7 @@ pub type TerminalAddressProbe = Rc<dyn Fn(&App) -> Option<String>>;
 /// Reads a pane's "has unsaved edits" state.
 pub type UnsavedProbe = Rc<dyn Fn(&App) -> bool>;
 
-/// Builds a pane for a folder (terminal) or a file (file viewer).
+/// Builds a pane for a folder (terminal, history) or a file (file viewer).
 pub type PaneFactory = Rc<dyn Fn(PathBuf, &mut Window, &mut App) -> PaneItem>;
 /// A terminal factory also receives the persisted Herdr address, if any.
 pub type TerminalPaneFactory = Rc<dyn Fn(PathBuf, Option<String>, &mut Window, &mut App) -> PaneItem>;
@@ -61,6 +73,8 @@ pub struct PaneFactories {
     pub file: Option<PaneFactory>,
     /// A file's changes against HEAD (saved and restored as a file pane).
     pub diff: Option<PaneFactory>,
+    /// Commit History of the repository a folder is in.
+    pub history: Option<PaneFactory>,
 }
 
 impl Global for PaneFactories {}

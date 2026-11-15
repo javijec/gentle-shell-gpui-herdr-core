@@ -1,12 +1,15 @@
-//! The route table's model, effort and tier cells and their menus.
+//! The route table's model, effort and tier cells and their menus; the
+//! model picker itself is `model_menu`.
 
 use gentle_core::profiles::{
-    ORCHESTRATOR, RouteEntry, THINKING_LEVELS, clamp_level, is_review_role, normalize_model_id,
+    ORCHESTRATOR, RouteEntry, THINKING_LEVELS, clamp_level, is_review_role,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{Disableable as _, Icon, Selectable as _, Sizable as _, v_flex};
+use gpui_kit::component::popover::Popover;
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -14,21 +17,6 @@ use crate::features::profiles::{ALL_ROW, ProfilesView};
 use crate::shared::ui;
 
 use super::{EFFORT_W, TIER_W};
-
-/// A two-line menu entry: the label over a muted detail.
-fn menu_entry(label: &SharedString, detail: &SharedString) -> Div {
-    v_flex()
-        .min_w_0()
-        .py_0p5()
-        .child(div().text_sm().text_color(ui::fg()).child(label.clone()))
-        .child(
-            div()
-                .text_xs()
-                .font_family(ui::MONO)
-                .text_color(ui::muted())
-                .child(detail.clone()),
-        )
-}
 
 impl ProfilesView {
     pub(in crate::features::profiles) fn inherit_label(&self, key: &str) -> &'static str {
@@ -42,7 +30,7 @@ impl ProfilesView {
 
     /// The value one row shows; the every-agent row shows the shared value or
     /// "mixed".
-    fn current_value(
+    pub(super) fn current_value(
         &self,
         key: &str,
         field: fn(&RouteEntry) -> &Option<String>,
@@ -71,8 +59,6 @@ impl ProfilesView {
     }
 
     pub(super) fn render_model_cell(&self, key: &str, cx: &mut Context<Self>) -> AnyElement {
-        let weak = cx.entity().downgrade();
-        let models = self.models.clone();
         let current = self.current_value(key, |e| &e.model);
         let inherit = self.inherit_label(key);
         let label = match &current {
@@ -89,72 +75,22 @@ impl ProfilesView {
         } else {
             ui::muted()
         };
-        let key = key.to_string();
-        let current = current.ok().flatten();
+        let trigger = Button::new(SharedString::from(format!("model-{key}")))
+            .ghost()
+            .xsmall()
+            .w_full()
+            .font_family(ui::MONO)
+            .text_color(color)
+            .label(label)
+            .dropdown_caret(true)
+            .disabled(self.busy);
         // A stretched column gives the trigger a definite width, so a long
         // model id ellipsizes instead of spilling into the effort column.
         v_flex()
             .flex_1()
             .min_w_0()
             .overflow_hidden()
-            .child(
-                Button::new(SharedString::from(format!("model-{key}")))
-                    .ghost()
-                    .xsmall()
-                    .w_full()
-                    .font_family(ui::MONO)
-                    .text_color(color)
-                    .label(label)
-                    .dropdown_caret(true)
-                    .disabled(self.busy)
-                    .dropdown_menu(move |mut menu, _, _| {
-                        let pick = |model: Option<String>| {
-                            let weak = weak.clone();
-                            let key = key.clone();
-                            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                                let _ = weak
-                                    .update(cx, |this, cx| this.set_model(&key, model.clone(), cx));
-                            }
-                        };
-                        menu = menu.item(
-                            PopupMenuItem::new(inherit)
-                                .checked(current.is_none())
-                                .on_click(pick(None)),
-                        );
-                        let mut provider = String::new();
-                        for model in models.iter() {
-                            if model.provider != provider {
-                                provider = model.provider.clone();
-                                menu = menu.label(provider.clone());
-                            }
-                            let id = model.route_id();
-                            let Some(id) = normalize_model_id(&id) else {
-                                continue;
-                            };
-                            let name = SharedString::from(model.name.clone());
-                            let model_id = SharedString::from(model.id.clone());
-                            menu = menu.item(
-                                PopupMenuItem::element(move |_, _| menu_entry(&name, &model_id))
-                                    .checked(current.as_deref() == Some(id.as_str()))
-                                    .on_click(pick(Some(id))),
-                            );
-                        }
-                        let weak = weak.clone();
-                        let key = key.clone();
-                        menu.separator()
-                            .item(
-                                PopupMenuItem::new("Custom model id…")
-                                    .icon(Icon::new(IconName::Plus))
-                                    .on_click(move |_, window, cx| {
-                                        let _ = weak.update(cx, |this, cx| {
-                                            this.open_custom(&key, window, cx)
-                                        });
-                                    }),
-                            )
-                            .max_h(px(420.))
-                            .scrollable(true)
-                    }),
-            )
+            .child(self.render_model_menu(key, trigger, inherit, cx))
             .into_any_element()
     }
 
@@ -223,47 +159,96 @@ impl ProfilesView {
             "Inherit effort"
         };
         let weak = cx.entity().downgrade();
+        let toggle = weak.clone();
+        let open = self.effort_menu.as_deref() == Some(key);
         let key = key.to_string();
+        let toggle_key = key.clone();
         let current = current.ok().flatten();
+        let trigger = Button::new(SharedString::from(format!("effort-{key}")))
+            .ghost()
+            .xsmall()
+            .w_full()
+            .font_family(ui::MONO)
+            .text_color(color)
+            .label(label)
+            .dropdown_caret(true)
+            .disabled(self.busy);
+        let menu = Popover::new(SharedString::from(format!("effort-menu-{key}")))
+            .anchor(Anchor::TopLeft)
+            .trigger(trigger)
+            .open(open)
+            .on_open_change(move |open, _, cx| {
+                let key = open.then(|| toggle_key.clone());
+                let _ = toggle.update(cx, |this, cx| {
+                    this.effort_menu = key;
+                    cx.notify();
+                });
+            })
+            .w(px(240.))
+            .appearance(false)
+            .content(move |_, _, cx| {
+                let row = |i: usize, label: SharedString, level: Option<String>| {
+                    let chosen = current == level;
+                    let weak = weak.clone();
+                    let key = key.clone();
+                    h_flex()
+                        .id(("effort-row", i))
+                        .w_full()
+                        .gap_2()
+                        .px_3()
+                        .py_1p5()
+                        .rounded(px(ui::ISLAND_ROW))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(ui::surface_hover()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(13.))
+                                .when(level.is_some(), |d| d.font_family(ui::MONO))
+                                .text_color(if chosen {
+                                    ui::accent()
+                                } else if level.is_some() {
+                                    ui::fg()
+                                } else {
+                                    ui::muted()
+                                })
+                                .child(label),
+                        )
+                        .when(chosen, |d| {
+                            d.child(Icon::new(IconName::Check).xsmall().text_color(ui::accent()))
+                        })
+                        .on_click(move |_, _, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.effort_menu = None;
+                                this.set_thinking(&key, level.clone(), cx);
+                            });
+                        })
+                };
+                let rows = std::iter::once(row(0, inherit.into(), None)).chain(
+                    options
+                        .iter()
+                        .enumerate()
+                        .map(|(i, l)| row(i + 1, (*l).into(), Some(l.to_string()))),
+                );
+                ui::island(cx)
+                    .w_full()
+                    .child(ui::popover_in(
+                        ElementId::Name("effort-menu-in".into()),
+                        v_flex()
+                            .w_full()
+                            .p(px(6.))
+                            .font_family(cx.theme().font_family.clone())
+                            .children(rows),
+                    ))
+                    .into_any_element()
+            });
         v_flex()
             .w(px(EFFORT_W))
             .flex_shrink_0()
             .overflow_hidden()
-            .child(
-                Button::new(SharedString::from(format!("effort-{key}")))
-                    .ghost()
-                    .xsmall()
-                    .w_full()
-                    .font_family(ui::MONO)
-                    .text_color(color)
-                    .label(label)
-                    .dropdown_caret(true)
-                    .disabled(self.busy)
-                    .dropdown_menu(move |mut menu, _, _| {
-                        let pick = |level: Option<String>| {
-                            let weak = weak.clone();
-                            let key = key.clone();
-                            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                                let _ = weak.update(cx, |this, cx| {
-                                    this.set_thinking(&key, level.clone(), cx)
-                                });
-                            }
-                        };
-                        menu = menu.item(
-                            PopupMenuItem::new(inherit)
-                                .checked(current.is_none())
-                                .on_click(pick(None)),
-                        );
-                        for level in &options {
-                            menu = menu.item(
-                                PopupMenuItem::new(*level)
-                                    .checked(current.as_deref() == Some(*level))
-                                    .on_click(pick(Some(level.to_string()))),
-                            );
-                        }
-                        menu
-                    }),
-            )
+            .child(menu)
             .into_any_element()
     }
 

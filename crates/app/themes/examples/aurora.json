@@ -1,0 +1,15 @@
+{
+  "name": "Aurora",
+  "bg": "#070a14",
+  "text": "#eef1f8",
+  "accent": "#5cf2b8",
+  "background": {
+    "scene": "aurora",
+    "sky": [
+      "#0b1a2e",
+      "#070a14",
+      "#05060d"
+    ],
+    "speed": 1
+  }
+}

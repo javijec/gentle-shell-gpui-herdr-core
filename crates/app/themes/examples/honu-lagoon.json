@@ -1,0 +1,15 @@
+{
+  "name": "Honu Lagoon",
+  "bg": "#0f3a44",
+  "text": "#e3f6f2",
+  "accent": "#5fd0b8",
+  "background": {
+    "scene": "honu-lagoon",
+    "sky": [
+      "#35a6f0",
+      "#1d7ad8",
+      "#1650b2"
+    ],
+    "speed": 1
+  }
+}

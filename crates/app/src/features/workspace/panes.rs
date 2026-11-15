@@ -15,9 +15,10 @@ struct AgentPaneInit {
 }
 
 impl Workspace {
-    /// Puts a freshly built file/diff pane in the current tab: it replaces the
-    /// tab's existing preview pane, else splits the largest pane along its
-    /// long side, else (no room for two panes) gets its own tab.
+    /// Puts a freshly built file, diff or history pane in the current tab: it
+    /// replaces the tab's existing pane of the same kind, else splits the
+    /// largest pane along its long side, else (no room for two panes) gets
+    /// its own tab.
     pub(super) fn place_preview(
         &mut self,
         new: PaneId,
@@ -28,13 +29,16 @@ impl Workspace {
             self.push_pane_tab(new, window, cx);
             return;
         };
+        let kind = self.panes.get(&new).map(|p| p.item.kind);
         let preview = tab.tree.leaves().into_iter().find(|id| {
             *id != new
                 && self
                     .panes
                     .get(id)
-                    .is_some_and(|p| p.item.kind == PaneKind::File
-                        && !p.item.unsaved.as_ref().is_some_and(|probe| probe(cx)))
+                    .is_some_and(|p| {
+                        Some(p.item.kind) == kind
+                            && !p.item.unsaved.as_ref().is_some_and(|probe| probe(cx))
+                    })
         });
         if let Some(old) = preview
             && let Some(pane) = self.panes.remove(&new)
@@ -89,12 +93,16 @@ impl Workspace {
     /// Approximate on-screen size of each pane in the current tab.
     pub(super) fn pane_sizes(&self, window: &Window) -> Vec<(PaneId, f32, f32)> {
         let viewport = window.viewport_size();
-        let sidebar = if self.sidebar.is_some() && self.sidebar_visible {
-            SIDEBAR_WIDTH + 6.
-        } else {
-            0.
-        };
-        let w = f32::from(viewport.width) - 12. - sidebar;
+        let (machines, files) = self.dock_widths(
+            f32::from(viewport.width),
+            self.remote_files.is_some(),
+            self.sidebar_visible,
+            self.files_sidebar_open
+                && (self.remote_files.is_some() || self.sidebar.is_some()),
+        );
+        let count = f32::from(u8::from(machines > 0.) + u8::from(files > 0.));
+        let w = f32::from(viewport.width)
+            - 12. - machines - files - count * (DOCK_HANDLE_WIDTH + 12.);
         let h = f32::from(viewport.height) - 36. - 6.;
         let mut out = Vec::new();
         if let Some(tab) = self.tab() {
@@ -163,6 +171,11 @@ impl Workspace {
                     if pane.session_file != file {
                         pane.session_file = file;
                         this.schedule_save(cx);
+                    }
+                    // An agent that just started may have the docs skill.
+                    if let Some((Overlay::Docs(view), _)) = &this.overlay {
+                        let (view, dir) = (view.clone(), this.docs_skill_dir(cx));
+                        view.update(cx, |view, cx| view.set_skill_dir(dir, cx));
                     }
                     if changed {
                         // An open switcher lists every workspace's activity.
@@ -247,8 +260,8 @@ impl Workspace {
         id
     }
 
-    /// A terminal (`target` = folder) or file (`target` = file) pane from the
-    /// registered factory; a notice when there is none.
+    /// A terminal or history (`target` = folder) or file (`target` = file)
+    /// pane from the registered factory; a notice when there is none.
     pub(super) fn new_factory_pane(
         &mut self,
         kind: PaneKind,
@@ -271,6 +284,7 @@ impl Workspace {
         let available = match kind {
             PaneKind::Terminal => factories.terminal.is_some(),
             PaneKind::File => factories.file.is_some(),
+            PaneKind::History => factories.history.is_some(),
             PaneKind::Agent => false,
         };
         if !available {
@@ -279,6 +293,7 @@ impl Workspace {
                     "{} panes are not available in this build.",
                     match kind {
                         PaneKind::File => "File",
+                        PaneKind::History => "History",
                         _ => "Terminal",
                     }
                 )),
@@ -296,6 +311,7 @@ impl Workspace {
         let item = match kind {
             PaneKind::Terminal => (factories.terminal?)(target.clone(), herdr_terminal, window, cx),
             PaneKind::File => (factories.file?)(target.clone(), window, cx),
+            PaneKind::History => (factories.history?)(target.clone(), window, cx),
             PaneKind::Agent => return None,
         };
         let id = self.alloc_id();
@@ -328,6 +344,32 @@ impl Workspace {
         Some(id)
     }
 
+    /// A pane for an already built file view of `path`.
+    pub(super) fn file_pane(&mut self, item: PaneItem, path: PathBuf, cx: &App) -> PaneId {
+        let id = self.alloc_id();
+        let cwd = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.space().root.clone());
+        let mut pane = Pane {
+            item,
+            session: None,
+            linked_session: None,
+            cwd,
+            path: Some(path),
+            session_file: None,
+            herdr_address: None,
+            agent_target: None,
+            title: SharedString::default(),
+            running: false,
+            needs_you: false,
+            _subscriptions: Vec::new(),
+        };
+        pane.sync_chrome(cx);
+        self.panes.insert(id, pane);
+        id
+    }
+
     pub(super) fn new_pane(
         &mut self,
         kind: PaneKind,
@@ -344,7 +386,9 @@ impl Workspace {
                 window,
                 cx,
             )),
-            PaneKind::Terminal | PaneKind::File => self.new_factory_pane(kind, target, window, cx),
+            PaneKind::Terminal | PaneKind::File | PaneKind::History => {
+                self.new_factory_pane(kind, target, window, cx)
+            },
         }
     }
 
@@ -385,6 +429,10 @@ impl Workspace {
                 let path = saved.path.clone().filter(|p| p.is_file())?;
                 PaneFactories::get(cx).file.as_ref()?;
                 self.new_factory_pane(PaneKind::File, path, window, cx)
+            }
+            PaneKind::History => {
+                PaneFactories::get(cx).history.as_ref()?;
+                self.new_factory_pane(PaneKind::History, cwd, window, cx)
             }
         }
     }
@@ -564,8 +612,11 @@ impl Workspace {
         }
     }
 
+    /// Focus the quick look while it shows, else the active tab's focused pane.
     pub(super) fn focus_active(&self, window: &mut Window, cx: &mut App) {
-        if let Some(pane) = self.focused_pane().and_then(|id| self.panes.get(&id)) {
+        if let Some(peek) = &self.peek {
+            peek.item.focus.focus(window, cx);
+        } else if let Some(pane) = self.focused_pane().and_then(|id| self.panes.get(&id)) {
             pane.item.focus.focus(window, cx);
         }
     }

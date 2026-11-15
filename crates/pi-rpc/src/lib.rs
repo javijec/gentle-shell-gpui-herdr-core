@@ -5,6 +5,7 @@
 //! `extension_ui_request` records come out. Records are split on LF only, never
 //! on Unicode line separators, which are valid inside JSON strings.
 
+pub mod desktop_rpc;
 pub mod file_cache;
 pub mod herdr_wire;
 pub mod herdr_bridge;
@@ -20,7 +21,8 @@ pub use login::{AuthEvent, AuthPrompt, LoginHelper, LoginMessage, PromptOption, 
 
 pub use launch::{
     LaunchSpec, backend_version, child_path, command, find_program, forget_cached, forget_versions,
-    resolve_backend, resolve_node, set_extra_path, set_system_prompt, version_output,
+    output_within, resolve_backend, resolve_node, set_extra_path, set_system_prompt,
+    version_output,
 };
 pub use record::{Record, Response, UiMethod, UiRequest, parse_record};
 

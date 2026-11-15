@@ -1,0 +1,15 @@
+{
+  "name": "Koi Pond",
+  "bg": "#11332d",
+  "text": "#e4f2ea",
+  "accent": "#ef8a4a",
+  "background": {
+    "scene": "koi-pond",
+    "sky": [
+      "#4aa08c",
+      "#2f8070",
+      "#1f6156"
+    ],
+    "speed": 1
+  }
+}

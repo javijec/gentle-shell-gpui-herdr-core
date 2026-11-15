@@ -1,9 +1,10 @@
 //! Git output: parsers for what the app's `git` commands print and the models
-//! of the right rail and the sidebar's Changes and Branches tabs. The app
-//! runs `git`; this module only reads its output. `status` covers porcelain
-//! v1/v2 and numstat, `refs` branches, remotes, tags, stashes, worktrees and
-//! submodules.
+//! of the right rail, the sidebar's Changes and Branches tabs and the History
+//! screen. The app runs `git`; this module only reads its output. `status`
+//! covers porcelain v1/v2 and numstat, `refs` branches, remotes, tags,
+//! stashes, worktrees and submodules, `log` commits and their graph's lanes.
 
+pub mod log;
 pub mod refs;
 pub mod repo;
 pub mod status;

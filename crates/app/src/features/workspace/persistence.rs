@@ -129,6 +129,8 @@ impl Workspace {
             current: self.current,
             workspaces,
             sidebar: self.sidebar_visible,
+            machines_dock_width: self.machines_dock_width,
+            files_dock_width: self.files_dock_width,
         }
     }
 

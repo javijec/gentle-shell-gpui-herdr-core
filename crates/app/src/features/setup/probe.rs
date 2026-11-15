@@ -5,7 +5,7 @@ use std::io::{BufRead as _, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::Log;
 
@@ -53,28 +53,8 @@ pub fn capture(program: &Path, args: &[&str]) -> Option<(bool, String)> {
         .args(args)
         .env("PATH", pi_rpc::child_path())
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = command.spawn().ok()?;
-    let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stdout.read_to_string(&mut text);
-        text
-    });
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    };
-    Some((status.success(), reader.join().ok()?))
+    pi_rpc::output_within(&mut command, Duration::from_secs(20))
 }
 
 /// The trimmed stdout of a successful run.

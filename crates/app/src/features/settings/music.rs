@@ -124,7 +124,10 @@ impl SettingsView {
         let (state, color) = if status.usable() {
             ("Ready: ♪ is in the title bar", ui::success())
         } else if status.player.is_some() {
-            ("Found, but its Python environment is missing", ui::danger())
+            (
+                "Found, but too old for the app (no ctl --json): install the current one",
+                ui::warning(),
+            )
         } else {
             ("Not installed", ui::faint())
         };

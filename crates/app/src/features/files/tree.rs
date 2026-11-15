@@ -27,6 +27,7 @@ use super::refs::{RefsEvent, RefsView};
 use super::tabs::FilePanelTab as Tab;
 use super::file_icon;
 use crate::features::git::GitSnapshot;
+use crate::platform::ides;
 use crate::shared::ui;
 
 const CONTEXT: &str = "FileTree";
@@ -107,6 +108,8 @@ pub fn init(cx: &mut App) {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileTreeEvent {
+    /// Show a file in the quick-look modal over the panes (a single click).
+    Peek(PathBuf),
     /// Show a file in the tab's preview pane.
     Open(PathBuf),
     /// Show a file in a new split beside the focused pane.
@@ -119,6 +122,8 @@ pub enum FileTreeEvent {
     InsertPath(String),
     /// Open an agent tab in this folder (a worktree).
     OpenAgent(PathBuf),
+    /// Show the Commit History of this repository.
+    OpenHistory(PathBuf),
     /// The header's collapse button: the owner should hide the sidebar.
     Collapse,
 }
@@ -183,6 +188,8 @@ pub struct FileTreeView {
     scroll: UniformListScrollHandle,
     changes: Entity<ChangesView>,
     refs: Entity<RefsView>,
+    /// Code editors installed here, for the ⋯ menu's "Open in …".
+    ides: Rc<Vec<ides::Installed>>,
     _poll: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -219,6 +226,7 @@ impl FileTreeView {
             }),
             cx.subscribe(&refs, |_, _, event: &RefsEvent, cx| match event {
                 RefsEvent::OpenAgent(path) => cx.emit(FileTreeEvent::OpenAgent(path.clone())),
+                RefsEvent::OpenHistory(path) => cx.emit(FileTreeEvent::OpenHistory(path.clone())),
                 RefsEvent::Changed => cx.notify(),
                 // A remote action cannot originate in the local RefsView.
                 RefsEvent::SwitchRemoteBranch(_)
@@ -245,11 +253,20 @@ impl FileTreeView {
             scroll: UniformListScrollHandle::new(),
             changes,
             refs,
+            ides: Rc::default(),
             _poll: Task::ready(()),
             _subscriptions: subscriptions,
         };
         this.sync_panels(cx);
         this.load_dir(this.root.clone(), cx);
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async { ides::detect() })
+                .await;
+            let _ = this.update(cx, |this, _| this.ides = Rc::new(found));
+        })
+        .detach();
         this._poll = cx.spawn_in(window, async move |this, cx| {
             loop {
                 // The status decorates the Files tab: only while it is shown
@@ -568,13 +585,23 @@ impl FileTreeView {
         cx.notify();
     }
 
-    fn click_entry(&mut self, entry: &Entry, window: &mut Window, cx: &mut Context<Self>) {
+    /// A click on a row: folders toggle; a file shows in the quick-look modal,
+    /// and the second click of a double click moves it into a pane.
+    fn click_entry(
+        &mut self,
+        entry: &Entry,
+        clicks: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.selected = Some(entry.path.clone());
         self.focus.focus(window, cx);
         if entry.is_dir {
             self.toggle_dir(&entry.path, cx);
-        } else {
+        } else if clicks >= 2 {
             cx.emit(FileTreeEvent::Open(entry.path.clone()));
+        } else {
+            cx.emit(FileTreeEvent::Peek(entry.path.clone()));
         }
         cx.notify();
     }
@@ -1105,7 +1132,9 @@ impl FileTreeView {
                     cx.notify();
                 }),
             )
-            .on_click(cx.listener(move |this, _, window, cx| this.click_entry(&click, window, cx)))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.click_entry(&click, event.click_count(), window, cx)
+            }))
     }
 
     /// The inline name field of the edit in progress.
@@ -1291,7 +1320,8 @@ impl FileTreeView {
             }
         };
         let root = self.root.clone();
-        menu.min_w(px(220.))
+        let menu = menu
+            .min_w(px(220.))
             .item(
                 PopupMenuItem::new("Refresh")
                     .icon(Icon::new(IconName::RefreshCw))
@@ -1305,14 +1335,37 @@ impl FileTreeView {
             .item(
                 PopupMenuItem::new(REVEAL)
                     .icon(Icon::new(IconName::FolderInput))
-                    .on_click(move |_, _, cx| cx.reveal_path(&root)),
+                    .on_click({
+                        let root = root.clone();
+                        move |_, _, cx| cx.reveal_path(&root)
+                    }),
             )
-            .separator()
-            .item(
-                PopupMenuItem::new("Show Ignored Files")
-                    .checked(self.show_ignored)
-                    .on_click(act(Self::toggle_ignored)),
+            .separator();
+        let menu = self.ides.iter().fold(menu, |menu, ide| {
+            let (ide, root) = (ide.clone(), root.clone());
+            menu.item(
+                PopupMenuItem::new(format!("Open in {}", ide.name))
+                    .icon(Icon::new(IconName::CodeXml))
+                    .on_click(move |_, window, cx| {
+                        if let Err(err) = ides::open(&ide, &root) {
+                            window.push_notification(
+                                Notification::error(format!("Couldn't open {}: {err}", ide.name)),
+                                cx,
+                            );
+                        }
+                    }),
             )
+        });
+        let menu = if self.ides.is_empty() {
+            menu
+        } else {
+            menu.separator()
+        };
+        menu.item(
+            PopupMenuItem::new("Show Ignored Files")
+                .checked(self.show_ignored)
+                .on_click(act(Self::toggle_ignored)),
+        )
     }
 
     fn header_button(id: &'static str, icon: IconName, tooltip: &'static str) -> Button {

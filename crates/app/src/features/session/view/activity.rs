@@ -11,6 +11,7 @@ use gpui_kit::*;
 
 use super::{NARROW, TINY, clock};
 use crate::features::session::SessionView;
+use crate::features::session::agents::{JobRow, job_row};
 use crate::shared::ui;
 use gentle_core::tools;
 use gentle_core::transcript::{Item, ToolStatus, format_tokens};
@@ -153,8 +154,8 @@ impl SessionView {
                         .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx)),
                 )
             })
-            .when(!self.activity.jobs.is_empty(), |this| {
-                this.child(self.render_jobs_chip())
+            .when(self.jobs_visible(), |this| {
+                this.child(self.render_jobs_chip(cx))
             })
             .when(self.activity.queued > 0, |this| {
                 this.child(ui::chip(
@@ -169,13 +170,9 @@ impl SessionView {
             .when(width >= NARROW, |this| {
                 this.children(self.render_usage_chip())
             })
-            .when(
-                self.activity
-                    .agents
-                    .as_ref()
-                    .is_some_and(|a| !a.tasks.is_empty()),
-                |this| this.child(self.render_helpers_chip(cx)),
-            )
+            .when(self.helpers_visible(), |this| {
+                this.child(self.render_helpers_chip(cx))
+            })
             .children(self.extension.rate_limits.iter().filter(|_| !collapse).map(
                 |(window, limit)| {
                     let color = if limit.percent >= 95 {
@@ -212,45 +209,49 @@ impl SessionView {
     // ── Status chips (Tern-style: everything that used to sit in a side
     //    panel lives in small chips over the composer, each opening a card) ──
 
-    /// Background jobs: "⧗ 2 running" or "Jobs 3", with the list on click.
-    fn render_jobs_chip(&self) -> impl IntoElement + use<> {
-        let running = self.activity.jobs.iter().filter(|j| j.is_running()).count();
-        let total = self.activity.jobs.len();
+    /// Whether the jobs chip has anything to show (structured or legacy).
+    fn jobs_visible(&self) -> bool {
+        if self.desktop.jobs_ready() {
+            !self.desktop.jobs().is_empty()
+        } else {
+            !self.activity.jobs.is_empty()
+        }
+    }
+
+    /// Whether the helpers chip has anything to show (structured or legacy).
+    fn helpers_visible(&self) -> bool {
+        if self.desktop.subagents_ready() {
+            !self.desktop.subagents().is_empty()
+        } else {
+            self.activity
+                .agents
+                .as_ref()
+                .is_some_and(|a| !a.tasks.is_empty())
+        }
+    }
+
+    /// Background jobs: a spinner and "2 running" or "Jobs 3", with the
+    /// latest 20 on click (the Agents window's Jobs tab lists all) and a
+    /// cancel action for running jobs once the peer offers `cancel_job`.
+    fn render_jobs_chip(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        // Counts use the full list, never the truncated display rows, so a
+        // >20-job session still reports its real running/total.
+        let all = self.job_rows();
+        let running = all.iter().filter(|row| row.is_running()).count();
+        let total = all.len();
+        let rows: Vec<JobRow> = all.into_iter().take(20).collect();
+        let cancel = self.desktop.cancel_job_supported();
         let color = if running > 0 {
             ui::accent()
         } else {
             ui::muted()
         };
-        let rows: Vec<(String, &'static str, Hsla, String)> = self
-            .activity
-            .jobs
-            .iter()
-            .take(20)
-            .map(|job| {
-                let (glyph, color) = if job.is_running() {
-                    ("⧗", ui::accent())
-                } else if job.exit_code.unwrap_or(0) == 0 && job.status != "failed" {
-                    ("✓", ui::success())
-                } else {
-                    ("✗", ui::danger())
-                };
-                let label = if job.label.is_empty() {
-                    format!("job {}", job.id)
-                } else {
-                    job.label.clone()
-                };
-                let state = match job.exit_code {
-                    Some(code) => format!("exit {code}"),
-                    None => job.status.clone(),
-                };
-                (label, glyph, color, state)
-            })
-            .collect();
         let label = if running > 0 {
             format!("{running} running")
         } else {
             format!("Jobs {total}")
         };
+        let weak = cx.entity().downgrade();
         chip_popover(
             "jobs",
             IconName::Activity,
@@ -258,32 +259,7 @@ impl SessionView {
             label,
             "Background jobs",
             format!("{running}/{total}"),
-            move || {
-                rows.iter()
-                    .map(|(label, glyph, color, state)| {
-                        h_flex()
-                            .gap_2()
-                            .text_size(px(12.))
-                            .child(div().flex_none().text_color(*color).child(*glyph))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .font_family(ui::MONO)
-                                    .text_color(ui::fg())
-                                    .child(label.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(ui::faint())
-                                    .child(state.clone()),
-                            )
-                            .into_any_element()
-                    })
-                    .collect()
-            },
+            move || rows.iter().map(|row| job_row(row, cancel, &weak)).collect(),
         )
     }
 
@@ -328,28 +304,54 @@ impl SessionView {
     /// Helpers (subagents): "1/3" active of total; the card lists each with
     /// its status, task and last step, and opens the full Agents window.
     fn render_helpers_chip(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let (active, rows) = match &self.activity.agents {
-            Some(activity) => (
-                activity.summary.running + activity.summary.waiting + activity.summary.queued,
-                activity
-                    .tasks
+        let (active, rows) = if self.desktop.subagents_ready() {
+            let agents = self.desktop.subagents();
+            (
+                agents
+                    .iter()
+                    .filter(|agent| {
+                        matches!(agent.status.as_str(), "running" | "queued" | "waiting")
+                    })
+                    .count(),
+                agents
                     .iter()
                     .take(20)
-                    .map(|task| {
-                        let s = &task.summary;
+                    .map(|agent| {
                         (
-                            s.agent.clone(),
-                            s.status.clone(),
-                            crate::features::session::agents::status_color(&s.status),
-                            s.label.clone(),
-                            s.last_step
-                                .as_deref()
-                                .map(|step| gentle_core::text::first_line(step, 60)),
+                            agent.agent.clone(),
+                            agent.status.clone(),
+                            crate::features::session::agents::status_color(&agent.status),
+                            None,
+                            Some(agent.last_step.to_string()),
                         )
                     })
                     .collect::<Vec<_>>(),
-            ),
-            None => (0, Vec::new()),
+            )
+        } else {
+            match &self.activity.agents {
+                Some(activity) => (
+                    (activity.summary.running + activity.summary.waiting + activity.summary.queued)
+                        as usize,
+                    activity
+                        .tasks
+                        .iter()
+                        .take(20)
+                        .map(|task| {
+                            let s = &task.summary;
+                            (
+                                s.agent.clone(),
+                                s.status.clone(),
+                                crate::features::session::agents::status_color(&s.status),
+                                s.label.clone(),
+                                s.last_step
+                                    .as_deref()
+                                    .map(|step| gentle_core::text::first_line(step, 60)),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                None => (0, Vec::new()),
+            }
         };
         let total = rows.len();
         let color = if active > 0 {

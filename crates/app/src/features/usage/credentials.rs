@@ -5,10 +5,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
+use gpui_kit::SharedString;
+
 use gentle_core::usage::subscription::{
     ANTHROPIC_PROVIDER, CODEX_PROVIDER, NAN_PROVIDER, OPENAI_PROVIDER, ProviderUsage,
     account_id_from_token,
 };
+use pi_rpc::desktop_rpc::UsageRefresh;
 use serde_json::{Map, Value};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -22,13 +25,22 @@ pub(super) enum CardState {
     /// The stored credential cannot be used until the user signs in again.
     SignIn(String),
     Failed(String),
+    /// RPC: the server is still fetching; the last good data stays when present.
+    Pending(Option<ProviderUsage>),
+    /// RPC: the data is stale but still shown, marked stale.
+    Stale(Option<ProviderUsage>),
+    /// RPC: no usable data for this provider.
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ProviderCard {
     pub(super) id: String,
-    pub(super) title: &'static str,
+    pub(super) title: SharedString,
     pub(super) state: CardState,
+    /// RPC only: whether the server can refresh this provider's usage on
+    /// request. `None` on the legacy path (which always fetches directly).
+    pub(super) refresh: Option<UsageRefresh>,
 }
 
 /// A pending request. Holds a secret, so it deliberately has no `Debug`.
@@ -49,13 +61,13 @@ pub(super) struct Discovery {
     pub(super) others: Vec<String>,
 }
 
-fn provider_title(id: &str) -> &'static str {
+fn provider_title(id: &str) -> SharedString {
     match id {
-        CODEX_PROVIDER => "ChatGPT · Codex",
-        OPENAI_PROVIDER => "OpenAI · ChatGPT",
-        ANTHROPIC_PROVIDER => "Anthropic · Claude",
-        NAN_PROVIDER => "NaN Cloud",
-        _ => "Provider",
+        CODEX_PROVIDER => "ChatGPT · Codex".into(),
+        OPENAI_PROVIDER => "OpenAI · ChatGPT".into(),
+        ANTHROPIC_PROVIDER => "Anthropic · Claude".into(),
+        NAN_PROVIDER => "NaN Cloud".into(),
+        _ => id.to_string().into(),
     }
 }
 
@@ -67,6 +79,7 @@ pub(super) fn discover(auth: &Map<String, Value>, now: i64) -> Discovery {
                 id: id.to_string(),
                 title: provider_title(id),
                 state,
+                refresh: None,
             },
             fetch,
         ));

@@ -1,19 +1,23 @@
 //! What the composer sends: `!` shell commands, built-ins and natively shown
-//! commands run here, prompts with their image attachments.
+//! commands run here, prompts with their image attachments and long pastes.
 
 use std::path::PathBuf;
 
 use anyhow::Result;
-use gpui_kit::component::input::Position;
+use gpui_kit::component::input::{InlineToken, InputContent, Position};
 use gpui_kit::*;
 use serde_json::json;
 
+use super::attachments::Kind;
 use super::{SessionEvent, SessionView, attachments, builtins};
 
 impl SessionView {
     pub(super) fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.composer.read(cx).value().trim().to_string();
-        let shell = text.starts_with('!');
+        let typed = self.composer.read(cx).value().trim().to_string();
+        // Told apart as typed: a paste that starts with `!` or `/` is
+        // content, not a command.
+        let shell = typed.starts_with('!');
+        let text = attachments::expand(&typed, &self.pasted);
         let images = !shell && !self.attachments.is_empty();
         if (text.is_empty() && !images) || self.process().is_none() {
             return;
@@ -35,15 +39,16 @@ impl SessionView {
         }
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
+        let pasted = !std::mem::take(&mut self.pasted).is_empty();
         self.list.scroll_to_end();
 
-        if let Some(command) = text.strip_prefix('!') {
+        if let Some(command) = text.strip_prefix('!').filter(|_| shell) {
             self.run_shell(command, cx);
             cx.notify();
             return;
         }
 
-        if self.attachments.is_empty() && self.intercept(&text, cx) {
+        if self.attachments.is_empty() && !pasted && self.intercept(&text, cx) {
             cx.notify();
             return;
         }
@@ -172,6 +177,8 @@ impl SessionView {
             state.set_cursor_position(Position::new(0, column), window, cx);
             state.focus(window, cx);
         });
+        // The whole text was replaced: no paste's token is left in it.
+        self.pasted.clear();
     }
 
     /// Attach validated images (inserting their tokens at the cursor) and warn
@@ -220,12 +227,28 @@ impl SessionView {
         if paths.is_empty() {
             return;
         }
-        let loading = cx.background_executor().spawn(async move {
-            paths
-                .iter()
-                .map(|path| attachments::load_path(path))
-                .collect::<Vec<_>>()
-        });
+        self.attach_off_thread(
+            move || {
+                paths
+                    .iter()
+                    .map(|path| attachments::load_path(path))
+                    .collect()
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Run `load` on the background executor, then attach what it read.
+    fn attach_off_thread(
+        &mut self,
+        load: impl FnOnce() -> Vec<Result<attachments::Attachment, attachments::Rejection>>
+        + Send
+        + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let loading = cx.background_executor().spawn(async move { load() });
         cx.spawn_in(window, async move |this, cx| {
             let loaded = loading.await;
             let _ = this.update_in(cx, |this, window, cx| this.attach(loaded, window, cx));
@@ -234,7 +257,8 @@ impl SessionView {
     }
 
     /// The composer's paste hook: clipboard images and copied image files
-    /// become attachments; anything else pastes as text.
+    /// become attachments, and so does long text ([`Self::paste_text`]);
+    /// anything else pastes as text.
     pub(super) fn paste_clipboard(
         &mut self,
         item: &ClipboardItem,
@@ -245,10 +269,7 @@ impl SessionView {
         let mut paths = Vec::new();
         for entry in item.entries() {
             match entry {
-                ClipboardEntry::Image(image) => images.push(attachments::Attachment::from_bytes(
-                    "The pasted image",
-                    image.bytes.clone(),
-                )),
+                ClipboardEntry::Image(image) => images.push(image.bytes.clone()),
                 ClipboardEntry::ExternalPaths(external) => {
                     paths.extend(external.paths().iter().cloned())
                 }
@@ -256,16 +277,58 @@ impl SessionView {
             }
         }
         // Copied files that are not images paste as their names.
-        if !paths.iter().any(|p| attachments::has_image_extension(p)) {
+        if !paths.iter().any(|p| attachments::is_image_file(p)) {
             paths.clear();
         }
         if images.is_empty() && paths.is_empty() {
-            return false;
+            return item
+                .text()
+                .is_some_and(|text| self.paste_text(text, window, cx));
         }
         if !images.is_empty() {
-            self.attach(images, window, cx);
+            // Off the UI thread: a BMP or TIFF screenshot is re-encoded first.
+            self.attach_off_thread(
+                move || {
+                    images
+                        .into_iter()
+                        .map(|bytes| attachments::Attachment::from_bytes("The pasted image", bytes))
+                        .collect()
+                },
+                window,
+                cx,
+            );
         }
         self.attach_paths(paths, window, cx);
+        true
+    }
+
+    /// Keep a long paste ([`attachments::is_long_paste`]) as an attachment,
+    /// its `[Pasted text #N]` token at the cursor shown as a chip (a file
+    /// icon and `#N`, see the composer's token renderer);
+    /// false: it's short, paste it as text.
+    fn paste_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !attachments::is_long_paste(&text) {
+            return false;
+        }
+        self.pasted.push(attachments::PastedText::new(text));
+        let n = self.pasted.len();
+        self.composer.update(cx, |state, cx| {
+            let value = state.value();
+            let before = value[..state.cursor().min(value.len())].chars().next_back();
+            if attachments::needs_lead(before) {
+                state.replace(" ", window, cx);
+            }
+            if state
+                .replace_with_token(pasted_chip(n), window, cx)
+                .is_err()
+            {
+                // Mid-composition the chip can't go in; the token still works.
+                state.replace(attachments::token(Kind::Pasted, n), window, cx);
+            }
+            state.insert(" ", window, cx);
+            state.focus(window, cx);
+        });
+        cx.notify();
         true
     }
 
@@ -297,19 +360,111 @@ impl SessionView {
             return;
         }
         self.attachments.remove(index);
-        self.composer.update(cx, |state, cx| {
-            let text = attachments::remove_token(&state.value(), index + 1);
-            let line = text.split('\n').count().saturating_sub(1) as u32;
-            let column = text
-                .rsplit('\n')
-                .next()
-                .unwrap_or_default()
-                .chars()
-                .map(char::len_utf16)
-                .sum::<usize>() as u32;
-            state.replace_all(text, window, cx);
-            state.set_cursor_position(Position::new(line, column), window, cx);
-        });
+        let text =
+            attachments::remove_token(&self.composer.read(cx).value(), Kind::Image, index + 1);
+        let end = text.len();
+        if self.pasted.is_empty() {
+            let position = position_at(&text, end);
+            self.composer.update(cx, |state, cx| {
+                state.replace_all(text, window, cx);
+                state.set_cursor_position(position, window, cx);
+            });
+        } else {
+            // Only setting the value keeps the pastes' chips.
+            self.set_composer_text(text, end, window, cx);
+        }
         cx.notify();
     }
+
+    /// Drop pasted text `index` (0-based) and its token; later ones shift down.
+    pub(super) fn remove_pasted(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if index >= self.pasted.len() {
+            return;
+        }
+        self.pasted.remove(index);
+        let text =
+            attachments::remove_token(&self.composer.read(cx).value(), Kind::Pasted, index + 1);
+        let end = text.len();
+        self.set_composer_text(text, end, window, cx);
+        cx.notify();
+    }
+
+    /// After an edit: drop the pastes whose token left the text (deleted,
+    /// cut, typed over) and renumber the rest, as removing their cards would.
+    pub(super) fn sync_pasted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pasted.is_empty() {
+            return;
+        }
+        let (text, cursor) = {
+            let state = self.composer.read(cx);
+            (state.value(), state.cursor().min(state.value().len()))
+        };
+        let kept = attachments::present(&text, Kind::Pasted, self.pasted.len());
+        if kept.len() == self.pasted.len() {
+            return;
+        }
+        let mut number = 0;
+        self.pasted.retain(|_| {
+            number += 1;
+            kept.binary_search(&number).is_ok()
+        });
+        let cursor = attachments::renumber(&text[..cursor], Kind::Pasted, &kept).len();
+        let text = attachments::renumber(&text, Kind::Pasted, &kept);
+        self.set_composer_text(text, cursor, window, cx);
+        cx.notify();
+    }
+
+    /// Put `text` in the composer with the pastes' tokens as chips and the
+    /// cursor at byte `cursor`. Setting the value clears the undo history,
+    /// so undo can't bring back the token of a paste that is gone.
+    fn set_composer_text(
+        &mut self,
+        text: String,
+        cursor: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let position = position_at(&text, cursor);
+        let chips = attachments::find_tokens(&text, Kind::Pasted);
+        let mut content = InputContent::new(text);
+        for (range, n) in chips {
+            if (1..=self.pasted.len()).contains(&n) {
+                content = content
+                    .clone()
+                    .with_token(range, pasted_chip(n))
+                    .unwrap_or(content);
+            }
+        }
+        self.composer.update(cx, |state, cx| {
+            state.set_value(content, window, cx);
+            state.set_cursor_position(position, window, cx);
+        });
+    }
+}
+
+/// The chip pasted text `n` shows as in the composer over its
+/// `[Pasted text #N]` token: `#N`, after the renderer's file icon. The
+/// icon is not a `📄` in the label: gpui-kit's tokens draw stray glyphs
+/// after an emoji label.
+fn pasted_chip(n: usize) -> InlineToken {
+    InlineToken::new("pasted-text", attachments::token(Kind::Pasted, n)).with_label(format!("#{n}"))
+}
+
+/// The editor position (line, UTF-16 column) of byte `offset` in `text`.
+fn position_at(text: &str, offset: usize) -> Position {
+    let before = &text[..offset.min(text.len())];
+    let line = before.matches('\n').count() as u32;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .map(char::len_utf16)
+        .sum::<usize>() as u32;
+    Position::new(line, column)
 }

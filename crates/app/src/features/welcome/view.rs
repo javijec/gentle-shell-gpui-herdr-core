@@ -8,8 +8,8 @@ use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{AFTER_INTRO, INTRO, WelcomeView, finale};
-use crate::shared::banner::{Palette, banner};
+use super::{AFTER_INTRO, WelcomeView, finale};
+use crate::shared::banner::{Palette, WRITE, banner};
 use crate::shared::ui;
 
 /// The client-drawn title bar (Windows, Linux) keeps its window controls
@@ -36,12 +36,11 @@ impl WelcomeView {
                 .child(banner(config, BANNER_SCALE, 1.))
                 .into_any_element();
         }
+        // Linear: the banner paces its own bloom and handwriting.
         div()
-            .with_animation(
-                "welcome-banner",
-                Animation::new(INTRO).with_easing(ease_out_quint()),
-                move |el, t| el.child(banner(config, BANNER_SCALE, t)),
-            )
+            .with_animation("welcome-banner", Animation::new(WRITE), move |el, t| {
+                el.child(banner(config, BANNER_SCALE, t))
+            })
             .into_any_element()
     }
 

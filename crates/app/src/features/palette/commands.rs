@@ -31,7 +31,7 @@ pub(super) fn screen_rows() -> Vec<Row> {
             PaletteAction::Agents,
         ),
         row(
-            IconName::Layers,
+            IconName::Route,
             "Profiles",
             "Model and effort per agent; profiles as tabs",
             PaletteAction::Profiles,
@@ -53,6 +53,18 @@ pub(super) fn screen_rows() -> Vec<Row> {
             "Memory",
             "Browse and search Engram, the persistent memory",
             PaletteAction::Memory,
+        ),
+        row(
+            IconName::BookOpen,
+            "Architecture docs",
+            "ADRs, C4, data, states and flows, written and kept current by the agent",
+            PaletteAction::Docs,
+        ),
+        row(
+            IconName::GitGraph,
+            "Commit history",
+            "The branch's commits as a graph, with authors, tags and changes",
+            PaletteAction::History,
         ),
         row(
             IconName::Smartphone,

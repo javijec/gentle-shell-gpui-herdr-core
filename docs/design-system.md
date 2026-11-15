@@ -27,9 +27,11 @@ themes/*.json (Pi theme format)
   → ui::apply_theme(cx)       → gpui-component colors (buttons, inputs, lists, menus)
 ```
 
-- **Catalog** (`themes::load_catalog`): first the Gentle Shell themes embedded with `include_str!` from `crates/app/themes/` (`Gentleman-Cute`, `Gentleman-Sexy`, `Gentle`); themes installed in `<gentle-pi>/themes/` replace them by name. Then the user's themes in `<agent dir>/themes/` and finally the popular schemes in `SCHEMES`. Names are unique; the first one wins.
+- **Catalog** (`themes::load_catalog`): first the Gentle Shell themes embedded with `include_str!` from `crates/app/themes/` (`Gentleman-Cute`, `Gentleman-Sexy`, `Gentle`); themes installed in `<gentle-pi>/themes/` replace them by name. Then the user's themes in `<agent dir>/themes/` (`Source::Pi`) and the app's own in `dirs::data_dir()/gentle-shell-gpui/themes/` (`Source::App`), then the example app themes in `crates/app/themes/examples/`, and finally the popular schemes in `SCHEMES`. Names are unique; the first one wins.
 - **Initial theme** (`themes::pick_default`): the one saved in `dirs::data_dir()/gentle-shell-gpui/settings.json` (key `theme`), otherwise the `theme` from Pi's `settings.json`, otherwise `DEFAULT_THEME` (`"Gentleman-Cute"`).
 - **Live changes**: `themes::select(index, cx)` and `themes::set_transparency(clear, persist, cx)` reinstall the palette, call `ui::apply_theme` and refresh all windows. Because tokens are read on every render, no view stores colors.
+- **Hot reload** (`themes::watch_user_themes`): every 2 s a background task compares the file names, sizes and modification times of Pi's and the app's theme folders; on a change it re-reads them and `replace_user_themes` swaps them in, keeping the active theme by name (re-applying it if its file changed).
+- **Backdrops** (`Theme::background`, `shared/backdrop/`): only app themes may have a `background` key (`scene`, `sceneCode`, `image`, `sky`, `speed`, `cell`, `dim`, `veil`; see `backdrop/model.rs` and `crates/app/themes/GUIDE.md`), because Pi's theme schema has `additionalProperties: false` and would reject the file. `backdrop::layer` draws it first in the workspace root, so every pane draws over it and the glass shows it at the window's transparency: the sky as stacked two-stop gradients, the image as a covering `img`, then the scene. A scene runs on its own thread in QuickJS (`backdrop/scene.rs`) with the kit in `backdrop/kit.js`; each frame leaves numeric drawing commands the painter turns into quads, glyphs (`paint_glyph`, shaped once per character) and paths, all inside one `paint_layer` so thousands of overlapping shapes skip GPUI's bounds tree. Glows are stacked faint discs (GPUI has no radial gradient). The `veil` calms the middle of the window toward the theme's background. Pacing: the scene thread keeps its script under 8% of one core (`CPU_SHARE`: 24 fps when a frame costs ≤ 3 ms, down to 8 fps), and the window redraws at the scene's own interval (`ui::request_frame_in`); only while the window is focused and motion isn't reduced, otherwise one still frame per size. The person's **Scene motion** (`backdrop::Motion`, `backdropMotion` in the app's settings file) caps it: Smooth, Calm (12 fps), Still. Scenes are not design tokens: they are the theme's own art, like pixel art, so their colors are free.
 
 JSON fields used by `parse_pi_theme` (the rest of Pi's format is ignored, except for the terminal's ANSI table):
 
@@ -217,11 +219,11 @@ Guidelines:
 
 ## Brand
 
-`crates/app/src/shared/banner.rs` draws the Gentle Shell banner (the braille rose and the "Gentle Shell" pixel art logotype) as real pixels. The art, the palettes and the `banner.json` format come from gentle-pi's `extensions/startup-banner.ts`.
+`crates/app/src/shared/banner.rs` draws the Gentle Shell banner (the braille rose and the "Gentle Shell" pixel art logotype) as real pixels. The art comes from the brand assets `gentle_rose.txt` and `gentle_shell_combo.txt`: the rose keeps the per-cell shading of `gentle_rose_color.txt` as a lightness map (`ROSE_SHADE`, applied to whichever palette is active), and the layout follows the combo (a braille dot is half a logotype pixel, 5 columns between rose and logotype, both centered). The palettes and the `banner.json` format come from gentle-pi's `extensions/startup-banner.ts`; `Pink` uses the assets' ink (255, 118, 195) and shadow (120, 45, 80).
 
 | API | What it does |
 | --- | --- |
-| `banner(config, scale, reveal)` | Rose + logotype at `scale` px per pixel (~175 px wide per scale unit). `reveal` in 0..=1 writes the logotype left to right and fades in the rose; animate it by passing `t` from a `with_animation`. |
+| `banner(config, scale, reveal)` | Rose + logotype at `scale` px per pixel (~170 px wide per scale unit). Drive `reveal` from 0 to 1 linearly over `banner::WRITE` (2600 ms): the rose blooms from its heart outward (petals unfold as they appear) while a pen writes the logotype in cursive along its slant, at a steady ink rate (slower over dense letters, quick through joins, a short lift between the words); each fresh stroke glows like wet ink and cools to the ink color, and the shadow settles in just behind. The rose floats the whole time (a 5.2 s rise and fall, a 7.3 s sway about the bloom, a glint crossing the petals every 6.5 s), redrawn at 20 fps only while the window is active, and still with reduced motion. |
 | `BannerConfig { show_rose, show_text_logo, palette }` | Which parts to show and with which palette; `Default` shows everything in `Pink`. |
 | `Palette::{Pink, Cyan, Yellow, Green}` | Rose, ink and shadow of the logotype in fixed RGB (they do not depend on the theme). |
 | `read_config(config_home)` | Reads `<config>/banner.json` (`showRose`, `showTextLogo`, `color`); anything missing or invalid falls back to the default. |
@@ -230,7 +232,7 @@ Guidelines:
 
 The pixel art style shares rules: flat squares painted with `paint_quad`, slightly smaller than their cell so the grid shows (`dot * 0.55` in the rose, `dot * 0.9` in sprites); sprites defined as text (`#` body, `o` outline) like `LIPS` and `HEART` in `features/welcome/finale.rs`; colors derived from `petal()` when the effect belongs to the app.
 
-- **Welcome finale** (`features/welcome/finale.rs`, `FINALE = 5600 ms`): the banner rewrites itself in slow motion, the rose throws 14 pixelated kisses (one in four is a heart in `petal`), "Sexyyyy" enters letter by letter with `spring` and the screen dissolves from `DISSOLVE = 0.86` with smoothstep.
+- **Welcome finale** (`features/welcome/finale.rs`, `FINALE = 5600 ms`): the banner blooms and writes itself in again, the rose throws 14 pixelated kisses (one in four is a heart in `petal`), "Sexyyyy" enters letter by letter with `spring` and the screen dissolves from `DISSOLVE = 0.86` with smoothstep.
 - **Water reminder** (`features/hydration/drops.rs`, `DURATION = 6000 ms`): pixel drops (`DROP` sprite, `paint_sprite`) rain over the window, each splashing with a flat ripple where it lands, while a floating card fills a pixel glass drop by drop and says it's time for some water; everything fades from `FADE`. `hydration::show` plays it and `hydration::overlay(run)` paints it over the window root. Its water is `info()` and a lighter glint of the same hue. With reduced motion only the card shows.
 - **Effort surge** (`shared/surge.rs`, `DURATION = 4400 ms` at max): a pixel comet runs along the window edge, the window shakes, the core hatches and the rose comes out. Every thinking level plays its own share of that show, each adding a beat to the one below (`surge::Level::of`): minimal and low run the comet along a quarter and half of the edge; medium closes the lap and flares the edge; high gathers the core while the window trembles gently; xhigh trembles harder and hatches the core (flash, shockwave, sparks); max adds the rose. `off` plays nothing. `SessionEvent::Effort(level)` triggers it once the backend accepts the level and `Workspace::play_surge` plays it; `surge::overlay(run, level)` paints and `surge::shake_at(elapsed, level)` gives the offset. Its colors (`spark`, `wine`) are derived from the hue of `petal()`.
 
@@ -278,13 +280,14 @@ backdrop.occlude().child(ui::pop_in(
 - Header, in this order: `small` icon in `muted`, `text_base SEMIBOLD` title, subtitle that takes the remaining space and truncates, optional actions (spinner, count chip, `segmented`, `ghost().xsmall()` buttons with tooltip) and the close X (`ghost().xsmall()` with `IconName::X`). No `esc` badge in the header: Esc closes every screen anyway.
 - The body is the only part that scrolls (`flex_1().min_h_0().overflow_y_scroll()` with an id).
 - The view does not handle Esc: it emits its `Close` event and the `Workspace` removes it (`on_close_overlay`). The veil uses `.occlude()` so clicks do not pass through to what is behind; only the palette closes on a click on the veil.
+- Screens open below the title bar (`Workspace::render` places them under its 36 px), so its buttons stay usable: a screen button opens its screen in place of the current one, and the open screen's button shows selected and closes it. Only the welcome and onboarding cover the whole window.
 
 ### Full screen: welcome
 
 `features/welcome/` takes up the whole window (below the 36 px title bar on Windows and Linux; on macOS it leaves a drag area below the traffic lights).
 
 - `screen_bg()` background with a gradient from the top: `petal().opacity(0.10)` while installing, `success().opacity(0.10)` when everything required is ready and `petal().opacity(0.18)` during the entrance.
-- Banner at scale 2.6, writing itself during `INTRO` (1500 ms); when ready it switches to `Palette::Green` with `pop_in`. Heading (34 px `BOLD`) and footer enter with `appear_after` at `AFTER_INTRO` (1100 ms). If the screen is shown again, `intro_done` draws everything in place without animating.
+- Banner at scale 2.6, blooming and writing itself over `banner::WRITE` (2600 ms, as long as `INTRO` + `AFTER_INTRO`); when ready it switches to `Palette::Green` with `pop_in`. Heading (34 px `BOLD`) and footer enter with `appear_after` at `AFTER_INTRO` (1100 ms). If the screen is shown again, `intro_done` draws everything in place without animating.
 - Content centered with `max_w(px(680.))`; 88 px footer with `px_10`; ↵ runs the primary button.
 
 ### Session status chips

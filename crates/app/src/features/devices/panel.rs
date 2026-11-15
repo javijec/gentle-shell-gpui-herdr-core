@@ -333,6 +333,17 @@ impl DevicePanel {
         self.activate(active, cx);
     }
 
+    /// The header's ⏻: close the active device's tab and turn it off.
+    /// Closing the tab alone leaves the device running (for agents and
+    /// other tabs), until the app quits.
+    fn shut_down_active(&mut self, cx: &mut Context<Self>) {
+        let Some(device) = self.tabs.get(self.active).map(|t| t.device.clone()) else {
+            return;
+        };
+        self.close_tab(self.active, cx);
+        self.hub.update(cx, |hub, cx| hub.shutdown(device, cx));
+    }
+
     /// Follow the hub: device states, the viewers for running devices, and
     /// the devices agents asked for.
     fn sync(&mut self, cx: &mut Context<Self>) {
@@ -453,6 +464,12 @@ impl DevicePanel {
                             .invisible()
                             .group_hover("device-tab", |s| s.visible())
                             .hover(|s| s.bg(ui::surface_hover()).text_color(ui::fg()))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(
+                                    "Close tab · the device keeps running",
+                                )
+                                .build(window, cx)
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.close_tab(i, cx);
@@ -497,6 +514,17 @@ impl DevicePanel {
                     .gap_0p5()
                     // Buttons keep their mouse-down from starting a drag.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .children(self.tabs.get(self.active).and_then(|tab| {
+                        let hub = self.hub.read(cx);
+                        (tab.device.state.is_running() || hub.is_booting(&tab.device)).then(|| {
+                            Button::new("device-shutdown")
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Power))
+                                .tooltip(format!("Shut down {}", tab.device.name))
+                                .on_click(cx.listener(|this, _, _, cx| this.shut_down_active(cx)))
+                        })
+                    }))
                     .child(
                         Button::new("device-mode")
                             .ghost()

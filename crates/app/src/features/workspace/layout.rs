@@ -9,6 +9,94 @@ pub(super) const MIN_PANE_HEIGHT: f32 = 200.;
 /// Space a divider takes between two panes.
 pub(super) const DIVIDER: f32 = 6.;
 
+/// The side docks are independent of the central split-pane dividers.
+pub(super) const MIN_DOCK_WIDTH: f32 = 180.;
+pub(super) const MAX_DOCK_WIDTH: f32 = 640.;
+pub(super) const DOCK_HANDLE_WIDTH: f32 = 6.;
+const DOCK_PADDING: f32 = 12.;
+const DOCK_GAP: f32 = 6.;
+const MIN_CENTER_WIDTH: f32 = 320.;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DockSide {
+    Machines,
+    Files,
+}
+
+#[derive(Clone)]
+pub(super) struct DockResizeDrag {
+    pub side: DockSide,
+}
+
+/// Keep the central workspace usable when the window becomes narrow. At
+/// ordinary sizes, preserve the exact user-selected widths. There are two
+/// gaps and one drag handle per visible dock.
+pub(super) fn fit_dock_widths(
+    viewport: f32,
+    machines: Option<f32>,
+    files: Option<f32>,
+) -> (f32, f32) {
+    let sanitise = |width: Option<f32>| match width {
+        Some(value) if value.is_finite() => value.clamp(MIN_DOCK_WIDTH, MAX_DOCK_WIDTH),
+        Some(_) => MIN_DOCK_WIDTH,
+        None => 0.,
+    };
+    let left = sanitise(machines);
+    let right = sanitise(files);
+    let count = f32::from(u8::from(machines.is_some()) + u8::from(files.is_some()));
+    let chrome = DOCK_PADDING + count * (DOCK_HANDLE_WIDTH + 2. * DOCK_GAP);
+    let center = MIN_CENTER_WIDTH.min((viewport.max(0.) * 0.5).max(0.));
+    let available = (viewport - chrome - center).max(0.);
+    let total = left + right;
+    if total <= available || total == 0. {
+        (left, right)
+    } else {
+        let scale = available / total;
+        (left * scale, right * scale)
+    }
+}
+
+/// Bound a drag by the other dock's rendered size and a minimum center pane.
+pub(super) fn resized_dock_width(
+    viewport: f32,
+    machines: f32,
+    files: f32,
+    side: DockSide,
+    pointer: f32,
+) -> f32 {
+    let count = f32::from(u8::from(machines > 0.) + u8::from(files > 0.));
+    let chrome = DOCK_PADDING + count * (DOCK_HANDLE_WIDTH + 2. * DOCK_GAP);
+    let center = MIN_CENTER_WIDTH.min(viewport.max(0.) * 0.5);
+    let remaining = (viewport - chrome - center).max(0.);
+    let other = match side {
+        DockSide::Machines => files,
+        DockSide::Files => machines,
+    };
+    let maximum = (remaining - other).clamp(0., MAX_DOCK_WIDTH);
+    let minimum = MIN_DOCK_WIDTH.min(maximum);
+    pointer.clamp(minimum, maximum)
+}
+
+impl Workspace {
+    /// Both Files variants share a custom width; before the first drag their
+    /// original local (260px) and remote (330px) defaults remain unchanged.
+    pub(super) fn dock_widths(
+        &self,
+        viewport: f32,
+        selected_remote: bool,
+        machines_visible: bool,
+        files_visible: bool,
+    ) -> (f32, f32) {
+        fit_dock_widths(
+            viewport,
+            machines_visible.then_some(self.machines_dock_width),
+            files_visible.then_some(self.files_dock_width.unwrap_or(
+                if selected_remote { SIDEBAR_WIDTH + 70. } else { SIDEBAR_WIDTH },
+            )),
+        )
+    }
+}
+
 /// Whether a `w`×`h` pane split along `axis` leaves both halves usable.
 pub(super) fn fits_split(axis: SplitAxis, w: f32, h: f32) -> bool {
     match axis {
@@ -104,7 +192,31 @@ pub(super) fn leaf_sizes(
 
 #[cfg(test)]
 mod tests {
-    use super::{DropZone, SplitAxis, tile_axis};
+    use super::{
+        DockSide, DropZone, SplitAxis, fit_dock_widths, resized_dock_width, tile_axis,
+    };
+
+    #[test]
+    fn dock_widths_keep_the_center_visible_and_restore_full_size() {
+        assert_eq!(fit_dock_widths(1400., Some(320.), Some(410.)), (320., 410.));
+        let (left, right) = fit_dock_widths(780., Some(320.), Some(410.));
+        assert!(left > 0. && right > 0.);
+        // 12px outer padding, 2x (6px handle + 2x6px gap).
+        assert!(left + right + 48. + 320. <= 780.01);
+        assert_eq!(fit_dock_widths(1400., None, Some(400.)), (0., 400.));
+        assert_eq!(fit_dock_widths(1400., Some(400.), None), (400., 0.));
+        assert_eq!(fit_dock_widths(1400., Some(f32::NAN), None).0, 180.);
+    }
+
+    #[test]
+    fn each_dock_drag_is_bounded_by_the_other_and_center() {
+        assert_eq!(resized_dock_width(
+            1200., 260., 330., DockSide::Machines, 800.,
+        ), 502.);
+        assert_eq!(resized_dock_width(
+            1200., 260., 330., DockSide::Files, 50.,
+        ), 180.);
+    }
 
     #[test]
     fn tiling_splits_the_longer_side_while_it_fits() {

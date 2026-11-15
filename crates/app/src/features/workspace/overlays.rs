@@ -84,6 +84,11 @@ impl Workspace {
             PaletteAction::Profiles => self.open_profiles(window, cx),
             PaletteAction::Usage => self.open_usage(window, cx),
             PaletteAction::Memory => self.open_memory(window, cx),
+            PaletteAction::Docs => self.open_docs(window, cx),
+            PaletteAction::History => {
+                let cwd = self.active_cwd(cx);
+                self.open_history(cwd, window, cx)
+            }
             PaletteAction::Devices => self.devices.update(cx, |panel, cx| panel.show(cx)),
             PaletteAction::Settings => self.open_settings(window, cx),
             PaletteAction::Setup => self.open_onboarding(None, window, cx),
@@ -100,7 +105,7 @@ impl Workspace {
             PaletteAction::ToggleSidebar => self.toggle_sidebar(cx),
             PaletteAction::Agents => {
                 if let Some(tab) = tab {
-                    tab.update(cx, |s, cx| s.open_agents_panel(cx));
+                    tab.update(cx, |s, cx| s.open_agents_panel(AgentsTab::Agents, cx));
                 }
             }
             PaletteAction::NewSession => {
@@ -159,6 +164,18 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The Agents window of `session` (else the active one), on `tab`.
+    fn open_agents_window(
+        &mut self,
+        tab: AgentsTab,
+        session: Option<Entity<SessionView>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = session.or_else(|| self.active_session()) {
+            session.update(cx, |s, cx| s.open_agents_panel(tab, cx));
+        }
+    }
+
     /// The native screen of a terminal-only Gentle Shell command; `session`
     /// is the agent it concerns (the one that ran it, else the active one).
     pub(super) fn open_screen(
@@ -176,13 +193,9 @@ impl Workspace {
                     view.update(cx, |view, cx| view.show_stats(cx));
                 }
             }
-            // Background jobs have no window of their own: the Agents window
-            // is where the session's background work lives.
-            Screen::Agents | Screen::Jobs => {
-                if let Some(session) = session.or_else(|| self.active_session()) {
-                    session.update(cx, |s, cx| s.open_agents_panel(cx));
-                }
-            }
+            Screen::Agents => self.open_agents_window(AgentsTab::Agents, session, cx),
+            // Background jobs are the Jobs tab of the Agents window.
+            Screen::Jobs => self.open_agents_window(AgentsTab::Jobs, session, cx),
             Screen::Profiles => self.open_profiles(window, cx),
             Screen::Palette => {
                 self.close_overlay(window, cx);
@@ -345,7 +358,8 @@ impl Workspace {
                 reasoning,
             })
             .collect();
-        let view = cx.new(|cx| ProfilesView::new(cwd, models, window, cx));
+        let session = self.active_session();
+        let view = cx.new(|cx| ProfilesView::new(cwd, models, session, window, cx));
         let subscription = cx.subscribe_in(&view, window, |this, _, event: &ProfilesEvent, window, cx| {
             let tab = this.active_session();
             match event {
@@ -449,6 +463,44 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Where an open agent tab found the docs skill, if any did.
+    pub(super) fn docs_skill_dir(&self, cx: &App) -> Option<PathBuf> {
+        self.active_session()
+            .into_iter()
+            .chain(self.sessions())
+            .find_map(|s| s.read(cx).skill_dir(crate::features::docs::SKILL))
+    }
+
+    pub(super) fn open_docs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.space().root.clone();
+        let skill = self.docs_skill_dir(cx);
+        let view = cx.new(|cx| DocsView::new(root.clone(), skill, window, cx));
+        let subscription = cx.subscribe_in(
+            &view,
+            window,
+            move |this, _, event: &DocsEvent, window, cx| match event {
+                DocsEvent::Close => this.close_overlay(window, cx),
+                DocsEvent::Run(prompt) => {
+                    this.close_overlay(window, cx);
+                    this.open_tab(
+                        PaneKind::Agent,
+                        root.clone(),
+                        Some(prompt.clone()),
+                        None,
+                        window,
+                        cx,
+                    );
+                }
+                DocsEvent::Open(path) => {
+                    this.close_overlay(window, cx);
+                    this.open_file(path.clone(), window, cx);
+                }
+            },
+        );
+        self.overlay = Some((Overlay::Docs(view), subscription));
+        cx.notify();
+    }
+
     pub(super) fn open_memory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let cwd = self.active_cwd(cx);
         let view = cx.new(|cx| MemoryView::new(cwd, window, cx));
@@ -464,7 +516,11 @@ impl Workspace {
     }
 
     pub(super) fn open_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let view = cx.new(|cx| UsageView::new(window, cx));
+        // The Subscription tab reads through the active agent's RPC slice, so
+        // its backend must be started (probe included) before it is opened.
+        self.start_active_session(window, cx);
+        let session = self.active_session();
+        let view = cx.new(|cx| UsageView::new(window, cx, session));
         let subscription = cx.subscribe_in(
             &view,
             window,

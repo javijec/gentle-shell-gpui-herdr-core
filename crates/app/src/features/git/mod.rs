@@ -1,15 +1,17 @@
-//! Git for the right rail and the sidebar's Changes and Branches tabs. Runs
-//! `git`; call everything here off the UI thread.
+//! Git for the right rail, the sidebar's Changes and Branches tabs and the
+//! History screen. Runs `git`; call everything here off the UI thread.
 //!
 //! The output parsers and their models are `gentle_core::git`. Here, the
 //! parent runs `git` and finds the top level; `snapshot` builds the right
 //! rail's change list, `changes` reads and acts on the work tree for the
-//! Changes tab, and `refs` lists and acts on the Branches tab's refs.
+//! Changes tab, `refs` lists and acts on the Branches tab's refs, and `log`
+//! reads a branch's commits for the History screen.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 mod changes;
+mod log;
 mod refs;
 mod snapshot;
 
@@ -17,8 +19,10 @@ pub use changes::{
     commit, discard, last_commit_message, push, stage, stage_all, staged_diff, stash_push, unstage,
     unstage_all, work_tree,
 };
+pub use gentle_core::git::log::{Commit, Graph};
 pub use gentle_core::git::refs::{RefEntry, RefsSnapshot, Worktree};
 pub use gentle_core::git::status::{EntryKind, GitSnapshot, StatusEntry, WorkTree};
+pub use log::{History, history};
 pub use refs::{
     StashAction, add_worktree, checkout_remote, prune_worktrees, refs_snapshot, remove_worktree,
     stash,

@@ -799,11 +799,22 @@ impl HerdrAgentProcess {
         };
         let started = match started_rx.recv_timeout(startup_timeout) {
             Ok(result) => result,
-            Err(_) => Err(anyhow!(
-                "Herdr {} RPC bridge did not become ready within {} seconds",
-                if remote_start { "remote" } else { "local" },
-                startup_timeout.as_secs(),
-            )),
+            Err(_) => {
+                // A deadline alone cannot distinguish a missing terminal,
+                // an attached viewer with no bridge output, and slow Pi startup.
+                // Report only transport state and bounded bridge diagnostics;
+                // never include the RPC token or command payloads.
+                let terminal_assigned = address.lock().unwrap().is_some();
+                let viewer_attached = transport_up.load(Ordering::Acquire);
+                let last_error = last_failure.lock().unwrap().clone();
+                let bridge_stderr = !incoming.lock().unwrap().stderr_tail.is_empty();
+                Err(anyhow!(
+                    "Herdr {} RPC bridge did not become ready within {} seconds (terminal_assigned={terminal_assigned}, viewer_attached={viewer_attached}, bridge_stderr={bridge_stderr}, transport_error={})",
+                    if remote_start { "remote" } else { "local" },
+                    startup_timeout.as_secs(),
+                    last_error.as_deref().unwrap_or("none"),
+                ))
+            },
         };
         let attached_at = Instant::now();
         // Bridge READY is insufficient: test a real RPC command through

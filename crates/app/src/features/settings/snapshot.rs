@@ -33,6 +33,8 @@ pub struct Snapshot {
     pub claude_code: Option<String>,
     /// A newer Gentle Shell release, checked as the launcher's startup does.
     pub update: Option<crate::features::updates::UpdateOffer>,
+    /// A newer Engram release than the one the app runs.
+    pub engram_update: Option<crate::features::updates::UpdateOffer>,
 }
 
 impl Snapshot {
@@ -169,6 +171,7 @@ pub fn read_snapshot(agent: &Path, config: &Path, cwd: &Path) -> Snapshot {
             .and_then(|v| str_of(&v["provider"]["plan"])),
         claude_code: None,
         update: None,
+        engram_update: None,
     }
 }
 

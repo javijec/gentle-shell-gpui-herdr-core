@@ -16,10 +16,19 @@ const DEFAULT_SCALE: f32 = 17.;
 const LINE_CHARS: usize = 90;
 /// Lines a folded card shows besides its header.
 const CARD_LINES: usize = 6;
+/// A message you sent with more lines than `BUBBLE_FOLD` shows folded to its
+/// first `BUBBLE_LINES` and a toggle (the session view's `USER_LINES` and
+/// `USER_SLACK`).
+const BUBBLE_FOLD: usize = 10;
+const BUBBLE_LINES: usize = 8;
 
 /// The wrapped lines `text` takes, roughly.
 fn text_lines(text: &str) -> f32 {
-    text.lines()
+    wrapped_lines(text.lines())
+}
+
+fn wrapped_lines<'a>(lines: impl Iterator<Item = &'a str>) -> f32 {
+    lines
         .map(|line| 1 + line.chars().count() / LINE_CHARS)
         .sum::<usize>()
         .max(1) as f32
@@ -32,7 +41,12 @@ pub fn item_weight(item: &Item) -> f32 {
         // The bubble's padding and the row gap, then its text (and image
         // strip).
         Item::User { text, images } => {
-            3.8 + text_lines(text) + if images.is_empty() { 0. } else { 7. }
+            let text = if text.trim_end().lines().nth(BUBBLE_FOLD).is_some() {
+                wrapped_lines(text.lines().take(BUBBLE_LINES)) + 1.
+            } else {
+                text_lines(text)
+            };
+            3.8 + text + if images.is_empty() { 0. } else { 7. }
         }
         Item::Assistant {
             blocks,
@@ -337,6 +351,18 @@ mod tests {
         assert!(item_weight(&user("hola")) < item_weight(&user(&"x".repeat(400))));
         let long = (0..40).map(|_| "una línea").collect::<Vec<_>>().join("\n");
         assert!(item_weight(&answer(&long)) > 10. * item_weight(&answer("ok")));
+    }
+
+    #[test]
+    fn long_messages_weigh_what_they_show_folded() {
+        let user = |lines: usize| Item::User {
+            text: (0..lines).map(|i| format!("line {i}\n")).collect(),
+            images: Vec::new(),
+        };
+        // Past BUBBLE_FOLD lines a message folds: its length stops counting.
+        assert_eq!(item_weight(&user(BUBBLE_FOLD + 1)), item_weight(&user(500)));
+        assert!(item_weight(&user(500)) < item_weight(&user(BUBBLE_FOLD)));
+        assert!(item_weight(&user(BUBBLE_FOLD - 1)) < item_weight(&user(BUBBLE_FOLD)));
     }
 
     #[test]

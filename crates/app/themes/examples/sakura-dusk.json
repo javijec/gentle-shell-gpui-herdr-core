@@ -1,0 +1,16 @@
+{
+  "name": "Sakura Dusk",
+  "bg": "#231a2e",
+  "text": "#f6e9f0",
+  "accent": "#f29bb8",
+  "background": {
+    "scene": "sakura-dusk",
+    "sky": [
+      "#17112b",
+      "#2a1c44",
+      "#523058",
+      "#8c4a5e"
+    ],
+    "speed": 1
+  }
+}

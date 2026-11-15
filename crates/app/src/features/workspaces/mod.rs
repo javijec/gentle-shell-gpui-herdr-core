@@ -70,10 +70,21 @@ pub struct SavedState {
     /// The files sidebar (⌘B) was showing.
     #[serde(default = "shown")]
     pub sidebar: bool,
+    /// Machines dock width in logical pixels (independent of the Files dock).
+    #[serde(default = "default_machines_dock_width")]
+    pub machines_dock_width: f32,
+    /// Files dock width once a user has resized it. When absent, keep the
+    /// original local/remote widths until the user actually drags the edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_dock_width: Option<f32>,
 }
 
 fn shown() -> bool {
     true
+}
+
+fn default_machines_dock_width() -> f32 {
+    260.
 }
 
 /// A first launch shows the sidebar, as a file from before it was saved does.
@@ -84,6 +95,8 @@ impl Default for SavedState {
             current: 0,
             workspaces: Vec::new(),
             sidebar: true,
+            machines_dock_width: default_machines_dock_width(),
+            files_dock_width: None,
         }
     }
 }

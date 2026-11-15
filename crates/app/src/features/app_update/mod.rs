@@ -21,7 +21,7 @@ mod network;
 mod relaunch;
 mod release;
 
-pub use archive::{extract_tar_gz, extract_zip};
+pub use archive::{extract_tar_gz, extract_tar_xz, extract_zip};
 pub use release::{Release, expected_digest, is_dev};
 
 use cache::{check_blocking, skip_blocking};

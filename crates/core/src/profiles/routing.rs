@@ -41,6 +41,17 @@ impl ModelChoice {
         FAST_MODELS.contains(&self.id.as_str())
             && matches!(self.provider.as_str(), "openai" | "openai-codex")
     }
+
+    /// Whether a picker search keeps this model: every word of `query`
+    /// appears, ignoring case, in its name, id or provider (so `opus 5`
+    /// finds `Claude Opus 5.5` and `bridge haiku` the bridge's Haiku). An
+    /// empty query keeps everything.
+    pub fn matches(&self, query: &str) -> bool {
+        let haystack = format!("{} {} {}", self.name, self.id, self.provider).to_lowercase();
+        query
+            .split_whitespace()
+            .all(|word| haystack.contains(&word.to_lowercase()))
+    }
 }
 
 pub fn is_thinking_level(value: &str) -> bool {
@@ -250,4 +261,32 @@ pub fn clamp_level(level: &str, supported: &[&str]) -> String {
         .find(|l| supported.contains(l))
         .or(supported.first())
         .map_or_else(|| "off".to_string(), |l| l.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelChoice;
+
+    fn model(provider: &str, id: &str, name: &str) -> ModelChoice {
+        ModelChoice {
+            provider: provider.into(),
+            id: id.into(),
+            name: name.into(),
+            reasoning: false,
+        }
+    }
+
+    #[test]
+    fn search_needs_every_word_in_name_id_or_provider() {
+        let opus = model("claude-bridge", "claude-opus-5-5", "Claude Opus 5.5 1M");
+        assert!(opus.matches(""));
+        assert!(opus.matches("  "));
+        assert!(opus.matches("OPUS"));
+        assert!(opus.matches("opus 5.5"));
+        // Words match across fields and in any order.
+        assert!(opus.matches("bridge opus"));
+        assert!(opus.matches("5-5 claude"));
+        assert!(!opus.matches("opus haiku"));
+        assert!(!opus.matches("deepseek"));
+    }
 }

@@ -1,6 +1,39 @@
 //! `Render` for the workspace window.
 
 use super::*;
+use gpui_kit::component::Selectable as _;
+
+/// The title bar's height; overlay screens open below it.
+const TITLE_BAR_HEIGHT: f32 = 36.;
+
+/// Narrow draggable seam between the dock and its workspace. Same native
+/// drag protocol as split-pane dividers, with a grab indicator on hover.
+fn dock_resize_handle(side: DockSide) -> impl IntoElement {
+    let id = match side {
+        DockSide::Machines => "resize-machines-dock",
+        DockSide::Files => "resize-files-dock",
+    };
+    div()
+        .id(id)
+        .group(id)
+        .w(px(DOCK_HANDLE_WIDTH))
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_col_resize()
+        .on_drag(DockResizeDrag { side }, |_, _, _, cx| cx.new(|_| Invisible))
+        .child(
+            div()
+                .w(px(2.))
+                .h(px(48.))
+                .rounded_full()
+                .bg(ui::border_strong())
+                .opacity(0.)
+                .group_hover(id, |style| style.opacity(1.).bg(ui::petal())),
+        )
+}
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -32,6 +65,13 @@ impl Render for Workspace {
             None
         };
         let navigator_visible = self.sidebar_visible;
+        let files_visible = files.is_some();
+        let (machines_dock_width, files_dock_width) = self.dock_widths(
+            f32::from(window.viewport_size().width),
+            selected_remote,
+            navigator_visible,
+            files_visible,
+        );
         let has_sidebar = true;
         // Below this the screen buttons fold into one overflow menu.
         let narrow = window.viewport_size().width < px(900.);
@@ -62,6 +102,7 @@ impl Render for Workspace {
                 crate::features::browser::reclaim_keyboard(window)
             })
             .on_action(cx.listener(Self::on_new_tab))
+            .on_action(cx.listener(Self::on_show_in_pane))
             .on_action(cx.listener(Self::on_new_terminal_tab))
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_next_tab))
@@ -85,9 +126,11 @@ impl Render for Workspace {
             .relative()
             .left(px(shake_x))
             .top(px(shake_y))
+            // The theme's backdrop, first so everything draws over it.
+            .children(crate::shared::backdrop::layer(window, cx))
             .child(
                 TitleBar::new()
-                    .h(px(36.))
+                    .h(px(TITLE_BAR_HEIGHT))
                     .bg(gpui_kit::transparent_black())
                     .child(
                         h_flex()
@@ -320,7 +363,7 @@ impl Render for Workspace {
                                                                     },
                                                                 ))
                                                                 .item(entry(
-                                                                    IconName::Layers,
+                                                                    IconName::Route,
                                                                     "Profiles",
                                                                     "Model and effort per agent",
                                                                     |this, window, cx| {
@@ -362,56 +405,72 @@ impl Render for Workspace {
                                         )
                                     })
                                     .when(!narrow, |d| {
-                                        d.child(
-                                            Button::new("open-settings")
+                                        // The screens stay reachable while one is open
+                                        // (they open below the title bar): a button opens
+                                        // its screen in place of the current one, and the
+                                        // open screen's button is lit and closes it.
+                                        type Open = fn(
+                                            &mut Workspace,
+                                            &mut Window,
+                                            &mut Context<Workspace>,
+                                        );
+                                        let button = |id: &'static str,
+                                                      icon: IconName,
+                                                      tip: &'static str,
+                                                      open_now: bool,
+                                                      open: Open| {
+                                            Button::new(id)
                                                 .ghost()
                                                 .xsmall()
-                                                .icon(Icon::new(IconName::Settings))
-                                                .tooltip("Configuration")
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.open_settings(window, cx)
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("open-profiles")
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(Icon::new(IconName::Layers))
-                                                .tooltip("Profiles: model and effort per agent")
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.open_profiles(window, cx)
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("open-memory")
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(Icon::new(IconName::Brain))
-                                                .tooltip("Memory (Engram)")
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.open_memory(window, cx)
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("open-sessions")
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(Icon::new(IconName::RotateCcwClock))
-                                                .tooltip("Sessions")
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.open_sessions(window, cx)
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("open-providers")
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(Icon::new(IconName::KeyRound))
-                                                .tooltip("Providers and sign-in")
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.open_providers(window, cx)
-                                                })),
-                                        )
+                                                .icon(Icon::new(icon))
+                                                .tooltip(tip)
+                                                .selected(open_now)
+                                                .on_click(cx.listener(move |this, _, window, cx| {
+                                                    if open_now {
+                                                        this.close_overlay(window, cx)
+                                                    } else {
+                                                        open(this, window, cx)
+                                                    }
+                                                }))
+                                        };
+                                        let open = |is: fn(&Overlay) -> bool| {
+                                            self.overlay.as_ref().is_some_and(|(o, _)| is(o))
+                                        };
+                                        d.child(button(
+                                            "open-settings",
+                                            IconName::Settings,
+                                            "Configuration",
+                                            open(|o| matches!(o, Overlay::Settings(_))),
+                                            |this, window, cx| this.open_settings(window, cx),
+                                        ))
+                                        .child(button(
+                                            "open-profiles",
+                                            IconName::Route,
+                                            "Profiles: model and effort per agent",
+                                            open(|o| matches!(o, Overlay::Profiles(_))),
+                                            |this, window, cx| this.open_profiles(window, cx),
+                                        ))
+                                        .child(button(
+                                            "open-memory",
+                                            IconName::Brain,
+                                            "Memory (Engram)",
+                                            open(|o| matches!(o, Overlay::Memory(_))),
+                                            |this, window, cx| this.open_memory(window, cx),
+                                        ))
+                                        .child(button(
+                                            "open-sessions",
+                                            IconName::RotateCcwClock,
+                                            "Sessions",
+                                            open(|o| matches!(o, Overlay::Sessions(_))),
+                                            |this, window, cx| this.open_sessions(window, cx),
+                                        ))
+                                        .child(button(
+                                            "open-providers",
+                                            IconName::KeyRound,
+                                            "Providers and sign-in",
+                                            open(|o| matches!(o, Overlay::Providers(_))),
+                                            |this, window, cx| this.open_providers(window, cx),
+                                        ))
                                     })
                                     .when(has_sidebar, |d| {
                                         d.child(
@@ -457,12 +516,61 @@ impl Render for Workspace {
                     .px_1p5()
                     .pb_1p5()
                     .gap_1p5()
+                    .on_drag_move(cx.listener(
+                        move |this, event: &DragMoveEvent<DockResizeDrag>, _, cx| {
+                            let side = event.drag(cx).side;
+                            if (side == DockSide::Machines && !this.sidebar_visible)
+                                || (side == DockSide::Files && !this.files_sidebar_open)
+                            {
+                                return;
+                            }
+                            let viewport = f32::from(event.bounds.size.width);
+                            let selected_remote = this.active_session().is_some_and(|session| {
+                                session.read(cx).is_remote_herdr()
+                            });
+                            let files_visible = this.files_sidebar_open
+                                && (this.remote_files.is_some() || this.sidebar.is_some());
+                            let (left, right) = this.dock_widths(
+                                viewport, selected_remote, this.sidebar_visible, files_visible,
+                            );
+                            let pointer = f32::from(
+                                event.event.position.x - event.bounds.left(),
+                            );
+                            // Account for the row's 6px outer padding. The drag
+                            // edge is on the inside of the selected dock.
+                            let desired = match side {
+                                DockSide::Machines => pointer - 6.,
+                                DockSide::Files => viewport - pointer - 6.,
+                            };
+                            let width = resized_dock_width(
+                                viewport, left, right, side, desired,
+                            );
+                            match side {
+                                DockSide::Machines => {
+                                    if (this.machines_dock_width - width).abs() < 0.5 {
+                                        return;
+                                    }
+                                    this.machines_dock_width = width;
+                                }
+                                DockSide::Files => {
+                                    if this.files_dock_width.is_some_and(|old|
+                                        (old - width).abs() < 0.5
+                                    ) {
+                                        return;
+                                    }
+                                    this.files_dock_width = Some(width);
+                                }
+                            }
+                            this.schedule_save(cx);
+                            cx.notify();
+                        },
+                    ))
                     .when(navigator_visible, |row| {
                         row.child(
                             ui::appear(
                                 "machine-navigator-in",
                                 div()
-                                    .w(px(SIDEBAR_WIDTH))
+                                    .w(px(machines_dock_width))
                                     .flex_none()
                                     .h_full()
                                     .rounded_xl()
@@ -474,24 +582,28 @@ impl Render for Workspace {
                             ),
                         )
                     })
+                    .when(navigator_visible, |row| {
+                        row.child(dock_resize_handle(DockSide::Machines))
+                    })
                     .child(
                         div()
+                            .relative()
                             .flex()
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            .child(self.render_body(window, cx)),
+                            .child(self.render_body(window, cx))
+                            .children(self.render_peek(cx)),
                     )
                     .when(devices_docked, |row| row.child(self.devices.clone()))
+                    .when(files_visible, |row| {
+                        row.child(dock_resize_handle(DockSide::Files))
+                    })
                     .children(files.map(|view| {
                         ui::appear(
                             "files-right-in",
                             div()
-                                .w(px(if selected_remote {
-                                    SIDEBAR_WIDTH + 70.
-                                } else {
-                                    SIDEBAR_WIDTH
-                                }))
+                                .w(px(files_dock_width))
                                 .flex_none()
                                 .h_full()
                                 .rounded_xl()
@@ -522,13 +634,9 @@ impl Render for Workspace {
                                                         .min_w_0()
                                                         .truncate()
                                                         .text_xs()
-                                                        .text_color(if selected_remote {
-                                                            ui::warning()
-                                                        } else {
-                                                            ui::muted()
-                                                        })
+                                                        .text_color(ui::muted())
                                                         .child(if selected_remote {
-                                                            "Remote Linux files · read-only"
+                                                            "Remote Linux files"
                                                         } else {
                                                             "Local Windows files"
                                                         }),
@@ -556,6 +664,7 @@ impl Render for Workspace {
                 Overlay::Palette(view) => view.clone().into_any_element(),
                 Overlay::Usage(view) => view.clone().into_any_element(),
                 Overlay::Memory(view) => view.clone().into_any_element(),
+                Overlay::Docs(view) => view.clone().into_any_element(),
                 Overlay::Settings(view) => view.clone().into_any_element(),
                 Overlay::Profiles(view) => view.clone().into_any_element(),
                 Overlay::Onboarding(view) => view.clone().into_any_element(),

@@ -1,0 +1,17 @@
+{
+  "name": "Lantern Night",
+  "bg": "#0b1424",
+  "text": "#efe6d2",
+  "accent": "#f2a541",
+  "background": {
+    "scene": "lantern-night",
+    "sky": [
+      "#070c1c",
+      "#24305e",
+      "#0e1a30",
+      "#08111f",
+      "#050a14"
+    ],
+    "speed": 1
+  }
+}

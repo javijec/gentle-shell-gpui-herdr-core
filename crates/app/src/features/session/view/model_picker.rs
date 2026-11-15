@@ -143,7 +143,7 @@ impl SessionView {
             .models
             .current
             .as_ref()
-            .map_or(ui::faint(), |m| provider_color(&m.provider));
+            .map_or(ui::faint(), |m| ui::provider_color(&m.provider));
         let trigger = Button::new("model")
             .ghost()
             .xsmall()
@@ -205,7 +205,7 @@ impl SessionView {
                                     div()
                                         .size(px(6.))
                                         .rounded_full()
-                                        .bg(provider_color(provider)),
+                                        .bg(ui::provider_color(provider)),
                                 )
                                 .child(ui::section_label(provider.to_string())),
                         );
@@ -360,20 +360,6 @@ impl SessionView {
                     .into_any_element()
             })
     }
-}
-
-fn provider_color(provider: &str) -> Hsla {
-    let palette = [
-        ui::petal(),
-        ui::info(),
-        ui::success(),
-        ui::champagne(),
-        ui::warning(),
-    ];
-    let hash = provider
-        .bytes()
-        .fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize));
-    palette[hash % palette.len()]
 }
 
 fn models_loading(loaded: bool, status: &BackendStatus) -> bool {

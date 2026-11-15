@@ -68,7 +68,14 @@ impl MemoryView {
                 .background_executor()
                 .spawn(async move {
                     let project = known.or_else(|| client::current_project(&cwd));
-                    let items = client::load(if all { None } else { project.as_deref() }, &query);
+                    let items = match (all, project.as_deref()) {
+                        (true, _) => client::load(None, &query),
+                        (false, Some(project)) => client::load(Some(project), &query),
+                        // Engram has no project for this folder, so it has
+                        // no memories of its own: "This project" stays empty
+                        // rather than falling back to every project's.
+                        (false, None) => Ok(Vec::new()),
+                    };
                     (project, items)
                 })
                 .await;

@@ -1,0 +1,15 @@
+{
+  "name": "Cloud Drift",
+  "bg": "#d8ecfa",
+  "text": "#1d3447",
+  "accent": "#2f78bd",
+  "background": {
+    "scene": "cloud-drift",
+    "sky": [
+      "#4fa3e8",
+      "#86c3f0",
+      "#b6dbf6"
+    ],
+    "speed": 1
+  }
+}

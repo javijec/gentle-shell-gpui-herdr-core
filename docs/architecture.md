@@ -34,14 +34,14 @@ flowchart TD
 
 `crates/pi-rpc` is a stable boundary: it knows nothing about GPUI, windows, tabs or visual components. `crates/app` depends on it, never the other way around.
 
-`crates/core` depends on nothing in the project (neither `app` nor `pi-rpc`) and not on GPUI; its only dependencies are `serde`, `serde_json`, `regex`, and `hmac` and `sha2` (gentle-stream's handshake). It compiles the same on macOS, Windows and Linux: it contains no platform-specific code except the syntax of the policy's `file:` paths, chosen with `cfg!(windows)` at compile time. When a module mixed pure logic and effects, the pure part lives in `core`, and the effectful part stays in `app` and calls it:
+`crates/core` depends on nothing in the project (neither `app` nor `pi-rpc`) and not on GPUI; its only dependencies are `serde`, `serde_json` and `regex`. It compiles the same on macOS, Windows and Linux: it contains no platform-specific code except the syntax of the policy's `file:` paths, chosen with `cfg!(windows)` at compile time. When a module mixed pure logic and effects, the pure part lives in `core`, and the effectful part stays in `app` and calls it:
 
 | `core` | Stays in `app` |
 | --- | --- |
 | `transcript`, `activity`, `tools`, `commands` | `session/agents.rs`: `now_ms` (system clock). |
 | `devices`: the device hub's list (plus AVDs it hasn't seen), launch-intent and device-command detection in agents' shell commands | `devices/`: the hub process and API, the panel (tabs, docked or floating, web viewer per device), `gentle-device`, the agents' instructions, SDK and simctl discovery. |
 | `scroll`: row weights from content, the scroll estimate for rows not laid out yet, the steady thumb rule | `session/view/rail.rs` and `transcript_list.rs`: recording on-screen row heights, drawing the rail. |
-| `music`: gentle-stream's wire protocol (frames, HMAC challenge and answer), its runtime folder, the player's state and the mood helper's answer | `music/`: the Unix socket, the Python helper, polling, the ♪ popover; `setup/music.rs`: finding and installing the player. |
+| `music`: gentle-stream's `ctl --json` envelope (the player's state and its structured errors) and the cache folder `setup-samples` uses | `music/`: running `gentle-stream ctl` per request, polling, the ♪ popover; `setup/music.rs`: finding and installing the player. |
 | `web`: http(s) URL extraction, loopback filtering and log punctuation | `browser/` and session events: in-app browser card and `WebSurface`; `platform/shims.rs` writes the `gentle-open` and `gentle-device` shims. |
 | `gentle_state`: `PermissionMode`, jobs, phase inference | `shared/gentle_state.rs`: reading and saving `permission-mode.json`. |
 | `notifications`: `Alert`, policy validation and changes; `alert_timing`: `Gate` and `ContextLatch` | `alerts/`: file cache and writing, playback, bundled tones, notifying the window. |
@@ -49,9 +49,12 @@ flowchart TD
 | `usage`: subscription window models and parsers (Codex, NaN), grouping, account claim; session records, statistics aggregation, ISO dates and civil days | `usage/`: reading `auth.json`, resolving keys (`$VAR`, `!command`), HTTP requests, walking and caching session files, clock and local time offset. |
 | `profiles`: routing model, `profiles.json` format, pins, agent frontmatter, notes | `profiles/`: homes and agent discovery, atomic writes, saved and materialized routing, Pi settings, pin and worktree files, Make default. |
 | `hydration`: the water reminder's settings (`hydration` in the app's `settings.json`) and when the next one is due | `hydration/`: the clock from launch, the timer, saving the setting, the drops animation. |
+| `markdown`: where the Mermaid blocks are in a document | `files/mermaid.rs`: drawing them with merman's CLI (installed on demand by `setup`), measured with the system sans font, light or dark theme, and swapping them for images in the preview. |
+| `docs`: the skill's `docs-check` report, each document's standing and front-matter title | `docs/`: the Architecture docs screen, installing the skill (`gentle-shell install`), running `docs-check` with Node, listing `docs/`. |
 | `fuzzy`: fuzzy scoring and file ranking | `palette/`: walking files, reading branches with git. |
+| `ides`: code editors and IDEs (VS Code and its forks, Zed, Sublime Text, Xcode, Visual Studio, Android Studio, JetBrains, …), where each installs per OS, versioned-folder matching and the launch command | `platform/ides.rs`: probing those folders and the PATH, launching the editor; `files/tree.rs`: the ⋯ menu's "Open in …". |
 | `sessions`: session summary, folder name from cwd, ordering, ISO dates and relative time | `sessions/`: finding and reading `.jsonl` files (line scanning is tied to reading), cache. |
-| `git`: status parsers (v1 and v2), numstat, refs, stash, worktrees (and where a new one goes), submodules, ahead/behind; diff trimming | `git/`: running `git`, counting lines of untracked files, stage, commit, push and branch operations. |
+| `git`: status parsers (v1 and v2), numstat, refs, stash, worktrees (and where a new one goes), submodules, ahead/behind; `log` records and the commit graph's lanes; diff trimming | `git/`: running `git`, counting lines of untracked files, stage, commit, push and branch operations, reading a branch's history; `history/`: the Commit History pane and painting the graph. |
 | `version`: stable versions, comparison and Gentle Shell update offer | `updates/`: launcher cache, npm query, clock. |
 | `engram`: observation model and query encoding | `memory/`: HTTP requests to Engram. |
 | `workspaces`: unique workspace names | `workspaces/`: saved model (uses `PaneTree`), reading and writing `workspaces.json`. |
@@ -67,11 +70,11 @@ crates/
 │       ├── cli.rs               # arguments (`[FOLDER] [-p TEXT]`) and initial folder
 │       ├── features/            # one folder per feature; its entry point is mod.rs
 │       │   ├── session/  workspace/  workspaces/  sessions/  palette/  profiles/  settings/  usage/  setup/
-│       │   ├── browser/  devices/  music/  files/  terminal/  git/  providers/  memory/  onboarding/  notices/  alerts/  hydration/
+│       │   ├── browser/  devices/  music/  files/  terminal/  git/  history/  providers/  memory/  onboarding/  notices/  alerts/  hydration/  docs/
 │       │   └── app_update/  updates/  welcome/
-│       ├── platform/            # OS integration: single instance, agent command shims, Dock and window icons
+│       ├── platform/            # OS integration: single instance, agent command shims, Dock and window icons, installed editors
 │       └── shared/              # pieces used by several features, with no logic of their own:
-│                                # ui, floating, themes, assets, banner, surge, pane, gentle_state
+│                                # ui, floating, themes, backdrop (theme scenes), assets, banner, surge, pane, gentle_state
 ├── core/                        # shared pure logic (gentle-core)
 └── pi-rpc/
 ```
@@ -109,7 +112,7 @@ session/
 ├── submit.rs       # composer submission: `!` shell, built-ins, native screens and attachments
 ├── agents.rs       # agents panel
 ├── builtins.rs     # command classification and capture of extension output (pure)
-├── attachments.rs  # image validation, tokens and payload (pure)
+├── attachments.rs  # image validation and payload, long pastes, `[Image #N]` / `[Pasted text #N]` tokens (pure)
 └── view.rs, view/  # render (see below)
 ```
 
@@ -207,7 +210,10 @@ git/mod.rs           # run git, toplevel; re-exports the types callers use
 git/
 ├── snapshot.rs     # changes for the panel and the tree
 ├── changes.rs      # Changes tab: stage, discard, stash, commit, push
-└── refs.rs         # Branches tab: branches, stash, remote checkout, worktrees (add, remove, prune)
+├── refs.rs         # Branches tab: branches, stash, remote checkout, worktrees (add, remove, prune)
+└── log.rs          # Commit History: a branch's commits, total, local branches, dirty work tree
+
+history/            # mod.rs: HistoryView (a `PaneKind::History` pane), paging, selection; graph.rs (paints a row's lanes), view.rs (rows, hover card)
 
 app_update/mod.rs    # AppUpdate (Global), Status, Problem; check, install, skip, restart
 app_update/
@@ -279,3 +285,4 @@ Before completing a stage, run formatting, tests, Clippy and a smoke test of the
 - [ADR-0001: Modular monolith by feature](adr/0001-modular-monolith.md)
 - [ADR-0002: Incremental pure core](adr/0002-incremental-pure-core.md)
 - [ADR-0003: Behavior-preserving refactors](adr/0003-behavior-preserving-refactors.md)
+- [ADR-0004: Draw Mermaid diagrams with merman's CLI, downloaded on demand](adr/0004-native-mermaid-rendering.md)

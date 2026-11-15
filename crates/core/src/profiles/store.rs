@@ -244,10 +244,107 @@ pub fn bootstrap_profiles(current: &Routing) -> ProfilesFile {
     }
 }
 
+const PROFILE_EXPORT_KIND: &str = "gentle-pi.agent_model_profile";
+
+/// The file `/gentle:profiles export` writes and `import` reads, in the
+/// config home; the app's export suggests the same name.
+pub const PROFILE_EXPORT_FILE: &str = "profiles.export.json";
+
+/// One profile as exported (`serializeProfileExport`).
+pub fn serialize_profile_export(name: &str, config: &Routing) -> Result<String, String> {
+    require_valid_name(name)?;
+    Ok(pretty(&json!({
+        "kind": PROFILE_EXPORT_KIND,
+        "version": 1,
+        "name": name,
+        "config": config.to_json(),
+    })))
+}
+
+/// A profile read from an export.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProfileExport {
+    pub name: String,
+    pub config: Routing,
+    /// Agents whose entries were invalid and left out.
+    pub dropped: Vec<String>,
+}
+
+/// `parseProfileExportTextWithDrops`: `None` unless it is a version 1
+/// export with a valid name and a config object.
+pub fn parse_profile_export(text: &str) -> Option<ProfileExport> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    if value["kind"] != PROFILE_EXPORT_KIND || value["version"] != 1 {
+        return None;
+    }
+    let name = value["name"]
+        .as_str()
+        .filter(|n| is_valid_profile_name(n))?;
+    let config = normalize_routing(&value["config"])?;
+    let dropped = value["config"]
+        .as_object()?
+        .keys()
+        .filter(|agent| !config.contains(agent))
+        .cloned()
+        .collect();
+    Some(ProfileExport {
+        name: name.to_string(),
+        config,
+        dropped,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::profiles::RouteEntry;
+
+    #[test]
+    fn profile_exports_round_trip_and_drop_invalid_entries() {
+        let mut config = Routing::default();
+        config.set(
+            "orchestrator",
+            entry(Some("openai/gpt-6-sol"), Some("high"), None),
+        );
+        config.set(
+            "jd-judge-a",
+            entry(Some("deepseek/deepseek-flash"), None, None),
+        );
+        let text = serialize_profile_export("work", &config).unwrap();
+        assert!(text.contains("\"kind\": \"gentle-pi.agent_model_profile\""));
+        let back = parse_profile_export(&text).unwrap();
+        assert_eq!((back.name.as_str(), &back.config), ("work", &config));
+        assert!(back.dropped.is_empty());
+
+        // What Gentle Shell writes reads the same; bad agents are named.
+        let shell = r#"{"kind":"gentle-pi.agent_model_profile","version":1,"name":"team",
+            "config":{"orchestrator":{"model":"a/b"},"bad name!":{"model":"x/y"},"broken":{"thinking":"ultra"}}}"#;
+        let parsed = parse_profile_export(shell).unwrap();
+        assert_eq!(parsed.config.iter().count(), 1);
+        assert_eq!(parsed.dropped, ["bad name!", "broken"]);
+
+        assert!(serialize_profile_export("-bad", &config).is_err());
+        // A profiles.json, another version, a bad name or no config is not an export.
+        assert_eq!(
+            parse_profile_export(r#"{"kind":"gentle-pi.agent_model_profiles","version":1}"#),
+            None
+        );
+        assert_eq!(
+            parse_profile_export(&shell.replace("\"version\":1", "\"version\":2")),
+            None
+        );
+        assert_eq!(
+            parse_profile_export(&shell.replace("\"team\"", "\"-x\"")),
+            None
+        );
+        assert_eq!(
+            parse_profile_export(
+                r#"{"kind":"gentle-pi.agent_model_profile","version":1,"name":"a"}"#
+            ),
+            None
+        );
+        assert_eq!(parse_profile_export("not json"), None);
+    }
 
     fn entry(model: Option<&str>, thinking: Option<&str>, tier: Option<&str>) -> RouteEntry {
         RouteEntry {

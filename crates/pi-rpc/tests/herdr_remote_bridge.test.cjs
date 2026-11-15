@@ -664,6 +664,36 @@ test("5C reports remote Git changes and branches without sending Pi commands", {
   }
 });
 
+test("private Git HEAD query never reaches Pi or invokes a visible Shell tool", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-head-"));
+  try {
+    const git = gitInit(root);
+    git("branch", "feature/quiet");
+    const h = harness(root);
+    const before = h.childWrites.length;
+    rpcInput(h, { type: "herdr_git_head", id: "head-1", root });
+    const reply = await fsReply(h, "head-1");
+    assert.equal(reply.success, true, reply.error);
+    assert.equal(reply.data.currentBranch, "feature/quiet");
+    assert.match(reply.data.headOid, /^[a-f0-9]{40,64}$/);
+    assert.equal(h.childWrites.length, before,
+      "Git metadata must never be forwarded to Pi");
+    assert.equal(h.calls.length, 1, "must not launch another agent");
+
+    rpcInput(h, {
+      type: "herdr_git_head", id: "head-invalid", root: "C:\\\\Windows",
+    });
+    const invalid = await fsReply(h, "head-invalid");
+    assert.equal(invalid.success, false);
+    assert.equal(h.childWrites.length, before);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("5E.6 includes bounded tag and stash metadata without Pi RPC writes", {
   skip: process.platform === "win32",
 }, async () => {

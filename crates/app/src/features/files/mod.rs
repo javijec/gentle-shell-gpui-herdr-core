@@ -14,6 +14,7 @@ mod tabs;
 pub use remote::{RemoteFilesEvent, RemoteFilesView};
 pub use remote_git::RemoteGitDiffView;
 mod listing;
+mod mermaid;
 mod ops;
 mod refs;
 mod tree;
@@ -21,12 +22,6 @@ mod viewer;
 
 pub use tree::{FileTreeEvent, FileTreeView};
 pub use viewer::FileView;
-
-/// Register both the local Files shortcuts and the remote editor shortcut.
-pub fn init(cx: &mut App) {
-    tree::init(cx);
-    RemoteFilesView::bind_keys(cx);
-}
 
 use std::path::Path;
 
@@ -55,6 +50,19 @@ fn source_editor(
     }
     .default_value(text)
 }
+
+/// Register local Files shortcuts, remote editor bindings, and Mermaid state.
+pub fn init(cx: &mut App) {
+    tree::init(cx);
+    RemoteFilesView::bind_keys(cx);
+    mermaid::init(cx);
+}
+
+/// The diagram renderer is shared by Markdown previews and the Docs overlay.
+pub use mermaid::{
+    Renderer as DiagramRenderer, RendererState as DiagramRendererState,
+    install as install_diagram_renderer, renderer as diagram_renderer,
+};
 
 /// The icon and tint for a file name in the tree.
 fn file_icon(name: &str) -> (IconName, Hsla) {

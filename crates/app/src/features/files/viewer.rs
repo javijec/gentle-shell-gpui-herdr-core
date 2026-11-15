@@ -21,12 +21,13 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::diff::{Diff, DiffFile, DiffFileStatus, DiffHoverHighlight, DiffState};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Rope, RopeExt as _};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::text::{TextView, TextViewState};
+use gpui_kit::component::text::{FrontmatterPlugin, MarkdownExtensions, TextView, TextViewState};
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{file_icon, human_size, language};
+use super::{file_icon, human_size, language, mermaid};
+use crate::shared::pane::ShowInPane;
 use crate::shared::ui;
 
 actions!(file_view, [Save]);
@@ -132,6 +133,12 @@ struct Markdown {
     /// The file's directory: relative links and images resolve against it.
     dir: Arc<Path>,
     images: Arc<EmbeddedImages>,
+    /// Mermaid blocks drawn as images.
+    diagrams: Arc<mermaid::Diagrams>,
+    /// Mermaid blocks in the document: with no renderer installed, the
+    /// preview offers to download it.
+    diagram_blocks: usize,
+    _renderer: Subscription,
     mdx: bool,
     /// The editor scroll top last mirrored into the split preview.
     mirrored: Option<Pixels>,
@@ -187,12 +194,18 @@ impl FileView {
         // Stat before reading: a write in between shows up as a change.
         let stamp = stamp_of(&path);
         let mut markdown = None;
+        let (mut drawing, mut diagram_blocks) = (Vec::new(), 0);
         let (body, edit) = match read_text(&path) {
             Ok((text, size)) => {
                 meta.size = Some(size);
                 meta.lines = Some(line_count(&text));
-                let preview =
-                    is_markdown(&path).then(|| cx.new(|cx| TextViewState::markdown(&text, cx)));
+                let diagrams = Arc::new(mermaid::Diagrams::default());
+                let preview = is_markdown(&path).then(|| {
+                    let prepared =
+                        diagrams.prepare(&text, dark_theme(cx), renderer_cli(cx).as_ref());
+                    (drawing, diagram_blocks) = (prepared.jobs, prepared.blocks);
+                    cx.new(|cx| TextViewState::markdown(&prepared.text, cx))
+                });
                 let editor = cx.new(|cx| super::source_editor(&path, text, window, cx));
                 let edit = Editing {
                     saved: editor.read(cx).text().clone(),
@@ -216,6 +229,7 @@ impl FileView {
                         preview,
                         dir: path.parent().unwrap_or(Path::new("")).into(),
                         images: Arc::default(),
+                        diagrams,
                         mdx: path
                             .extension()
                             .is_some_and(|e| e.eq_ignore_ascii_case("mdx")),
@@ -226,6 +240,12 @@ impl FileView {
                         _focus: cx.on_focus(&focus, window, |this, window, cx| {
                             this.focus_body(window, cx)
                         }),
+                        diagram_blocks,
+                        // The renderer installed (or failed): draw, or say why.
+                        _renderer: cx.observe_global::<mermaid::RendererState>(|this, cx| {
+                            this.sync_preview(cx);
+                            cx.notify();
+                        }),
                     });
                 }
                 (Body::Code(editor), Some(edit))
@@ -235,7 +255,7 @@ impl FileView {
                 (notice.into_body(), None)
             }
         };
-        Self {
+        let mut this = Self {
             path,
             crumbs,
             diff: false,
@@ -245,7 +265,9 @@ impl FileView {
             markdown,
             focus,
             header_width: Rc::default(),
-        }
+        };
+        this.draw_diagrams(drawing, cx);
+        this
     }
 
     /// Bind ⌘S (Ctrl+S elsewhere) to saving the focused file pane.
@@ -549,14 +571,43 @@ impl FileView {
 
     /// Hand the buffer, unsaved edits included, to the preview.
     fn sync_preview(&mut self, cx: &mut Context<Self>) {
-        let (Body::Code(editor), Some(md)) = (&self.body, self.markdown.as_ref()) else {
+        let (Body::Code(editor), Some(md)) = (&self.body, self.markdown.as_mut()) else {
             return;
         };
         let text = editor.read(cx).text().to_string();
+        let prepared = md
+            .diagrams
+            .prepare(&text, dark_theme(cx), renderer_cli(cx).as_ref());
+        md.diagram_blocks = prepared.blocks;
         let list = md.preview.read(cx).list_state().clone();
         md.restore
             .set(Some((list.logical_scroll_top(), list.item_count())));
-        md.preview.update(cx, |state, cx| state.set_text(&text, cx));
+        md.preview
+            .update(cx, |state, cx| state.set_text(&prepared.text, cx));
+        self.draw_diagrams(prepared.jobs, cx);
+    }
+
+    /// Draw `jobs` off the UI thread, then show them.
+    fn draw_diagrams(&mut self, jobs: Vec<mermaid::Job>, cx: &mut Context<Self>) {
+        let Some(diagrams) = self.markdown.as_ref().map(|md| md.diagrams.clone()) else {
+            return;
+        };
+        if jobs.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let drawn = cx
+                .background_executor()
+                .spawn(async move {
+                    for job in &jobs {
+                        diagrams.finish(job, mermaid::draw(job));
+                    }
+                })
+                .await;
+            let () = drawn;
+            let _ = this.update(cx, |this, cx| this.sync_preview(cx));
+        })
+        .detach();
     }
 
     fn set_mode(&mut self, mode: MdMode, window: &mut Window, cx: &mut Context<Self>) {
@@ -622,18 +673,32 @@ impl FileView {
     }
 
     /// The rendered buffer, scrolling on its own.
-    fn render_preview(md: &Markdown, cx: &App) -> Div {
+    /// Links to another Markdown file open in this pane: `pane` is this
+    /// view, focused first so the action reaches the workspace through it.
+    fn render_preview(md: &Markdown, pane: &(FocusHandle, EntityId), cx: &App) -> Div {
         let restore = md.restore.clone();
         let list = md.preview.read(cx).list_state().clone();
         let image_dir = md.dir.clone();
         let images = md.images.clone();
+        let diagrams = md.diagrams.clone();
         let link_dir = md.dir.clone();
+        // Front matter (title, owner, sources…) shows as a small description
+        // list instead of a run-on paragraph.
         let view = TextView::new(&md.preview)
+            .markdown_extensions(MarkdownExtensions::default().frontmatter())
+            .plugin(FrontmatterPlugin::new())
             .scrollable(true)
             .selectable(true)
             .stream_fade(false)
-            .image_source(move |uri| image_source(&image_dir, &images, uri))
-            .on_link_click(move |url, _, _, cx| open_link(&link_dir, url, cx));
+            .image_source(move |uri| {
+                diagrams
+                    .image(uri)
+                    .unwrap_or_else(|| image_source(&image_dir, &images, uri))
+            })
+            .on_link_click({
+                let (focus, pane) = pane.clone();
+                move |url, _, window, cx| open_link(&link_dir, url, &focus, pane, window, cx)
+            });
         let view = if md.mdx { view.markdown_mdx() } else { view };
         div()
             .relative()
@@ -650,6 +715,7 @@ impl FileView {
                 .absolute()
                 .size_full(),
             )
+            .when_some(diagram_banner(md, cx), |d, banner| d.child(banner))
             .child(view.px_6().py_4())
     }
 
@@ -966,6 +1032,7 @@ impl Focusable for FileView {
 
 impl Render for FileView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pane = (self.focus.clone(), cx.entity_id());
         let body = match &self.body {
             Body::Loading => v_flex()
                 .size_full()
@@ -983,7 +1050,7 @@ impl Render for FileView {
                 };
                 match self.markdown.as_ref() {
                     Some(md) if md.mode == MdMode::Preview => {
-                        Self::render_preview(md, cx).into_any_element()
+                        Self::render_preview(md, &pane, cx).into_any_element()
                     }
                     // Editor left, preview right on an inset tint, kept off
                     // the pane's edges.
@@ -993,7 +1060,7 @@ impl Render for FileView {
                         .child(div().flex_1().min_w_0().h_full().child(code()))
                         .child(
                             div().flex_1().min_w_0().h_full().pr_2().pb_2().child(
-                                Self::render_preview(md, cx)
+                                Self::render_preview(md, &pane, cx)
                                     .rounded_xl()
                                     .bg(ui::surface())
                                     .overflow_hidden(),
@@ -1207,6 +1274,76 @@ fn image_source(dir: &Path, embedded: &EmbeddedImages, uri: &SharedUri) -> Image
     }
 }
 
+/// Above a preview with Mermaid blocks and no renderer: what the blocks
+/// are and a way to draw them (a one-time download, not part of the app).
+fn diagram_banner(md: &Markdown, cx: &App) -> Option<Div> {
+    let blocks = md.diagram_blocks;
+    let (line, action) = match mermaid::renderer(cx) {
+        _ if blocks == 0 => return None,
+        mermaid::Renderer::Ready(_) => return None,
+        mermaid::Renderer::Missing => (
+            format!(
+                "{blocks} Mermaid {} here. Draw {} with the diagram renderer, a one-time download of about 20 MB.",
+                if blocks == 1 { "diagram" } else { "diagrams" },
+                if blocks == 1 { "it" } else { "them" },
+            ),
+            Some("Install"),
+        ),
+        mermaid::Renderer::Installing(progress) => (progress.clone(), None),
+        mermaid::Renderer::Failed(error) => (
+            format!("The diagram renderer couldn't be installed: {error}"),
+            Some("Try again"),
+        ),
+    };
+    let installing = matches!(mermaid::renderer(cx), mermaid::Renderer::Installing(_));
+    Some(
+        h_flex()
+            .mx_6()
+            .mt_3()
+            .px_3()
+            .py_2()
+            .gap_2()
+            .rounded_lg()
+            .bg(ui::surface())
+            .text_xs()
+            .text_color(ui::muted())
+            .child(if installing {
+                Spinner::new()
+                    .xsmall()
+                    .color(ui::accent())
+                    .into_any_element()
+            } else {
+                Icon::new(IconName::Workflow)
+                    .xsmall()
+                    .text_color(ui::info())
+                    .into_any_element()
+            })
+            .child(div().flex_1().min_w_0().child(line))
+            .children(action.map(|label| {
+                Button::new("install-diagram-renderer")
+                    .ghost()
+                    .xsmall()
+                    .label(label)
+                    .on_click(|_, _, cx| mermaid::install(cx))
+            })),
+    )
+}
+
+/// The diagram renderer, once installed.
+fn renderer_cli(cx: &App) -> Option<PathBuf> {
+    match mermaid::renderer(cx) {
+        mermaid::Renderer::Ready(cli) => Some(cli.clone()),
+        _ => None,
+    }
+}
+
+/// The app's theme is dark: Mermaid draws in its dark theme.
+fn dark_theme(cx: &App) -> bool {
+    !cx.global::<crate::shared::themes::Themes>()
+        .active_theme()
+        .light
+}
+
 /// The image a base64 `data:` URL carries, if GPUI can decode its type.
 fn data_image(url: &str) -> Option<Arc<Image>> {
     let (meta, data) = url.strip_prefix("data:")?.split_once(',')?;
@@ -1215,14 +1352,26 @@ fn data_image(url: &str) -> Option<Arc<Image>> {
     Some(Arc::new(Image::from_bytes(format, bytes)))
 }
 
-/// A clicked preview link: URLs in the browser, local files (relative to
-/// the Markdown file) in their default app, in-page anchors nowhere.
-fn open_link(dir: &Path, url: &str, cx: &mut App) {
+/// A clicked preview link: URLs in the browser, another Markdown file in
+/// this pane (`pane`), other local files (relative to the Markdown file) in
+/// their default app, in-page anchors nowhere.
+fn open_link(
+    dir: &Path,
+    url: &str,
+    focus: &FocusHandle,
+    pane: EntityId,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let url = url.trim();
     if url.is_empty() || url.starts_with('#') {
         return;
     }
     match local_target(dir, url) {
+        Some(path) if path.is_file() && is_markdown(&path) => {
+            window.focus(focus, cx);
+            window.dispatch_action(Box::new(ShowInPane { pane, path }), cx);
+        }
         Some(path) if path.exists() => cx.open_with_system(&path),
         Some(_) => {}
         None => cx.open_url(url),
