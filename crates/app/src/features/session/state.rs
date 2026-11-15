@@ -803,6 +803,18 @@ pub(in crate::features::session) mod desktop {
             self.config.apply_profile(request)
         }
 
+        /// Session-scoped profile observed from Gentle Shell's desktop channel.
+        pub(in crate::features::session) fn session_profile(&self) -> Option<&str> {
+            self.config.session_profile()
+        }
+
+        /// Record a binding made or cleared through legacy profile actions.
+        pub(in crate::features::session) fn set_session_profile(
+            &mut self, profile: Option<String>,
+        ) {
+            self.config.set_session_profile(profile);
+        }
+
         /// Send the next queued config request once the probe has landed, no
         /// resync is owed and no other request is in flight.
         pub(in crate::features::session) fn config_pump(&mut self) -> config::Applied {
@@ -2842,6 +2854,7 @@ pub(in crate::features::session) mod desktop {
         use pi_rpc::desktop_rpc::{
             ApplyProfileOutcome, Capabilities, ConfigStore, ConfigWrite, DesktopEvent,
             DesktopMethod, DesktopRecord, DesktopResponse, DesktopRpcError, DesktopSession,
+            ProfileApplyMode,
         };
 
         use super::Send;
@@ -2941,6 +2954,9 @@ pub(in crate::features::session) mod desktop {
             generation: u64,
             outcomes: Vec<(ConfigTicket, ConfigOutcome)>,
             changes: Vec<ConfigChange>,
+            /// Only a session-mode apply observed by this Desktop RPC, or a
+            /// legacy screen action, binds a profile to this session.
+            session_profile: Option<String>,
         }
 
         impl Config {
@@ -2995,6 +3011,16 @@ pub(in crate::features::session) mod desktop {
             ) -> Result<ConfigTicket, ConfigFailure> {
                 self.check(DesktopMethod::ApplyProfile)?;
                 Ok(self.enqueue(Op::Apply(request)))
+            }
+
+            pub(in crate::features::session) fn session_profile(&self) -> Option<&str> {
+                self.session_profile.as_deref()
+            }
+
+            pub(in crate::features::session) fn set_session_profile(
+                &mut self, profile: Option<String>,
+            ) {
+                self.session_profile = profile;
             }
 
             fn check(&self, method: DesktopMethod) -> Result<(), ConfigFailure> {
@@ -3126,6 +3152,7 @@ pub(in crate::features::session) mod desktop {
                 }
                 self.drop_queued();
                 self.changes.clear();
+                self.session_profile = None;
                 self.generation += 1;
             }
 
@@ -3234,6 +3261,12 @@ pub(in crate::features::session) mod desktop {
                         Some(Report::Failure(error)),
                     ),
                 };
+                if let ConfigOutcome::Applied(result) = &outcome
+                    && let ApplyProfileOutcome::Applied(_) = result.outcome
+                    && result.mode == ProfileApplyMode::Session
+                {
+                    self.session_profile = Some(result.profile.clone());
+                }
                 let profile_applied = matches!(
                     &outcome,
                     ConfigOutcome::Applied(result)
@@ -3271,7 +3304,10 @@ pub(in crate::features::session) mod desktop {
                     // The apply may have written any of these stores, and the
                     // event carries no revision: each is re-read.
                     PROFILE_APPLIED => match event.profile_applied() {
-                        Ok(_) => {
+                        Ok(applied) => {
+                            if applied.mode == ProfileApplyMode::Session {
+                                self.session_profile = Some(applied.profile);
+                            }
                             for store in APPLIED_STORES {
                                 let change = ConfigChange {
                                     store,
