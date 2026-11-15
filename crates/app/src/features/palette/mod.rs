@@ -138,7 +138,7 @@ pub struct Activity {
 pub struct PaletteRemote {
     pub machine: String,
     pub root: String,
-    pub process: Arc<pi_rpc::RpcProcess>,
+    pub process: Option<Arc<pi_rpc::RpcProcess>>,
 }
 
 pub struct PaletteInput {
@@ -220,10 +220,13 @@ impl PaletteView {
 
         let tasks = if let Some(remote) = input.remote.clone() {
             vec![cx.spawn(async move |this, cx| {
-                let result = remote.process.request(json!({
-                    "type": "herdr_palette_snapshot",
-                    "root": remote.root,
-                })).await;
+                let result = match remote.process {
+                    Some(process) => process.request(json!({
+                        "type": "herdr_palette_snapshot",
+                        "root": remote.root,
+                    })).await.map_err(|error| error.to_string()),
+                    None => Err("The selected remote agent is disconnected or its directory is unknown".to_owned()),
+                };
                 let _ = this.update(cx, |this, cx| {
                     match result {
                         Ok(response) => {
