@@ -42,19 +42,6 @@ pub(super) fn matches_filter(filter: &str, name: &str) -> bool {
     query.is_empty() || name.to_lowercase().contains(&query.to_lowercase())
 }
 
-/// Classify Herdr's local/remotes branch records using the same section
-/// identities and filter rule as the native Branches view.
-pub(super) fn branch_matches(
-    section: RefSection, local: bool, name: &str, filter: &str,
-) -> bool {
-    let correct_section = match section {
-        RefSection::Branches => local,
-        RefSection::Remotes => !local,
-        _ => false,
-    };
-    correct_section && matches_filter(filter, name)
-}
-
 /// One filter shell for both native and Herdr reference panes. The input
 /// belongs to the owner so switching remote agents never reuses old state.
 pub(super) fn filter_field(filter: &Entity<InputState>, busy: bool) -> Div {
@@ -119,11 +106,6 @@ impl<'a> BranchDisplay<'a> {
         }
     }
 
-    /// 5D's Herdr bridge reports a name and HEAD marker but no upstream
-    /// tracking counts. A missing metric is not presented as a claimed value.
-    pub(super) fn from_remote(name: &'a str, current: bool) -> Self {
-        Self { name, current, gone: false, ahead: 0, behind: 0 }
-    }
 }
 
 /// One ref: icon, name, and an optional trailing detail.
