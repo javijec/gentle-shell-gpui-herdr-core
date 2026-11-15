@@ -16,9 +16,9 @@ use gpui_kit::*;
 use serde_json::json;
 
 use crate::features::session::SessionView;
-use crate::features::git::{RefEntry, RefsSnapshot, WorkTree};
+use crate::features::git::{RefEntry, RefsSnapshot, WorkTree, StashAction};
 use gentle_core::git::refs::{HeadInfo, RefKind, Stash, Submodule, parse_refs, parse_submodules};
-use super::refs::{RefsEvent, RefsView, RemoteWorktreeDisplay};
+use super::refs::{RefsEvent, RefsView, RemoteWorktreeDisplay, RemoteWorktreeAction};
 use super::changes::{ChangesEvent, ChangesView};
 use super::backend::{
     GitFileAction, GitFileMutation, HerdrGitGuard, WorkspaceBackend,
@@ -51,6 +51,7 @@ struct RemoteGitBranch {
 struct RemoteGitStash {
     name: String,
     message: String,
+    oid: Option<String>,
 }
 
 struct RemoteGitSnapshot {
@@ -180,7 +181,13 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
             let message = item["message"].as_str()
                 .filter(|s| s.len() <= 2048 && !s.chars().any(char::is_control))
                 .ok_or("Invalid remote Git stash message")?;
-            Ok(RemoteGitStash { name: name.to_owned(), message: message.to_owned() })
+            let oid = item["oid"].as_str()
+                .filter(|oid| matches!(oid.len(), 40 | 64)
+                    && oid.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .map(str::to_owned);
+            Ok(RemoteGitStash {
+                name: name.to_owned(), message: message.to_owned(), oid,
+            })
         }).collect::<Result<Vec<_>, &'static str>>()?,
         _ => return Err("Invalid remote Git stashes"),
     };
@@ -262,12 +269,14 @@ fn shared_remote_worktree(source: &RemoteGitSnapshot) -> WorkTree {
 /// Project a bounded Herdr Git read into the same native RefsSnapshot
 /// consumed by RefsView. Linux paths never become native PathBuf objects.
 fn shared_remote_refs(source: &RemoteGitSnapshot) -> RefsSnapshot {
-    let mut refs = RefsSnapshot::default();
-    refs.head = HeadInfo {
-        branch: source.current_branch.clone(),
-        sha: source.head_oid.as_ref().map(|oid| oid.chars().take(7).collect()),
-        dirty: !source.files.is_empty(),
-        ..HeadInfo::default()
+    let mut refs = RefsSnapshot {
+        head: HeadInfo {
+            branch: source.current_branch.clone(),
+            sha: source.head_oid.as_ref().map(|oid| oid.chars().take(7).collect()),
+            dirty: !source.files.is_empty(),
+            ..HeadInfo::default()
+        },
+        ..RefsSnapshot::default()
     };
     for branch in &source.branches {
         let kind = if branch.local { RefKind::Branch } else { RefKind::Remote };
@@ -481,6 +490,10 @@ pub struct RemoteFilesView {
     _changes_events: Subscription,
     git_confirm_create: Option<String>,
     git_confirm_switch: Option<String>,
+    git_confirm_stash: Option<(String, StashAction)>,
+    git_confirm_network: Option<String>,
+    git_confirm_worktree: Option<(RemoteWorktreeAction, String)>,
+    git_confirm_discard: Option<(String, bool)>,
     _git_events: Vec<Subscription>,
     focus: FocusHandle,
     tree_children: HashMap<String, Vec<RemoteEntry>>,
@@ -488,11 +501,14 @@ pub struct RemoteFilesView {
     tree_scroll: UniformListScrollHandle,
     tree_expanded: HashSet<String>,
     tree_loading: HashSet<String>,
+    show_ignored: bool,
     tree_selected_directory: Option<String>,
     tree_selected_entry: Option<(String, bool)>,
     file_clipboard: Option<(String, bool)>,
     entry_name: Entity<InputState>,
     entry_busy: bool,
+    trash_confirm: Option<String>,
+    last_trash: Option<(String, String)>,
     create_name: Entity<InputState>,
     creating: bool,
     preview: Option<RemotePreview>,
@@ -674,8 +690,14 @@ impl RemoteFilesView {
         });
         let refs = cx.new(|cx| RefsView::new_remote(window, cx));
         let refs_events = cx.subscribe(&refs, |this, _, event: &RefsEvent, cx| {
-            if let RefsEvent::SwitchRemoteBranch(branch) = event {
-                this.git_switch_branch(branch.clone(), cx);
+            match event {
+                RefsEvent::SwitchRemoteBranch(branch) =>
+                    this.git_switch_branch(branch.clone(), cx),
+                RefsEvent::RemoteStash { name, action } =>
+                    this.git_stash_action(name.clone(), *action, cx),
+                RefsEvent::RemoteWorktree { action, branch, path } =>
+                    this.git_worktree_action(*action, branch.clone(), path.clone(), cx),
+                _ => {}
             }
         });
         let changes = cx.new(|cx| ChangesView::new_remote(window, cx));
@@ -700,6 +722,12 @@ impl RemoteFilesView {
                 }
                 ChangesEvent::RemoteBulkStage { stage } => {
                     this.git_bulk_stage(*stage, cx);
+                }
+                ChangesEvent::RemoteStashPush(message) => {
+                    this.git_stash_push(message.clone(), cx);
+                }
+                ChangesEvent::RemoteDiscard { path, index, worktree, staged } => {
+                    this.git_discard(path.clone(), *index, *worktree, *staged, cx);
                 }
                 _ => {}
             }
@@ -735,6 +763,10 @@ impl RemoteFilesView {
             _changes_events: changes_events,
             git_confirm_create: None,
             git_confirm_switch: None,
+            git_confirm_stash: None,
+            git_confirm_network: None,
+            git_confirm_worktree: None,
+            git_confirm_discard: None,
             _git_events: git_events,
             focus: cx.focus_handle(),
             tree_children: HashMap::new(),
@@ -742,11 +774,14 @@ impl RemoteFilesView {
             tree_scroll: UniformListScrollHandle::new(),
             tree_expanded: HashSet::new(),
             tree_loading: HashSet::new(),
+            show_ignored: false,
             tree_selected_directory: None,
             tree_selected_entry: None,
             file_clipboard: None,
             entry_name,
             entry_busy: false,
+            trash_confirm: None,
+            last_trash: None,
             create_name,
             creating: false,
             preview: None,
@@ -876,6 +911,8 @@ impl RemoteFilesView {
         self.tree_loading.clear();
         self.tree_selected_directory = None;
         self.tree_selected_entry = None;
+        self.trash_confirm = None;
+        self.last_trash = None;
         self.rebuild_remote_rows();
         self.error = None;
         self.truncated = false;
@@ -887,7 +924,7 @@ impl RemoteFilesView {
             return;
         };
         let response = WorkspaceBackend::herdr(self.root.clone(), process)
-            .list(WorkspacePath::Herdr(directory), false);
+            .list(WorkspacePath::Herdr(directory), self.show_ignored);
         cx.spawn(async move |this, cx| {
             let response = response.await;
             let _ = this.update(cx, |this, cx| {
@@ -915,6 +952,15 @@ impl RemoteFilesView {
         ));
     }
 
+    fn toggle_ignored(&mut self, cx: &mut Context<Self>) {
+        self.show_ignored = !self.show_ignored;
+        self.tree_children.clear();
+        self.tree_expanded.clear();
+        self.tree_loading.clear();
+        self.rebuild_remote_rows();
+        self.toggle_remote_directory(self.root.clone(), cx);
+    }
+
     fn refresh_tree_folder(&mut self, folder: String, cx: &mut Context<Self>) {
         self.tree_children.remove(&folder);
         self.tree_expanded.remove(&folder);
@@ -922,15 +968,98 @@ impl RemoteFilesView {
     }
 
     fn clipboard_remote_entry(&mut self, cut: bool, cx: &mut Context<Self>) {
-        if let Some((path, directory)) = &self.tree_selected_entry {
-            if !cut && *directory {
-                self.error = Some("Recursive directory copying is not supported yet".into());
-            } else {
-                self.file_clipboard = Some((path.clone(), cut));
-                self.error = None;
-            }
+        if let Some((path, _directory)) = &self.tree_selected_entry {
+            self.file_clipboard = Some((path.clone(), cut));
+            self.error = None;
             cx.notify();
         }
+    }
+
+    fn trash_remote_entry(&mut self, cx: &mut Context<Self>) {
+        if self.entry_busy || self.creating || self.root == "/" || self.pane_path.is_some() {
+            return;
+        }
+        let Some((selected, _)) = self.tree_selected_entry.clone() else { return; };
+        if self.trash_confirm.as_deref() != Some(selected.as_str()) {
+            self.trash_confirm = Some(selected);
+            cx.notify();
+            return;
+        }
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.error = Some("Remote agent is disconnected".into());
+            cx.notify();
+            return;
+        };
+        self.trash_confirm = None;
+        self.entry_busy = true;
+        let parent = remote_parent(&self.root, &selected)
+            .unwrap_or_else(|| self.root.clone());
+        let generation = self.generation;
+        let operation = WorkspaceBackend::herdr(self.root.clone(), process)
+            .trash(WorkspacePath::Herdr(selected.clone()));
+        cx.spawn(async move |this, cx| {
+            let result = operation.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation { return; }
+                this.entry_busy = false;
+                match result {
+                    Ok(receipt) => {
+                        if !matches!(&receipt.path, WorkspacePath::Herdr(path)
+                            if path == &selected)
+                        {
+                            this.error = Some("Unexpected remote Trash result".into());
+                            cx.notify();
+                            return;
+                        }
+                        if let Some(token) = receipt.token {
+                            this.last_trash = Some((token, selected.clone()));
+                        }
+                        this.tree_selected_entry = None;
+                        this.file_clipboard = None;
+                        this.tree_children.remove(&selected);
+                        this.tree_expanded.remove(&selected);
+                        this.refresh_tree_folder(parent.clone(), cx);
+                    }
+                    Err(error) => this.error = Some(friendly_error(&error)),
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    fn restore_remote_entry(&mut self, cx: &mut Context<Self>) {
+        if self.entry_busy || self.creating || self.root == "/" {
+            return;
+        }
+        let Some((token, original)) = self.last_trash.clone() else { return; };
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.error = Some("Remote agent is disconnected".into());
+            cx.notify();
+            return;
+        };
+        self.entry_busy = true;
+        let generation = self.generation;
+        let parent = remote_parent(&self.root, &original)
+            .unwrap_or_else(|| self.root.clone());
+        let operation = WorkspaceBackend::herdr(self.root.clone(), process)
+            .restore(token.clone());
+        cx.spawn(async move |this, cx| {
+            let result = operation.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation { return; }
+                this.entry_busy = false;
+                match result {
+                    Ok(_) => {
+                        this.last_trash = None;
+                        this.refresh_tree_folder(parent.clone(), cx);
+                    }
+                    Err(error) => this.error = Some(friendly_error(&error)),
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
     }
 
     fn rename_remote_entry(&mut self, cx: &mut Context<Self>) {
@@ -1092,7 +1221,7 @@ impl RemoteFilesView {
         self.rebuild_remote_rows();
         let generation = self.generation;
         let response = WorkspaceBackend::herdr(self.root.clone(), process)
-            .list(WorkspacePath::Herdr(path.clone()), false);
+            .list(WorkspacePath::Herdr(path.clone()), self.show_ignored);
         cx.spawn(async move |this, cx| {
             let result = response.await;
             let _ = this.update(cx, |this, cx| {
@@ -1170,7 +1299,7 @@ impl RemoteFilesView {
             self.tree_selected_entry.as_ref()
                 .is_some_and(|(selected, _)| selected == &node.path),
             &node.entry.name, directory, opened,
-            false, None, None, false,
+            node.entry.ignored, None, None, false,
         )
         .cursor_pointer()
         .when(node.loading, |row| {
@@ -1407,8 +1536,13 @@ impl RemoteFilesView {
     fn refresh_git(&mut self, cx: &mut Context<Self>) {
         self.git_confirm_create = None;
         self.git_confirm_switch = None;
+        self.git_confirm_stash = None;
+        self.git_confirm_network = None;
+        self.git_confirm_worktree = None;
+        self.git_confirm_discard = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
+            view.mark_remote_stash(None, cx);
         });
         self.git_generation = self.git_generation.wrapping_add(1);
         let generation = self.git_generation;
@@ -1480,13 +1614,18 @@ impl RemoteFilesView {
             return;
         };
         self.git_write_future(async move {
-            process.request(command).await.map(|_| ())
-                .map_err(|error| error.to_string())
+            let reply = process.request(command).await
+                .map_err(|error| error.to_string())?;
+            let trashed = reply.data["trashToken"].as_str().and_then(|token| {
+                reply.data["trashedPath"].as_str()
+                    .map(|path| (token.to_owned(), path.to_owned()))
+            });
+            Ok(trashed)
         }, cx);
     }
 
     fn git_write_future(
-        &mut self, operation: impl std::future::Future<Output = Result<(), String>>
+        &mut self, operation: impl std::future::Future<Output = Result<Option<(String, String)>, String>>
             + Send + 'static,
         cx: &mut Context<Self>,
     ) {
@@ -1499,8 +1638,13 @@ impl RemoteFilesView {
         self.git_feedback = None;
         self.git_confirm_create = None;
         self.git_confirm_switch = None;
+        self.git_confirm_stash = None;
+        self.git_confirm_network = None;
+        self.git_confirm_worktree = None;
+        self.git_confirm_discard = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
+            view.mark_remote_stash(None, cx);
         });
         let response = cx.background_executor().spawn(operation);
         cx.spawn(async move |this, cx| {
@@ -1511,7 +1655,10 @@ impl RemoteFilesView {
                     view.set_remote_busy(false, cx);
                 });
                 match result {
-                    Ok(_) => {
+                    Ok(trashed) => {
+                        if let Some(receipt) = trashed {
+                            this.last_trash = Some(receipt);
+                        }
                         this.git_feedback = Some("Remote Git updated. Status refreshed.".into());
                         this.refresh_git(cx);
                     }
@@ -1545,7 +1692,9 @@ impl RemoteFilesView {
                 index_token,
             }),
         };
-        self.git_write_future(backend.git_file(action, request), cx);
+        self.git_write_future(async move {
+            backend.git_file(action, request).await.map(|_| None)
+        }, cx);
     }
 
     /// A confirmed commit from the shared ChangesView; retain Herdr guards.
@@ -1613,6 +1762,166 @@ impl RemoteFilesView {
             "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
             "expectedIndexToken": snapshot.index_token,
             "branch": branch,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_discard(&mut self, path: String, index: char, worktree: char,
+        staged: bool, cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self.git.as_ref().filter(|s|
+            s.writes_enabled && s.index_token.is_some()
+        ) else { return; };
+        if !snapshot.files.iter().any(|entry|
+            entry.path == path && entry.index == index && entry.worktree == worktree
+        ) { return; }
+        let pending = (path.clone(), staged);
+        if self.git_confirm_discard.as_ref() != Some(&pending) {
+            self.git_confirm_discard = Some(pending);
+            self.git_feedback = Some(
+                "Discard replaces local changes; select the action again to confirm.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        let absolute = format!("{}/{}", snapshot.toplevel.trim_end_matches('/'), path);
+        let command = json!({
+            "type": "herdr_git_discard", "root": self.root,
+            "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "path": absolute, "staged": staged,
+            "expectedIndex": index.to_string(),
+            "expectedWorktree": worktree.to_string(),
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_worktree_action(
+        &mut self, action: RemoteWorktreeAction, branch: Option<String>,
+        path: Option<String>, cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self.git.as_ref().filter(|s|
+            s.writes_enabled && s.head_oid.is_some() && s.index_token.is_some()
+        ) else { return; };
+        let target = branch.as_deref().or(path.as_deref())
+            .unwrap_or("prune").to_owned();
+        let operation = (action, target.clone());
+        if self.git_confirm_worktree.as_ref() != Some(&operation) {
+            self.git_confirm_worktree = Some(operation);
+            self.git_feedback = Some(
+                "Worktree action requires confirmation; select the same action again.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        let (kind, new_branch) = match action {
+            RemoteWorktreeAction::AddExisting => ("herdr_git_worktree_add", false),
+            RemoteWorktreeAction::AddNew => ("herdr_git_worktree_add", true),
+            RemoteWorktreeAction::Remove => ("herdr_git_worktree_remove", false),
+            RemoteWorktreeAction::Prune => ("herdr_git_worktree_prune", false),
+        };
+        let command = json!({
+            "type": kind,
+            "root": self.root, "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "branch": branch, "path": path, "newBranch": new_branch,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_network_action(&mut self, action: &'static str, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|s|
+            s.writes_enabled && s.head_oid.is_some()
+                && s.current_branch.is_some() && s.index_token.is_some()
+        ) else { return; };
+        if !matches!(action, "fetch" | "pull" | "push") { return; }
+        if self.git_confirm_network.as_deref() != Some(action) {
+            self.git_confirm_network = Some(action.to_owned());
+            self.git_feedback = Some(format!(
+                "Confirm {action}: contact the configured Git remote?",
+            ));
+            cx.notify();
+            return;
+        }
+        let command = json!({
+            "type": format!("herdr_git_{action}"),
+            "root": self.root, "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_stash_push(&mut self, message: String, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|s|
+            s.writes_enabled && !s.files_truncated && !s.files.is_empty()
+                && s.head_oid.is_some() && s.index_token.is_some()
+        ) else { return; };
+        let message = message.trim().to_owned();
+        if message.is_empty() || message.len() > 120
+            || message.chars().any(char::is_control)
+        { return; }
+        let expected_files: Vec<_> = snapshot.files.iter().map(|entry| json!({
+            "path": entry.path,
+            "index": entry.index.to_string(),
+            "worktree": entry.worktree.to_string(),
+        })).collect();
+        let command = json!({
+            "type": "herdr_git_stash_push",
+            "root": self.root, "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "expectedFiles": expected_files, "message": message,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_stash_action(
+        &mut self, name: String, action: StashAction, cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self.git.as_ref().filter(|s|
+            s.writes_enabled && !s.stashes_truncated && s.index_token.is_some()
+                && s.head_oid.is_some()
+        ) else { return; };
+        let Some(oid) = snapshot.stashes.iter().find(|stash| stash.name == name)
+            .and_then(|stash| stash.oid.clone())
+        else {
+            self.git_error = Some(
+                "Stash action requires a new Herdr agent with OID support".into(),
+            );
+            cx.notify();
+            return;
+        };
+        let pending = (name.clone(), action);
+        if self.git_confirm_stash.as_ref() != Some(&pending) {
+            self.git_confirm_stash = Some(pending.clone());
+            self.refs.update(cx, |view, cx| {
+                view.mark_remote_stash(Some(pending), cx);
+            });
+            self.git_feedback = Some(
+                "Review the stash and choose the same action again to confirm.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        let kind = match action {
+            StashAction::Apply => "herdr_git_stash_apply",
+            StashAction::Pop => "herdr_git_stash_pop",
+            StashAction::Drop => "herdr_git_stash_drop",
+        };
+        let command = json!({
+            "type": kind, "root": self.root,
+            "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "stash": name, "expectedStashOid": oid,
         });
         self.git_write(command, cx);
     }
@@ -1736,6 +2045,42 @@ impl RemoteFilesView {
                     ),
             )
             .child(self.render_tabs(cx))
+            .child(
+                h_flex().px_2().py_1().gap_1().flex_none()
+                .child(
+                        Button::new("remote-git-fetch")
+                            .ghost().xsmall().label(if self.git_confirm_network.as_deref()
+                                == Some("fetch") { "Confirm Fetch" } else { "Fetch" })
+                            .disabled(self.git_busy || self.git_loading ||
+                                !self.git.as_ref().is_some_and(|s| s.writes_enabled))
+                            .tooltip("Fetch refs from a safe configured remote")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.git_network_action("fetch", cx)
+                            })),
+                    )
+                .child(
+                        Button::new("remote-git-pull")
+                            .ghost().xsmall().label(if self.git_confirm_network.as_deref()
+                                == Some("pull") { "Confirm Pull" } else { "Pull" })
+                            .disabled(self.git_busy || self.git_loading ||
+                                !self.git.as_ref().is_some_and(|s| s.writes_enabled))
+                            .tooltip("Fast-forward only; refuses a dirty tree")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.git_network_action("pull", cx)
+                            })),
+                    )
+                .child(
+                        Button::new("remote-git-push")
+                            .ghost().xsmall().label(if self.git_confirm_network.as_deref()
+                                == Some("push") { "Confirm Push" } else { "Push" })
+                            .disabled(self.git_busy || self.git_loading ||
+                                !self.git.as_ref().is_some_and(|s| s.writes_enabled))
+                            .tooltip("Non-force push of only this branch")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.git_network_action("push", cx)
+                            })),
+                    )
+            )
             .when(self.git_loading, |panel| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child("Reading status from remote Git…"),
@@ -1752,6 +2097,18 @@ impl RemoteFilesView {
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child(feedback),
             ))
+            .when(
+                self.tab == RemoteTab::Branches
+                    && self.git.as_ref().is_some_and(|snapshot| {
+                        snapshot.branches_truncated || snapshot.tags_truncated
+                    }),
+                |panel| {
+                    panel.child(
+                        div().px_3().py_2().text_xs().text_color(ui::warning())
+                            .child("Remote branches or tags were truncated; this reference list is incomplete."),
+                    )
+                },
+            )
             .when(self.tab == RemoteTab::Changes, |panel| {
                 panel.child(
                     div().flex_1().min_h_0().child(self.changes.clone()),
@@ -1767,7 +2124,7 @@ impl RemoteFilesView {
                     .border_color(ui::border()).px_3().text_size(px(10.))
                     .text_color(ui::muted())
                     .child(if self.git.as_ref().is_some_and(|s| s.writes_enabled) {
-                        "Remote Git · guarded writes · no push/discard"
+                        "Remote Git · guarded operations · confirmation required"
                     } else {
                         "Remote Git · read-only · open a new 5D agent for writes"
                     }),
@@ -1975,6 +2332,23 @@ impl Render for RemoteFilesView {
                         } else {
                             format!("Remote Files · {}", self.machine)
                         }))
+                    .when(!central, |bar| bar.child(
+                        Button::new("remote-show-ignored")
+                            .ghost().xsmall()
+                            .icon(Icon::new(if self.show_ignored {
+                                IconName::Eye
+                            } else {
+                                IconName::EyeOff
+                            }))
+                            .tooltip(if self.show_ignored {
+                                "Hide ignored and hidden files"
+                            } else {
+                                "Show ignored and hidden files"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_ignored(cx)
+                            })),
+                    ))
                     .when_some(if central {
                         self.markdown.as_ref().map(|(mode, _)| *mode)
                     } else { None }, |bar, mode| {
@@ -2056,10 +2430,9 @@ impl Render for RemoteFilesView {
                             .child(Button::new("remote-entry-duplicate")
                                 .ghost().xsmall()
                                 .icon(Icon::new(IconName::CopyPlus))
-                                .tooltip("Duplicate selected remote file (up to 16 MiB)")
+                                .tooltip("Duplicate selected file or folder (bounded copy)")
                                 .disabled(self.entry_busy
-                                    || !self.tree_selected_entry.as_ref()
-                                        .is_some_and(|(_, directory)| !directory))
+                                    || self.tree_selected_entry.is_none())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.run_remote_entry(
                                         WorkspaceEntryAction::Duplicate, cx,
@@ -2080,10 +2453,9 @@ impl Render for RemoteFilesView {
                             .child(Button::new("remote-entry-copy")
                                 .ghost().xsmall()
                                 .icon(Icon::new(IconName::Copy))
-                                .tooltip("Copy selected remote file")
+                                .tooltip("Copy selected file or folder")
                                 .disabled(self.entry_busy
-                                    || !self.tree_selected_entry.as_ref()
-                                        .is_some_and(|(_, directory)| !directory))
+                                    || self.tree_selected_entry.is_none())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.clipboard_remote_entry(false, cx)
                                 })))
@@ -2095,6 +2467,33 @@ impl Render for RemoteFilesView {
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.paste_remote_entry(cx)
                                 })))
+                            .child(Button::new("remote-entry-trash")
+                                .ghost().xsmall()
+                                .icon(Icon::new(IconName::Trash))
+                                .label(if self.trash_confirm.as_ref()
+                                    == self.tree_selected_entry.as_ref().map(|(path, _)| path)
+                                    && self.trash_confirm.is_some()
+                                {
+                                    "Confirm Trash"
+                                } else {
+                                    "Trash"
+                                })
+                                .tooltip("Move to recoverable private Trash; click twice to confirm")
+                                .disabled(self.entry_busy || self.tree_selected_entry.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.trash_remote_entry(cx)
+                                })))
+                            .when(self.last_trash.is_some(), |row| row.child(
+                                Button::new("remote-entry-restore")
+                                    .ghost().xsmall()
+                                    .icon(Icon::new(IconName::Undo2))
+                                    .label("Undo")
+                                    .tooltip("Restore last entry from private Trash")
+                                    .disabled(self.entry_busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.restore_remote_entry(cx)
+                                    })),
+                            ))
                             .child(div().flex_1())
                             .child(div().min_w_0().truncate().text_xs()
                                 .text_color(ui::muted())

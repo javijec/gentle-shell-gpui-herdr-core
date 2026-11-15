@@ -522,6 +522,109 @@ test("5F guarded remote file entry actions never overwrite or escape", {
   }
 });
 
+test("Stage 5 recursive folder copy is bounded and rejects symlink children", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-recursive-"));
+  try {
+    fs.mkdirSync(path.join(root, "src", "nested"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src", "nested", "a.txt"), "a");
+    const h = harness(root);
+    const mutate = async (id, target) => {
+      rpcInput(h, {
+        type: "herdr_fs_entry", id, root, path: target, operation: "duplicate",
+      });
+      return await fsReply(h, id);
+    };
+    const copy = await mutate("recursive-copy", path.join(root, "src"));
+    assert.equal(copy.success, true, copy.error);
+    assert.equal(fs.readFileSync(path.join(root, "src copy", "nested", "a.txt"), "utf8"), "a");
+    fs.symlinkSync(path.join(root, "src", "nested", "a.txt"),
+      path.join(root, "src", "nested", "symlink"));
+    const reject = await mutate("recursive-reject", path.join(root, "src"));
+    assert.equal(reject.success, false);
+    assert.match(reject.error, /symlink|unsupported/i);
+    assert.equal(fs.existsSync(path.join(root, "src copy 2")), false);
+    assert.equal(h.childWrites.length, 1, "no filesystem command sent to Pi agent");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Stage 5 private Trash allows safe Undo but never replaces destination", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-trash-"));
+  try {
+    fs.mkdirSync(path.join(root, "folder"));
+    fs.writeFileSync(path.join(root, "folder", "note.txt"), "original");
+    const h = harness(root);
+    const note = path.join(root, "folder", "note.txt");
+    const send = async (id, type, more) => {
+      rpcInput(h, { type, id, root, ...more });
+      return fsReply(h, id);
+    };
+    const trash = await send("trash-1", "herdr_fs_trash", { path: note });
+    assert.equal(trash.success, true, trash.error);
+    assert.match(trash.data.token, /^[a-z0-9]+-[a-f0-9]{24}$/);
+    assert.equal(fs.existsSync(note), false);
+    assert.equal(fs.existsSync(path.join(root, ".gentle-shell-trash")), false);
+    fs.writeFileSync(note, "replacement");
+    const conflict = await send("trash-conflict", "herdr_fs_restore",
+      { token: trash.data.token });
+    assert.equal(conflict.success, false);
+    assert.equal(fs.readFileSync(note, "utf8"), "replacement");
+    fs.unlinkSync(note);
+    const restored = await send("trash-restore", "herdr_fs_restore",
+      { token: trash.data.token });
+    assert.equal(restored.success, true, restored.error);
+    assert.equal(restored.data.path, note);
+    assert.equal(fs.readFileSync(note, "utf8"), "original");
+    assert.equal((await send("trash-replay", "herdr_fs_restore",
+      { token: trash.data.token })).success, false);
+    assert.equal((await send("trash-root", "herdr_fs_trash",
+      { path: root })).success, false);
+    assert.equal((await send("trash-traversal", "herdr_fs_restore",
+      { token: "../escape" })).success, false);
+    assert.equal(h.childWrites.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Stage 5 remote ignored toggle honors .gitignore and hidden entries", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-ignored-"));
+  try {
+    gitInit(root);
+    fs.writeFileSync(path.join(root, ".gitignore"), "*.log\n");
+    fs.writeFileSync(path.join(root, "ignored.log"), "private\n");
+    fs.writeFileSync(path.join(root, ".hidden"), "hidden\n");
+    const h = harness(root);
+    const listing = async (id, showIgnored) => {
+      rpcInput(h, { type: "herdr_fs_list", id, root, path: root, showIgnored });
+      return fsReply(h, id);
+    };
+    const normal = await listing("ignored-off", false);
+    assert.equal(normal.success, true, normal.error);
+    assert.ok(!normal.data.entries.some((entry) => entry.name === "ignored.log"));
+    assert.ok(!normal.data.entries.some((entry) => entry.name === ".hidden"));
+    assert.ok(!normal.data.entries.some((entry) => entry.name === ".git"));
+    const all = await listing("ignored-on", true);
+    assert.equal(all.success, true, all.error);
+    assert.equal(all.data.entries.find((entry) => entry.name === "ignored.log").ignored, true);
+    assert.equal(all.data.entries.find((entry) => entry.name === ".hidden").ignored, true);
+    assert.ok(!all.data.entries.some((entry) => entry.name === ".git"));
+    assert.equal(h.childWrites.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("5C reports remote Git changes and branches without sending Pi commands", {
   skip: process.platform === "win32",
 }, async () => {
@@ -761,6 +864,174 @@ async function gitWrite(h, root, snapshot, type, id, props = {}) {
   });
   return fsReply(h, id);
 }
+
+test("Stage 5 Git Discard is revision-fenced and untracked files go to Trash", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-discard-"));
+  try {
+    const git = gitInit(root);
+    fs.writeFileSync(path.join(root, "tracked.txt"), "modified\n");
+    fs.writeFileSync(path.join(root, "new.txt"), "recoverable");
+    const h = harness(root);
+    let snap = await gitSnapshot(h, root, "discard-start");
+    const modified = snap.files.find((f) => f.path === "tracked.txt");
+    const untracked = snap.files.find((f) => f.path === "new.txt");
+    assert.ok(modified && untracked);
+    const stale = await gitWrite(h, root, snap, "herdr_git_discard",
+      "discard-stale", {
+        path: path.join(root, modified.path),
+        expectedIndex: "X", expectedWorktree: modified.worktree, staged: false,
+      });
+    assert.equal(stale.success, false);
+    const clean = await gitWrite(h, root, snap, "herdr_git_discard",
+      "discard-tracked", {
+        path: path.join(root, modified.path),
+        expectedIndex: modified.index,
+        expectedWorktree: modified.worktree, staged: false,
+      });
+    assert.equal(clean.success, true, clean.error);
+    assert.equal(fs.readFileSync(path.join(root, "tracked.txt"), "utf8"), "first\n");
+    const trashed = await gitWrite(h, root, snap, "herdr_git_discard",
+      "discard-untracked", {
+        path: path.join(root, untracked.path),
+        expectedIndex: untracked.index,
+        expectedWorktree: untracked.worktree,
+        staged: false,
+      });
+    assert.equal(trashed.success, true, trashed.error);
+    assert.match(trashed.data.trashToken, /^[a-z0-9]+-[a-f0-9]{24}$/);
+    assert.equal(fs.existsSync(path.join(root, "new.txt")), false);
+    rpcInput(h, {
+      type: "herdr_fs_restore", id: "discard-undo", root,
+      token: trashed.data.trashToken,
+    });
+    const undone = await fsReply(h, "discard-undo");
+    assert.equal(undone.success, true, undone.error);
+    assert.equal(fs.readFileSync(path.join(root, "new.txt"), "utf8"), "recoverable");
+
+    fs.writeFileSync(path.join(root, "tracked.txt"), "staged version\n");
+    git("add", "--", "tracked.txt");
+    snap = await gitSnapshot(h, root, "discard-staged-snapshot");
+    const staged = snap.files.find((f) => f.path === "tracked.txt");
+    const reset = await gitWrite(h, root, snap, "herdr_git_discard",
+      "discard-staged", {
+        path: path.join(root, "tracked.txt"),
+        expectedIndex: staged.index, expectedWorktree: staged.worktree,
+        staged: true,
+      });
+    assert.equal(reset.success, true, reset.error);
+    assert.equal(fs.readFileSync(path.join(root, "tracked.txt"), "utf8"), "first\n");
+    assert.equal(h.childWrites.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Stage 5 guarded stash push/apply/drop checks status and stash OID", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-stash-actions-"));
+  try {
+    gitInit(root);
+    fs.writeFileSync(path.join(root, "tracked.txt"), "working version\n");
+    const h = harness(root);
+    let snap = await gitSnapshot(h, root, "stash-snapshot-1");
+    const files = snap.files.map(({ path, index, worktree }) => ({
+      path, index, worktree,
+    }));
+    const pushed = await gitWrite(h, root, snap, "herdr_git_stash_push",
+      "stash-push", { message: "reviewed work", expectedFiles: files });
+    assert.equal(pushed.success, true, pushed.error);
+    assert.equal(fs.readFileSync(path.join(root, "tracked.txt"), "utf8"), "first\n");
+    snap = await gitSnapshot(h, root, "stash-snapshot-2");
+    const stash = snap.stashes.find((row) => row.name === "stash@{0}");
+    assert.ok(stash, "new stash should appear");
+    assert.match(stash.oid, /^[a-f0-9]{40,64}$/);
+    const rejected = await gitWrite(h, root, snap, "herdr_git_stash_drop",
+      "stash-stale", { stash: stash.name, expectedStashOid: "f".repeat(40) });
+    assert.equal(rejected.success, false, "stale stash OID must be rejected");
+    const applied = await gitWrite(h, root, snap, "herdr_git_stash_apply",
+      "stash-apply", { stash: stash.name, expectedStashOid: stash.oid });
+    assert.equal(applied.success, true, applied.error);
+    assert.equal(fs.readFileSync(path.join(root, "tracked.txt"), "utf8"),
+      "working version\n");
+    const popDirty = await gitWrite(h, root, snap, "herdr_git_stash_pop",
+      "stash-pop-dirty", { stash: stash.name, expectedStashOid: stash.oid });
+    assert.equal(popDirty.success, false, "cannot pop onto dirty worktree");
+    const dropped = await gitWrite(h, root, snap, "herdr_git_stash_drop",
+      "stash-drop", { stash: stash.name, expectedStashOid: stash.oid });
+    assert.equal(dropped.success, true, dropped.error);
+    const after = await gitSnapshot(h, root, "stash-snapshot-3");
+    assert.deepEqual(after.stashes, []);
+    assert.equal(h.childWrites.length, 1, "Git actions never enter Pi agent commands");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Stage 5 remote worktrees create and refuse dirty removal", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-wt-"));
+  const privateRoot = root + ".worktrees";
+  try {
+    const git = gitInit(root);
+    git("branch", "feature/test");
+    const h = harness(root);
+    const snapshot = await gitSnapshot(h, root, "wt-initial");
+    const add = await gitWrite(h, root, snapshot, "herdr_git_worktree_add",
+      "wt-add", { branch: "feature/test", newBranch: false });
+    assert.equal(add.success, true, add.error);
+    const linked = path.join(privateRoot, "feature-test");
+    assert.equal(fs.existsSync(linked), true);
+    fs.writeFileSync(path.join(linked, "unsaved.txt"), "keep");
+    const reject = await gitWrite(h, root, snapshot, "herdr_git_worktree_remove",
+      "wt-dirty", { path: linked });
+    assert.equal(reject.success, false, "dirty worktree must not be removed");
+    assert.equal(fs.existsSync(path.join(linked, "unsaved.txt")), true);
+    fs.unlinkSync(path.join(linked, "unsaved.txt"));
+    const remove = await gitWrite(h, root, snapshot, "herdr_git_worktree_remove",
+      "wt-remove", { path: linked });
+    assert.equal(remove.success, true, remove.error);
+    assert.equal(fs.existsSync(linked), false);
+    const outside = await gitWrite(h, root, snapshot, "herdr_git_worktree_remove",
+      "wt-escape", { path: root });
+    assert.equal(outside.success, false);
+    assert.equal(h.childWrites.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(privateRoot, { recursive: true, force: true });
+  }
+});
+
+test("Stage 5 Git sync rejects local file and ext transport remotes", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-network-"));
+  try {
+    const git = gitInit(root);
+    git("remote", "add", "origin", "file:///tmp/untrusted.git");
+    const h = harness(root);
+    const snapshot = await gitSnapshot(h, root, "sync-initial");
+    const fetch = await gitWrite(h, root, snapshot, "herdr_git_fetch",
+      "sync-file");
+    assert.equal(fetch.success, false);
+    assert.match(fetch.error, /unsupported or unsafe transport/i);
+    git("remote", "set-url", "origin", "ext::echo malicious");
+    const reject = await gitWrite(h, root, snapshot, "herdr_git_push",
+      "sync-ext");
+    assert.equal(reject.success, false);
+    assert.match(reject.error, /unsupported or unsafe transport/i);
+    assert.equal(h.childWrites.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("5F bulk Git stage and unstage are bounded and revalidate status", {
   skip: process.platform === "win32",

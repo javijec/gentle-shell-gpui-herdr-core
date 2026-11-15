@@ -378,6 +378,79 @@ async function exclusiveFileCopy(source, destination) {
   }
 }
 
+const MAX_COPY_FILES = 500;
+const MAX_COPY_BYTES = 64 * 1024 * 1024;
+const MAX_COPY_DEPTH = 24;
+
+// Directory copying is deliberately bounded and rejects symlinks,
+// Git internals, unsupported file types and cross-root paths.
+async function safeRecursiveCopy(source, destination, root) {
+  let count = 0;
+  let bytes = 0;
+  async function inspect(dir, depth) {
+    if (depth > MAX_COPY_DEPTH) throw new Error("Folder copy exceeds 24 levels");
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const children = [];
+    for (const entry of entries) {
+      if (++count > MAX_COPY_FILES) {
+        throw new Error("Folder copy exceeds 500 entries");
+      }
+      if (!validEntryName(entry.name)) {
+        throw new Error("Folder includes protected or invalid entries");
+      }
+      const sourcePath = path.posix.join(dir, entry.name);
+      if (!within(root, sourcePath) || protectedGitPath(root, sourcePath)) {
+        throw new Error("Folder includes a path outside the project");
+      }
+      const stat = await fs.lstat(sourcePath);
+      if (stat.isSymbolicLink() ||
+          (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+        throw new Error("Folder contains a symlink or entry owned by another user");
+      }
+      if (stat.isDirectory()) {
+        children.push({ name: entry.name, type: "directory",
+          children: await inspect(sourcePath, depth + 1) });
+      } else if (stat.isFile() && stat.nlink === 1 &&
+                 stat.size <= 16 * 1024 * 1024) {
+        bytes += stat.size;
+        if (bytes > MAX_COPY_BYTES) {
+          throw new Error("Folder copy exceeds 64 MiB");
+        }
+        children.push({ name: entry.name, type: "file" });
+      } else {
+        throw new Error("Folder includes an unsupported file type");
+      }
+    }
+    return children;
+  }
+  const plan = await inspect(source, 0);
+  async function materialize(from, to, children) {
+    const current = await fs.lstat(from);
+    if (!current.isDirectory() || current.isSymbolicLink() ||
+        (typeof process.getuid === "function" && current.uid !== process.getuid()) ||
+        !within(root, await fs.realpath(from))) {
+      throw new Error("Folder changed during copying; refusing to follow it");
+    }
+    for (const item of children) {
+      const src = path.posix.join(from, item.name);
+      const dst = path.posix.join(to, item.name);
+      if (item.type === "directory") {
+        await fs.mkdir(dst, { mode: 0o700 });
+        await materialize(src, dst, item.children);
+      } else {
+        await exclusiveFileCopy(src, dst);
+      }
+    }
+  }
+  await fs.mkdir(destination, { mode: 0o700 });
+  try {
+    await materialize(source, destination, plan);
+  } catch (error) {
+    await fs.rm(destination, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 async function remoteEntry(req) {
   const root = await fs.realpath(req.root);
   if (root === "/" || root !== await fs.realpath(process.cwd())) {
@@ -397,9 +470,6 @@ async function remoteEntry(req) {
   if (!["rename", "duplicate", "move", "copy"].includes(op)) {
     throw new Error("Unsupported file operation");
   }
-  if ((op === "duplicate" || op === "copy") && directory) {
-    throw new Error("Recursive folder duplication is not supported yet");
-  }
   let destinationDir = path.posix.dirname(source);
   let newName = path.posix.basename(source);
   if (op === "rename") {
@@ -409,8 +479,8 @@ async function remoteEntry(req) {
     destinationDir = await safeRemotePath(req.root, req.destinationDir);
     const targetStat = await fs.lstat(destinationDir);
     if (!targetStat.isDirectory()) throw new Error("Destination is not a folder");
-    if (op === "move" && directory && within(source, destinationDir)) {
-      throw new Error("Cannot move a directory inside itself");
+    if (directory && within(source, destinationDir)) {
+      throw new Error("Cannot copy or move a directory inside itself");
     }
   }
   if (op === "duplicate" || op === "copy") {
@@ -441,7 +511,11 @@ async function remoteEntry(req) {
   }
   if (source === destination) return { path: source, operation: op };
   if (op === "duplicate" || op === "copy") {
-    await exclusiveFileCopy(source, destination);
+    if (directory) {
+      await safeRecursiveCopy(source, destination, root);
+    } else {
+      await exclusiveFileCopy(source, destination);
+    }
   } else {
     // POSIX rename can overwrite. Reserve a directory's destination first;
     // files use an exclusive hard-link followed by unlink.
@@ -464,6 +538,183 @@ async function remoteEntry(req) {
   return { path: destination, operation: op };
 }
 
+
+// A recoverable, private trash directory *beside* the selected workspace.
+// Its files stay on the same volume as the project and never pollute Git.
+// The caller can only identify a token produced by this bridge, not choose
+// a destination outside its selected project. No shell or OS trash utility.
+const trashInFlight = new Set();
+function trashLocations(root) {
+  const parent = path.posix.dirname(root);
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const home = path.posix.join(parent, ".gentle-shell-trash-" + uid);
+  return { home, files: path.posix.join(home, "files"),
+    info: path.posix.join(home, "info") };
+}
+async function secureTrashDirectory(root, create) {
+  const dirs = trashLocations(root);
+  for (const dir of [dirs.home, dirs.files, dirs.info]) {
+    if (create) {
+      try { await fs.mkdir(dir, { mode: 0o700 }); }
+      catch (e) { if (e.code !== "EEXIST") throw e; }
+    }
+    const st = await fs.lstat(dir);
+    if (!st.isDirectory() || st.isSymbolicLink() ||
+        (typeof process.getuid === "function" && st.uid !== process.getuid()) ||
+        (st.mode & 0o077) !== 0) {
+      throw new Error("Unsafe private trash directory");
+    }
+  }
+  return dirs;
+}
+async function guardedTrash(req) {
+  const root = await fs.realpath(req.root);
+  if (root === "/" || root !== await fs.realpath(process.cwd())) {
+    throw new Error("Trash requires a selected project directory");
+  }
+  if (trashInFlight.has(root)) throw new Error("Another Trash operation is running");
+  trashInFlight.add(root);
+  try {
+    const selected = await safeRemotePath(req.root, req.path);
+    const source = await fs.realpath(selected);
+    if (source === root || protectedGitPath(root, source)) {
+      throw new Error("Cannot trash the root or private Git files");
+    }
+    const st = await fs.lstat(selected);
+    if ((!st.isFile() && !st.isDirectory()) ||
+        (typeof process.getuid === "function" && st.uid !== process.getuid())) {
+      throw new Error("Only owned files or directories can be moved to Trash");
+    }
+    const dirs = await secureTrashDirectory(root, true);
+    const token = Date.now().toString(36) + "-" + randomBytes(12).toString("hex");
+    const stored = path.posix.join(dirs.files, token);
+    const manifest = path.posix.join(dirs.info, token + ".json");
+    const handle = await fs.open(manifest,
+      fsConstants.O_CREAT | fsConstants.O_EXCL |
+      fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW, 0o600);
+    try {
+      await handle.writeFile(JSON.stringify({
+        root, original: source, directory: st.isDirectory(), token,
+        deletedAt: new Date().toISOString(),
+      }), { encoding: "utf8" });
+    } finally {
+      await handle.close();
+    }
+    try {
+      // Same-volume rename. EXDEV fails closed: no partial trash / deletion.
+      await fs.rename(selected, stored);
+    } catch (error) {
+      await fs.unlink(manifest);
+      throw error;
+    }
+    return { token, path: source, directory: st.isDirectory() };
+  } finally {
+    trashInFlight.delete(root);
+  }
+}
+async function restoreTrash(req) {
+  const root = await fs.realpath(req.root);
+  if (root === "/" || root !== await fs.realpath(process.cwd())) {
+    throw new Error("Restore requires a selected project directory");
+  }
+  if (trashInFlight.has(root)) throw new Error("Another Trash operation is running");
+  trashInFlight.add(root);
+  try {
+    const token = req.token;
+    if (typeof token !== "string" ||
+        !/^[a-z0-9]+-[a-f0-9]{24}$/.test(token)) {
+      throw new Error("Invalid Trash token");
+    }
+    const dirs = await secureTrashDirectory(root, false);
+    const infoPath = path.posix.join(dirs.info, token + ".json");
+    const infoHandle = await fs.open(infoPath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    let data;
+    try {
+      if ((await infoHandle.stat()).size > 4096) {
+        throw new Error("Invalid Trash manifest");
+      }
+      data = JSON.parse(await infoHandle.readFile({ encoding: "utf8" }));
+    } finally { await infoHandle.close(); }
+    if (data.token !== token || data.root !== root ||
+        !validLinuxPath(data.original) || data.original === root ||
+        !within(root, data.original) || protectedGitPath(root, data.original)) {
+      throw new Error("Trash entry does not belong to this workspace");
+    }
+    const stored = path.posix.join(dirs.files, token);
+    const stat = await fs.lstat(stored);
+    if ((!stat.isDirectory() && !stat.isFile()) ||
+        stat.isDirectory() !== data.directory ||
+        (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+      throw new Error("Invalid Trash entry type");
+    }
+    const parent = path.posix.dirname(data.original);
+    await safeRemotePath(root, parent);
+    try {
+      await fs.lstat(data.original);
+      throw new Error("Cannot restore over an existing entry");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    if (stat.isDirectory()) {
+      await fs.mkdir(data.original, { mode: 0o700 });
+      try { await fs.rename(stored, data.original); }
+      catch (error) {
+        await fs.rmdir(data.original);
+        throw error;
+      }
+    } else {
+      await fs.link(stored, data.original);
+      await fs.unlink(stored);
+    }
+    await fs.unlink(infoPath);
+    return { path: data.original, directory: data.directory };
+  } finally {
+    trashInFlight.delete(root);
+  }
+}
+
+// git check-ignore does not support :(literal) pathspec magic and -z
+// requires --stdin. Stream exact NUL-separated filenames instead.
+function remoteCheckIgnore(directory, names) {
+  return new Promise((resolve, reject) => {
+    if (names.length > 100 || names.some((name) =>
+        !validEntryName(name))) {
+      reject(new Error("Invalid ignored-file query"));
+      return;
+    }
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const child = execFile("git", [
+      "--no-optional-locks", "-c", "core.fsmonitor=false",
+      "-C", directory, "check-ignore", "--stdin", "-z",
+    ], {
+      encoding: "buffer", shell: false, timeout: 8000,
+      maxBuffer: 256 * 1024,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    }, (error, stdout) => {
+      if (error && error.code !== 1) {
+        finish(error);
+        return;
+      }
+      try {
+        const rows = strictUtf8(Buffer.from(stdout || ""))
+          .split("\0").filter(Boolean);
+        finish(null, new Set(rows));
+      } catch (decodeError) {
+        finish(decodeError);
+      }
+    });
+    child.stdin.on("error", (error) => finish(error));
+    child.stdin.end(names.join("\0") + "\0");
+  });
+}
+
 async function remoteFilesRequest(req) {
   const command = req.type;
   const response = (success, data, error) => emit("O", JSON.stringify({
@@ -475,7 +726,7 @@ async function remoteFilesRequest(req) {
       throw new Error("Missing request identifier");
     }
     if (!["herdr_fs_list", "herdr_fs_read", "herdr_fs_write", "herdr_fs_create",
-          "herdr_fs_entry"].includes(command)) {
+          "herdr_fs_entry", "herdr_fs_trash", "herdr_fs_restore"].includes(command)) {
       throw new Error("Unsupported filesystem operation");
     }
     if (command === "herdr_fs_write") {
@@ -490,10 +741,20 @@ async function remoteFilesRequest(req) {
       response(true, await remoteEntry(req));
       return;
     }
+    if (command === "herdr_fs_trash") {
+      response(true, await guardedTrash(req));
+      return;
+    }
+    if (command === "herdr_fs_restore") {
+      response(true, await restoreTrash(req));
+      return;
+    }
     const selected = await safeRemotePath(req.root, req.path);
     if (command === "herdr_fs_list") {
       const entries = await fs.readdir(selected, { withFileTypes: true });
       const sorted = entries
+        .filter((entry) => entry.name !== ".git" &&
+          !entry.name.startsWith(".herdr-save-"))
         .map((entry) => ({
           name: entry.name,
           kind: entry.isDirectory() ? "directory" :
@@ -502,9 +763,30 @@ async function remoteFilesRequest(req) {
         .sort((a, b) => (a.kind === "directory" ? 0 : 1) -
                          (b.kind === "directory" ? 0 : 1) ||
                          a.name.localeCompare(b.name));
+      const ignored = new Set(sorted.filter((entry) =>
+        entry.name.startsWith(".")).map((entry) => entry.name));
+      // Check ignored state in bounded batches, without running user shell.
+      // Outside a Git repository, hidden-file filtering still behaves
+      // consistently and an unavailable Git command does not break Files.
+      for (let start = 0; start < sorted.length; start += 100) {
+        const group = sorted.slice(start, start + 100);
+        try {
+          const ignoredNames = await remoteCheckIgnore(
+            selected, group.map((entry) => entry.name),
+          );
+          for (const name of ignoredNames) ignored.add(name);
+        } catch {
+          // No git repository / no ignored names; never fail filesystem UI.
+        }
+      }
+      const showIgnored = req.showIgnored === true;
+      const visible = sorted.filter((entry) =>
+        showIgnored || !ignored.has(entry.name)).map((entry) => ({
+        ...entry, ignored: ignored.has(entry.name),
+      }));
       response(true, {
-        path: selected, entries: sorted.slice(0, MAX_REMOTE_ENTRIES),
-        truncated: sorted.length > MAX_REMOTE_ENTRIES,
+        path: selected, entries: visible.slice(0, MAX_REMOTE_ENTRIES),
+        truncated: visible.length > MAX_REMOTE_ENTRIES,
       });
     } else {
       const stat = await fs.stat(selected);
@@ -761,11 +1043,12 @@ function parseGitStashes(output) {
   const rows = strictUtf8(output).split("\n").filter(Boolean);
   const stashes = rows.map((row) => {
     const parts = row.split("\0");
-    if (parts.length !== 2 || !/^stash@\{\d+\}$/.test(parts[0]) ||
-        parts[1].length > 2048 || /[\x00-\x1f\x7f]/.test(parts[1])) {
+    if (parts.length !== 3 || !/^stash@\{\d+\}$/.test(parts[0]) ||
+        !/^[a-f0-9]{40,64}$/.test(parts[1]) ||
+        parts[2].length > 2048 || /[\x00-\x1f\x7f]/.test(parts[2])) {
       throw new Error("Invalid Git stash record");
     }
-    return { name: parts[0], message: parts[1] };
+    return { name: parts[0], oid: parts[1], message: parts[2] };
   });
   return { stashes };
 }
@@ -794,7 +1077,7 @@ async function remoteGit(req) {
       runGitListing(toplevel, ["for-each-ref",
         "--format=%(refname:short)", "refs/tags"], 10, MAX_GIT_TAGS),
       runGitListing(toplevel, ["stash", "list",
-        "--format=%gd%x00%gs"], 10, MAX_GIT_STASHES),
+        "--format=%gd%x00%H%x00%gs"], 10, MAX_GIT_STASHES),
       runGitListing(toplevel, ["for-each-ref",
         "--format=%(HEAD)%00%(refname)%00%(upstream:short)%00%(upstream:track)%00%(objectname:short)%00%(subject)",
         "refs/heads", "refs/remotes", "refs/tags"], 10, MAX_GIT_REF_DETAILS),
@@ -903,6 +1186,12 @@ const GIT_MUTATIONS = [
   "herdr_git_stage", "herdr_git_unstage", "herdr_git_commit",
   "herdr_git_create_branch", "herdr_git_switch_branch",
   "herdr_git_stage_all", "herdr_git_unstage_all",
+  "herdr_git_stash_push", "herdr_git_stash_apply",
+  "herdr_git_stash_pop", "herdr_git_stash_drop",
+  "herdr_git_fetch", "herdr_git_pull", "herdr_git_push",
+  "herdr_git_worktree_add", "herdr_git_worktree_remove",
+  "herdr_git_worktree_prune",
+  "herdr_git_discard",
 ];
 
 async function checkGitIndexRequest(req, toplevel) {
@@ -1058,6 +1347,192 @@ async function checkedBulkPaths(req, toplevel, stage) {
   return entries.map((entry) => ":(literal)" + entry.path);
 }
 
+async function assertExactReviewedStatus(req, toplevel) {
+  if (!Array.isArray(req.expectedFiles) || req.expectedFiles.length === 0 ||
+      req.expectedFiles.length > MAX_GIT_LIST) {
+    throw new Error("Action requires a complete, nonempty reviewed Git status");
+  }
+  const listing = await runGitListing(toplevel, [
+    "status", "--porcelain=v1", "-z", "--no-renames",
+    "--untracked-files=all", "--ignore-submodules=all",
+  ], 0, MAX_GIT_LIST);
+  const actual = parseGitEntries(listing.output);
+  if (listing.truncated || actual.truncated ||
+      actual.entries.length !== req.expectedFiles.length) {
+    throw new Error("Conflict: Git status changed. Refresh before writing");
+  }
+  for (let i = 0; i < actual.entries.length; i++) {
+    const a = actual.entries[i], e = req.expectedFiles[i];
+    if (!e || e.path !== a.path ||
+        e.index !== a.index || e.worktree !== a.worktree) {
+      throw new Error("Conflict: Git status changed. Refresh before writing");
+    }
+  }
+}
+async function ensureCleanForStash(toplevel) {
+  const status = await runGitListing(toplevel, [
+    "status", "--porcelain=v1", "-z", "--no-renames",
+    "--untracked-files=all",
+  ], 0, 1);
+  if (status.output.length > 0 || status.truncated) {
+    throw new Error("Apply/Pop requires a clean worktree and index");
+  }
+}
+async function verifySelectedStash(req, toplevel) {
+  if (typeof req.stash !== "string" ||
+      !/^stash@\{(?:0|[1-9][0-9]{0,2})\}$/.test(req.stash) ||
+      !/^[a-f0-9]{40,64}$/.test(req.expectedStashOid || "")) {
+    throw new Error("Missing or invalid stash revision; refresh first");
+  }
+  const actual = strictUtf8(await runGit(toplevel, [
+    "rev-parse", "--verify", req.stash + "^{commit}",
+  ])).trim();
+  if (actual !== req.expectedStashOid) {
+    throw new Error("Conflict: stash changed. Refresh before writing");
+  }
+}
+
+// Never execute Git remote helpers such as ext::, local file transports,
+// hooks, forced updates or a user-defined shell. Only a single explicit
+// configured remote is contacted for each command.
+async function gitNetworkDestination(toplevel, branch, requireTracking) {
+  const remoteConfig = await runGit(toplevel, [
+    "config", "--get", "branch." + branch + ".remote",
+  ]).then((bytes) => strictUtf8(bytes).trim()).catch(() => "");
+  const remotes = strictUtf8(await runGit(toplevel, ["remote"]))
+    .split("\n").map((name) => name.trim()).filter(Boolean);
+  const remote = remoteConfig || (remotes.includes("origin") ? "origin" : remotes[0]);
+  if (!remote || !remotes.includes(remote) ||
+      !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,119}$/.test(remote)) {
+    throw new Error("No safe configured Git remote");
+  }
+  const url = strictUtf8(await runGit(toplevel, [
+    "remote", "get-url", remote,
+  ])).trim();
+  if (!(url.startsWith("https://") ||
+        url.startsWith("ssh://") ||
+        /^git@[a-zA-Z0-9.-]+:[a-zA-Z0-9._/-]+$/.test(url))) {
+    throw new Error("Remote URL uses an unsupported or unsafe transport");
+  }
+  let mergeRef = await runGit(toplevel, [
+    "config", "--get", "branch." + branch + ".merge",
+  ]).then((bytes) => strictUtf8(bytes).trim()).catch(() => "");
+  if (!mergeRef) {
+    if (requireTracking) throw new Error("Pull requires an upstream tracking branch");
+    mergeRef = "refs/heads/" + branch;
+  }
+  if (!/^refs\/heads\/[a-zA-Z0-9][a-zA-Z0-9._/-]{0,119}$/.test(mergeRef) ||
+      mergeRef.includes("..") || mergeRef.includes("//")) {
+    throw new Error("Invalid configured upstream branch");
+  }
+  return { remote, mergeRef, tracking: Boolean(remoteConfig) };
+}
+
+async function guardedNetworkAction(req, toplevel) {
+  if (!req.expectedBranch || !req.expectedHead) {
+    throw new Error("Git network actions require a checked out branch");
+  }
+  if (!["herdr_git_fetch", "herdr_git_pull", "herdr_git_push"].includes(req.type)) {
+    throw new Error("Unsupported Git network operation");
+  }
+  const branch = validatedBranchName(req.expectedBranch);
+  const destination = await gitNetworkDestination(
+    toplevel, branch, req.type === "herdr_git_pull",
+  );
+  const base = [
+    "-c", "protocol.ext.allow=never",
+    "-c", "protocol.file.allow=never",
+    "-c", "credential.helper=",
+  ];
+  if (req.type === "herdr_git_fetch") {
+    await runGitMutation(toplevel, [
+      ...base, "fetch", "--no-tags", destination.remote,
+    ]);
+  } else if (req.type === "herdr_git_pull") {
+    await ensureCleanForStash(toplevel);
+    await runGitMutation(toplevel, [
+      ...base, "pull", "--ff-only", "--no-rebase",
+      destination.remote, destination.mergeRef,
+    ]);
+  } else {
+    await runGitMutation(toplevel, [
+      ...base, "push", "--porcelain",
+      ...(destination.tracking ? [] : ["--set-upstream"]),
+      destination.remote, "HEAD:" + destination.mergeRef,
+    ]);
+  }
+}
+
+async function guardedWorktreeAction(req, toplevel) {
+  const root = await fs.realpath(req.root);
+  if (root !== toplevel || root === "/") {
+    throw new Error("Worktree actions require an agent at the repository root");
+  }
+  const base = root + ".worktrees";
+  const verb = req.type;
+  if (verb === "herdr_git_worktree_prune") {
+    await runGitMutation(toplevel, ["worktree", "prune"]);
+    return;
+  }
+  if (verb === "herdr_git_worktree_add") {
+    const branch = validatedBranchName(req.branch);
+    if (req.newBranch !== false && req.newBranch !== true) {
+      throw new Error("Invalid worktree branch-creation mode");
+    }
+    if (!req.newBranch) {
+      await runGit(toplevel, [
+        "show-ref", "--verify", "refs/heads/" + branch,
+      ]);
+    }
+    try { await fs.mkdir(base, { mode: 0o700 }); }
+    catch (error) { if (error.code !== "EEXIST") throw error; }
+    const stat = await fs.lstat(base);
+    if (!stat.isDirectory() || stat.isSymbolicLink() ||
+        (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
+        (stat.mode & 0o077) !== 0) {
+      throw new Error("Unsafe private worktree parent directory");
+    }
+    const stem = branch.replace(/\//g, "-");
+    let destination = null;
+    for (let i = 0; i < 100; i++) {
+      const candidate = path.posix.join(base,
+        i === 0 ? stem : stem + "-" + (i + 1));
+      try { await fs.lstat(candidate); }
+      catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        destination = candidate;
+        break;
+      }
+    }
+    if (!destination) throw new Error("No available worktree directory name");
+    const args = req.newBranch ?
+      ["worktree", "add", "-b", branch, "--", destination] :
+      ["worktree", "add", "--", destination, branch];
+    await runGitMutation(toplevel, args);
+    return { path: destination };
+  }
+  if (verb === "herdr_git_worktree_remove") {
+    const selected = req.path;
+    if (!validLinuxPath(selected) || !within(base, selected) ||
+        selected === base) {
+      throw new Error("Cannot remove worktree outside the private parent");
+    }
+    const real = await fs.realpath(selected);
+    if (!within(base, real)) {
+      throw new Error("Worktree resolves outside the private parent");
+    }
+    const listing = strictUtf8(await runGit(toplevel,
+      ["worktree", "list", "--porcelain"]));
+    if (!listing.split("\n").some((line) => line === "worktree " + real)) {
+      throw new Error("Worktree is not linked to this repository");
+    }
+    // Git itself rejects removal when the linked worktree is dirty.
+    await runGitMutation(toplevel, ["worktree", "remove", "--", real]);
+    return { path: real };
+  }
+  throw new Error("Unsupported worktree command");
+}
+
 async function remoteGitWrite(req) {
   const { toplevel } = await gitRepository(req.root);
   validateGitRefRequest(req, toplevel);
@@ -1068,6 +1543,7 @@ async function remoteGitWrite(req) {
   try {
     await checkGitRefRequest(req, toplevel);
     const hasStaged = await checkGitIndexRequest(req, toplevel);
+    let trashed = null;
     if (req.type === "herdr_git_stage" || req.type === "herdr_git_unstage") {
       const relative = await selectedGitEntry(req, toplevel);
       const literal = ":(literal)" + relative;
@@ -1086,6 +1562,36 @@ async function remoteGitWrite(req) {
           await runGitMutation(toplevel, ["restore", "--staged", "--", literal]);
         }
       }
+    } else if (req.type === "herdr_git_discard") {
+      if (typeof req.staged !== "boolean") {
+        throw new Error("Discard requires a selected Git side");
+      }
+      const relative = await selectedGitEntry(req, toplevel);
+      const target = path.posix.join(toplevel, relative);
+      const literal = ":(literal)" + relative;
+      if (req.expectedIndex === "?" && req.expectedWorktree === "?") {
+        if (req.staged) throw new Error("Untracked entries cannot be discarded from index");
+        // Recoverable Trash replaces permanent git clean -f.
+        trashed = await guardedTrash({ root: req.root, path: target });
+      } else if (req.staged) {
+        if (req.expectedIndex === " " || req.expectedIndex === "?") {
+          throw new Error("No staged change to discard");
+        }
+        if (req.expectedIndex === "A") {
+          await runGitMutation(toplevel, ["rm", "-f", "-q", "--", literal]);
+        } else if (req.expectedHead) {
+          await runGitMutation(toplevel, [
+            "restore", "--source=HEAD", "--staged", "--worktree", "--", literal,
+          ]);
+        } else {
+          throw new Error("No HEAD available to restore this staged file");
+        }
+      } else {
+        if (req.expectedWorktree === " ") {
+          throw new Error("No unstaged change to discard");
+        }
+        await runGitMutation(toplevel, ["restore", "--worktree", "--", literal]);
+      }
     } else if (req.type === "herdr_git_stage_all" ||
                req.type === "herdr_git_unstage_all") {
       const stage = req.type === "herdr_git_stage_all";
@@ -1097,6 +1603,33 @@ async function remoteGitWrite(req) {
       } else {
         await runGitMutation(toplevel, ["restore", "--staged", "--", ...paths]);
       }
+    } else if (req.type === "herdr_git_stash_push") {
+      if (req.expectedHead === null) {
+        throw new Error("Stashing requires an existing commit");
+      }
+      if (typeof req.message !== "string" ||
+          req.message.trim() !== req.message ||
+          req.message.length < 1 || req.message.length > 120 ||
+          /[\x00-\x1f\x7f]/.test(req.message)) {
+        throw new Error("Invalid stash message");
+      }
+      await assertExactReviewedStatus(req, toplevel);
+      await runGitMutation(toplevel, [
+        "stash", "push", "--include-untracked", "-m", req.message,
+      ]);
+    } else if (["herdr_git_stash_apply", "herdr_git_stash_pop",
+                "herdr_git_stash_drop"].includes(req.type)) {
+      await verifySelectedStash(req, toplevel);
+      const verb = req.type.replace("herdr_git_stash_", "");
+      if (verb !== "drop") {
+        await ensureCleanForStash(toplevel);
+      }
+      await runGitMutation(toplevel, ["stash", verb, "-q", req.stash]);
+    } else if (["herdr_git_fetch", "herdr_git_pull",
+                "herdr_git_push"].includes(req.type)) {
+      await guardedNetworkAction(req, toplevel);
+    } else if (req.type.startsWith("herdr_git_worktree_")) {
+      await guardedWorktreeAction(req, toplevel);
     } else if (req.type === "herdr_git_commit") {
       if (!req.expectedBranch) {
         throw new Error("Cannot commit from a detached HEAD");
@@ -1144,7 +1677,10 @@ async function remoteGitWrite(req) {
     } else {
       throw new Error("Unsupported remote Git write");
     }
-    return { toplevel, operation: req.type, ...await gitRefState(toplevel) };
+    return {
+      toplevel, operation: req.type, ...await gitRefState(toplevel),
+      ...(trashed ? { trashToken: trashed.token, trashedPath: trashed.path } : {}),
+    };
   } finally {
     gitWriteInFlight.delete(toplevel);
   }
@@ -1208,7 +1744,9 @@ function inputLine() {
                         request.type === "herdr_fs_read" ||
                         request.type === "herdr_fs_write" ||
                         request.type === "herdr_fs_create" ||
-                        request.type === "herdr_fs_entry")) {
+                        request.type === "herdr_fs_entry" ||
+                        request.type === "herdr_fs_trash" ||
+                        request.type === "herdr_fs_restore")) {
           void remoteFilesRequest(request);
         } else if (request && (request.type === "herdr_git_snapshot" ||
                                request.type === "herdr_git_diff" ||

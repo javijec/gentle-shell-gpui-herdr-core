@@ -34,6 +34,20 @@ pub enum RefsEvent {
     OpenAgent(PathBuf),
     /// Herdr uses the same Branches UI; its owner executes the guarded switch.
     SwitchRemoteBranch(String),
+    RemoteStash { name: String, action: StashAction },
+    RemoteWorktree {
+        action: RemoteWorktreeAction,
+        branch: Option<String>,
+        path: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteWorktreeAction {
+    AddExisting,
+    AddNew,
+    Remove,
+    Prune,
 }
 
 #[derive(Clone, PartialEq)]
@@ -86,6 +100,7 @@ pub struct RefsView {
     remote_refs: Option<RefsSnapshot>,
     remote_worktrees: Vec<RemoteWorktreeDisplay>,
     remote_pending_branch: Option<String>,
+    remote_pending_stash: Option<(String, StashAction)>,
     filter: Entity<InputState>,
     collapsed: HashSet<Section>,
     /// The list's rows, rebuilt when the refs, filter or collapsed sections change.
@@ -116,6 +131,7 @@ impl RefsView {
             remote_refs: None,
             remote_worktrees: Vec::new(),
             remote_pending_branch: None,
+            remote_pending_stash: None,
             filter,
             collapsed: HashSet::new(),
             lines: Rc::new(Vec::new()),
@@ -164,6 +180,7 @@ impl RefsView {
         self.remote_refs = refs;
         self.remote_worktrees = worktrees;
         self.remote_pending_branch = None;
+        self.remote_pending_stash = None;
         self.relayout(cx);
         cx.notify();
     }
@@ -173,6 +190,15 @@ impl RefsView {
     ) {
         if self.remote {
             self.remote_pending_branch = name;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn mark_remote_stash(
+        &mut self, action: Option<(String, StashAction)>, cx: &mut Context<Self>,
+    ) {
+        if self.remote {
+            self.remote_pending_stash = action;
             cx.notify();
         }
     }
@@ -242,7 +268,7 @@ impl RefsView {
             let typed = self.filter.read(cx).value();
             let typed = typed.trim();
             let hit = |text: &str| matches_filter(typed, text);
-            if !self.remote && could_be_branch(typed)
+            if could_be_branch(typed)
                 && !refs.branches.iter().any(|b| b.name == typed)
             {
                 lines.push(Line::NewWorktree);
@@ -505,11 +531,39 @@ impl RefsView {
                 } else {
                     ""
                 };
+                let name = tree.path.clone();
+                let prunable = tree.prunable;
+                let weak = cx.entity().downgrade();
                 return row(
                     SharedString::from(format!("remote-worktree-{ix}")),
                     IconName::FolderGit, ui::muted(), title, ui::fg(),
                     Some(detail(format!("{}{}", tree.path, status))),
-                ).into_any_element();
+                )
+                .context_menu(move |menu, _, _| {
+                    let weak_action = weak.clone();
+                    let name = name.clone();
+                    let operation = if prunable {
+                        RemoteWorktreeAction::Prune
+                    } else {
+                        RemoteWorktreeAction::Remove
+                    };
+                    menu.item(PopupMenuItem::new(if prunable {
+                        "Prune stale worktree"
+                    } else {
+                        "Remove clean worktree"
+                    })
+                        .icon(Icon::new(IconName::Trash))
+                        .on_click(move |_, _, cx| {
+                            let _ = weak_action.update(cx, |_, cx| {
+                                cx.emit(RefsEvent::RemoteWorktree {
+                                    action: operation,
+                                    branch: None,
+                                    path: Some(name.clone()),
+                                });
+                            });
+                        }))
+                })
+                .into_any_element();
             }
             Line::NewWorktree => return self.render_new_worktree(cx),
         };
@@ -592,11 +646,39 @@ impl RefsView {
 
     fn render_stash(&self, stash: &str, stash_message: &str, cx: &mut Context<Self>) -> AnyElement {
         if self.remote {
+            let name = stash.to_owned();
+            let weak = cx.entity().downgrade();
+            let pending = self.remote_pending_stash.as_ref()
+                .is_some_and(|(candidate, _)| candidate == stash);
             return row(
                 SharedString::from(format!("refs-stash-{stash}")),
                 IconName::Archive, ui::muted(), stash_message.to_owned(), ui::fg(),
-                Some(detail(stash.to_owned())),
-            ).into_any_element();
+                Some(if pending {
+                    ui::chip("Repeat action to confirm", ui::warning())
+                        .into_any_element()
+                } else {
+                    detail(stash.to_owned()).into_any_element()
+                }),
+            )
+            .context_menu(move |menu, _, _| {
+                let action_item = |label: &'static str, icon: IconName, action: StashAction| {
+                    let weak = weak.clone();
+                    let name = name.clone();
+                    PopupMenuItem::new(label)
+                        .icon(Icon::new(icon))
+                        .on_click(move |_, _, cx| {
+                            let _ = weak.update(cx, |_, cx| {
+                                cx.emit(RefsEvent::RemoteStash {
+                                    name: name.clone(), action,
+                                });
+                            });
+                        })
+                };
+                menu.item(action_item("Apply", IconName::Download, StashAction::Apply))
+                    .item(action_item("Pop", IconName::Download, StashAction::Pop))
+                    .item(action_item("Drop", IconName::Trash, StashAction::Drop))
+            })
+            .into_any_element();
         }
         let (name, message) = (stash.to_string(), stash_message.to_string());
         let weak = cx.entity().downgrade();
@@ -744,7 +826,14 @@ impl RefsView {
         )
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, window, cx| {
-            this.new_worktree(branch.clone(), true, window, cx)
+            if this.remote {
+                cx.emit(RefsEvent::RemoteWorktree {
+                    action: RemoteWorktreeAction::AddNew,
+                    branch: Some(branch.clone()), path: None,
+                });
+            } else {
+                this.new_worktree(branch.clone(), true, window, cx)
+            }
         }))
         .into_any_element()
     }
@@ -802,6 +891,8 @@ impl RefsView {
                 == Some(name.as_str()) && !branch.current).then(|| {
                 ui::chip("Click again to confirm", ui::warning()).into_any_element()
             });
+            let worktree_branch = name.clone();
+            let weak = cx.entity().downgrade();
             return branch_row(
                 SharedString::from(format!("remote-ref-branch-{name}")),
                 BranchDisplay::from_local(branch), confirmation,
@@ -810,6 +901,20 @@ impl RefsView {
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(RefsEvent::SwitchRemoteBranch(name.clone()));
             }))
+            .context_menu(move |menu, _, _| {
+                let name = worktree_branch.clone();
+                let weak = weak.clone();
+                menu.item(PopupMenuItem::new("Create remote worktree")
+                    .icon(Icon::new(IconName::FolderPlus))
+                    .on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |_, cx| {
+                            cx.emit(RefsEvent::RemoteWorktree {
+                                action: RemoteWorktreeAction::AddExisting,
+                                branch: Some(name.clone()), path: None,
+                            });
+                        });
+                    }))
+            })
             .into_any_element();
         }
         let name = branch.name.clone();

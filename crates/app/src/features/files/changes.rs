@@ -45,6 +45,8 @@ pub enum ChangesEvent {
     RemoteOpenDiff(String),
     RemoteCommit(String),
     RemoteBulkStage { stage: bool },
+    RemoteStashPush(String),
+    RemoteDiscard { path: String, index: char, worktree: char, staged: bool },
 }
 
 #[derive(Clone, PartialEq)]
@@ -501,7 +503,11 @@ impl ChangesView {
                 .on_ok(move |_, _, cx| {
                     let message = message.read(cx).value().to_string();
                     let _ = this.update(cx, |this, cx| {
-                        this.git_op(move |top| git::stash_push(top, &message), cx)
+                        if this.remote {
+                            cx.emit(ChangesEvent::RemoteStashPush(message));
+                        } else {
+                            this.git_op(move |top| git::stash_push(top, &message), cx)
+                        }
                     });
                     true
                 })
@@ -718,7 +724,8 @@ impl ChangesView {
                     .xsmall()
                     .icon(Icon::new(IconName::Archive))
                     .tooltip("Stash all changes")
-                    .disabled(!has_changes || self.remote)
+                    .disabled(!has_changes || (self.remote
+                        && (!self.remote_writable || self.remote_busy)))
                     .on_click(cx.listener(|this, _, window, cx| this.open_stash(window, cx))),
             )
     }
@@ -913,12 +920,30 @@ impl ChangesView {
                         }),
                 );
             let path = entry.path.clone();
+            let menu_entry = entry.clone();
+            let discard_weak = cx.entity().downgrade();
+            let writable = self.remote_writable && !self.remote_busy;
             return change_row(
                 SharedString::from(id), &entry.path, badge, selected, indent, control,
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.click_entry(&path, side, cx)
             }))
+            .context_menu(move |menu, _, _| {
+                let entry = menu_entry.clone();
+                let weak = discard_weak.clone();
+                menu.item(PopupMenuItem::new("Discard changes…")
+                    .icon(Icon::new(IconName::Undo2))
+                    .disabled(!writable || entry.kind == EntryKind::Conflict)
+                    .on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |_, cx| {
+                            cx.emit(ChangesEvent::RemoteDiscard {
+                                path: entry.path.clone(), index: entry.index,
+                                worktree: entry.worktree, staged: side == Side::Staged,
+                            });
+                        });
+                    }))
+            })
             .into_any_element();
         }
         let id = format!("change-{side:?}-{}", entry.path);
