@@ -131,16 +131,17 @@ pub fn create_shell_in(machine: Option<&str>, cwd: Option<&str>) -> Result<Strin
         return Err("Invalid remote working directory".into());
     }
     let mut client = client()?;
-    let reply = client.call(
-        "terminal.run",
-        json!({
-            "on": machine,
-            "cwd": cwd,
-            "no_parent": true,
-            "wait": false,
-            "size": {"cols": 80, "rows": 24},
-        }),
-    ).map_err(|e| e.to_string())?;
+    let mut params = json!({
+        "on": machine,
+        "no_parent": true,
+        "wait": false,
+        "size": {"cols": 80, "rows": 24},
+    });
+    if let Some(cwd) = cwd {
+        params["cwd"] = json!(cwd);
+    }
+    let reply = client.call("terminal.run", params)
+        .map_err(|e| e.to_string())?;
     reply["address"].as_str()
         .filter(|address| !address.is_empty())
         .map(str::to_string)
