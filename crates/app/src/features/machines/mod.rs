@@ -8,6 +8,7 @@ mod view;
 pub use directory_picker::{RemoteDirectoryEvent, RemoteDirectoryPicker};
 
 use gpui_kit::*;
+use gpui_kit::component::input::InputState;
 
 pub enum MachinesEvent {
     Close,
@@ -24,6 +25,9 @@ pub struct MachinesView {
     busy: bool,
     error: Option<String>,
     info: Option<String>,
+    show_add_form: bool,
+    add_target: Entity<InputState>,
+    add_name: Entity<InputState>,
     _load: Task<()>,
     _action: Task<()>,
 }
@@ -31,13 +35,20 @@ pub struct MachinesView {
 impl EventEmitter<MachinesEvent> for MachinesView {}
 
 impl MachinesView {
-    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let add_target = cx.new(|cx| InputState::new(window, cx)
+            .placeholder("SSH Host or user@host[:port]"));
+        let add_name = cx.new(|cx| InputState::new(window, cx)
+            .placeholder("Optional display name"));
         let mut this = Self {
             snapshot: None,
             loading: false,
             busy: false,
             error: None,
             info: None,
+            show_add_form: false,
+            add_target,
+            add_name,
             _load: Task::ready(()),
             _action: Task::ready(()),
         };
@@ -47,6 +58,71 @@ impl MachinesView {
             this.refresh(cx);
         }
         this
+    }
+
+    /// Open Machines directly on the registration form when the header +
+    /// was used. This is never a new-agent operation.
+    pub fn new_for_registration(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::new(window, cx);
+        view.begin_add_machine(window, cx);
+        view
+    }
+
+    fn begin_add_machine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::features::terminal::herdr_enabled() || self.busy {
+            return;
+        }
+        self.show_add_form = true;
+        self.error = None;
+        self.add_target.update(cx, |target, cx| target.focus(window, cx));
+        cx.notify();
+    }
+
+    fn cancel_add_machine(&mut self, cx: &mut Context<Self>) {
+        if !self.busy {
+            self.show_add_form = false;
+            self.error = None;
+            cx.notify();
+        }
+    }
+
+    /// Register an SSH machine in Herdr. No agent or terminal is launched.
+    fn submit_add_machine(&mut self, cx: &mut Context<Self>) {
+        if !crate::features::terminal::herdr_enabled()
+            || !self.show_add_form || self.busy
+        {
+            return;
+        }
+        let target = self.add_target.read(cx).value().trim().to_owned();
+        let name = self.add_name.read(cx).value().trim().to_owned();
+        if target.is_empty() {
+            self.error = Some("Enter an SSH target, for example dietpi@javipi.".into());
+            cx.notify();
+            return;
+        }
+        self.busy = true;
+        self.error = None;
+        self.info = Some(format!("Registering {target} in Herdr..."));
+        let job = cx.background_executor().spawn(async move {
+            model::add_machine(&target, (!name.is_empty()).then_some(name.as_str()))
+        });
+        self._action = cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |this, cx| {
+                this.busy = false;
+                this.info = None;
+                match result {
+                    Ok(()) => {
+                        this.show_add_form = false;
+                        this.info = Some("Machine added to Herdr Core.".into());
+                        this.refresh(cx);
+                    }
+                    Err(error) => this.error = Some(error),
+                }
+                cx.notify();
+            });
+        });
+        cx.notify();
     }
 
     /// Background discovery must never block UI painting or key handling.
