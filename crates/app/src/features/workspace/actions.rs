@@ -206,8 +206,8 @@ impl Workspace {
         self.toggle_sidebar(cx);
     }
 
-    /// Ctrl+B controls the left Machines navigator only. The right-hand
-    /// Files dock is independent and keeps its tree subscriptions alive.
+    /// Ctrl+B switches the left Machines dock between its full tree and
+    /// a persistent 48px icon rail. Files on the right is independent.
     pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
         self.schedule_save(cx);
