@@ -96,6 +96,10 @@ pub struct SavedState {
     /// original local/remote widths until the user actually drags the edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files_dock_width: Option<f32>,
+    /// Herdr terminal identities intentionally terminated from Machines.
+    /// Persisted because terminal.list can retain finished history records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terminated_herdr_sessions: Vec<String>,
 }
 
 fn shown() -> bool {
@@ -116,6 +120,7 @@ impl Default for SavedState {
             sidebar: true,
             machines_dock_width: default_machines_dock_width(),
             files_dock_width: None,
+            terminated_herdr_sessions: Vec::new(),
         }
     }
 }
