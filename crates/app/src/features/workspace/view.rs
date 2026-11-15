@@ -415,13 +415,13 @@ impl Workspace {
                 .gap_3()
                 .text_sm()
                 .text_color(ui::muted())
-                .child("No agents or panels selected")
+                .child("Select an existing session in Machines, or use + to create one.")
                 .child(
                     Button::new("empty-new-tab")
                         .primary()
                         .small()
                         .icon(Icon::new(IconName::Plus))
-                        .label("New local agent")
+                        .label("New Gentle Shell")
                         .on_click(
                             cx.listener(|this, _, window, cx| this.on_new_tab(&NewTab, window, cx)),
                         ),
