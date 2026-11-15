@@ -177,10 +177,9 @@ impl Workspace {
                         PaneKind::Terminal => "Terminal",
                         _ => continue,
                     };
-                    let address = pane.herdr_address.clone().or_else(|| {
-                        pane.item.terminal_address.as_ref()
-                            .and_then(|get| get(cx))
-                    });
+                    // The title poll keeps this identity current. Do not
+                    // read a session entity during the GPUI render pass.
+                    let address = pane.herdr_address.clone();
                     let key = if crate::features::terminal::herdr_enabled() {
                         machine_key(pane.agent_target.as_ref(), address.as_deref())
                             .unwrap_or_else(|| "local".into())
