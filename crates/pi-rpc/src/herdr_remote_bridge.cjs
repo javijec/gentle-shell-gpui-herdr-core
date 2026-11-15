@@ -466,6 +466,14 @@ async function transferBegin(req) {
   const handle = await fs.open(temp,
     fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY |
     fsConstants.O_NOFOLLOW, 0o600);
+  // Re-check after the last await: concurrent begin RPCs can race during
+  // filesystem I/O. Never allow two replacements to share a destination.
+  if (uploads.size >= MAX_TRANSFER_UPLOADS ||
+      (replace && writeInFlight.has(destination))) {
+    await handle.close();
+    await fs.unlink(temp);
+    throw new Error("Upload capacity reached or destination already being edited");
+  }
   if (replace) writeInFlight.add(destination);
   uploads.set(id, { handle, temp, destination, parent, root: actualRoot,
     sha256: req.sha256, size, offset: 0, busy: false, original,
