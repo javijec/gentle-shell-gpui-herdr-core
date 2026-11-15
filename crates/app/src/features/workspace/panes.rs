@@ -477,20 +477,19 @@ impl Workspace {
                                 .find(|(id, ..)| *id == focused)
                                 .is_some_and(|(_, w, h)| fits_split(axis, w, h))
                         });
-                        if can_split {
-                            if let Some((_, focused, axis)) = originating
-                                && let Some(pane) = this.new_factory_pane_restored(
-                                    PaneKind::Terminal, local_cwd,
-                                    Some(address.clone()), window, cx,
-                                )
-                            {
-                                if let Some(tab) = this.tab_mut() {
-                                    tab.tree.split(&focused, pane, axis);
-                                }
-                                this.focus_pane(pane, window, cx);
-                                this.schedule_save(cx);
-                                return;
+                        if can_split
+                            && let Some((_, focused, axis)) = originating
+                            && let Some(pane) = this.new_factory_pane_restored(
+                                PaneKind::Terminal, local_cwd,
+                                Some(address.clone()), window, cx,
+                            )
+                        {
+                            if let Some(tab) = this.tab_mut() {
+                                tab.tree.split(&focused, pane, axis);
                             }
+                            this.focus_pane(pane, window, cx);
+                            this.schedule_save(cx);
+                            return;
                         }
                         this.open_herdr_terminal(address, window, cx);
                     }
