@@ -126,6 +126,38 @@ impl<'a> BranchDisplay<'a> {
     }
 }
 
+/// One ref: icon, name, and an optional trailing detail.
+pub(super) fn ref_row(
+    id: SharedString,
+    icon: IconName,
+    icon_color: Hsla,
+    title: String,
+    title_color: Hsla,
+    trailing: Option<AnyElement>,
+) -> Stateful<Div> {
+    h_flex()
+        .id(id)
+        .h(px(26.))
+        .mx_1p5()
+        .pl(px(24.))
+        .pr_1p5()
+        .gap_2()
+        .rounded_md()
+        .hover(|s| s.bg(ui::surface_hover()))
+        .child(Icon::new(icon).xsmall().text_color(icon_color))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(13.))
+                .text_color(title_color)
+                .child(title),
+        )
+        .children(trailing)
+}
+
+
 pub(super) fn branch_row(
     id: SharedString, branch: BranchDisplay<'_>,
     action: Option<AnyElement>,
