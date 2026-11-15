@@ -437,6 +437,68 @@ impl Workspace {
         }
     }
 
+    /// Start a terminal on the selected remote machine, not on Windows.
+    /// Shell creation is asynchronous; the returned Herdr address is attached
+    /// exactly once. No replacement Pi agent is created.
+    pub(super) fn open_shell_on_selected_machine(
+        &mut self,
+        split_axis: Option<SplitAxis>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((session, machine, root)) = self.selected_remote_files(cx) else {
+            window.push_notification(Notification::info(
+                "Select a connected remote agent to open its terminal.",
+            ), cx);
+            return;
+        };
+        if session.read(cx).remote_fs_process().is_none() {
+            window.push_notification(Notification::info(
+                "The selected remote agent is not connected.",
+            ), cx);
+            return;
+        }
+        let originating = split_axis.and_then(|axis| {
+            self.tab().map(|tab| (tab.id, tab.focused, axis))
+        });
+        let local_cwd = self.active_cwd(cx);
+        let task = cx.background_executor().spawn(async move {
+            machine_model::create_shell_in(Some(&machine), Some(&root))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(address) => {
+                        let can_split = originating.is_some_and(|(tab_id, focused, axis)| {
+                            this.tab().is_some_and(|tab| {
+                                tab.id == tab_id && tab.tree.contains(&focused)
+                            }) && this.pane_sizes(window).into_iter()
+                                .find(|(id, ..)| *id == focused)
+                                .is_some_and(|(_, w, h)| fits_split(axis, w, h))
+                        });
+                        if can_split
+                            && let Some((_, focused, axis)) = originating
+                            && let Some(pane) = this.new_factory_pane_restored(
+                                PaneKind::Terminal, local_cwd,
+                                Some(address.clone()), window, cx,
+                            )
+                        {
+                            if let Some(tab) = this.tab_mut() {
+                                tab.tree.split(&focused, pane, axis);
+                            }
+                            this.focus_pane(pane, window, cx);
+                            this.schedule_save(cx);
+                            return;
+                        }
+                        this.open_herdr_terminal(address, window, cx);
+                    }
+                    Err(error) => window.push_notification(Notification::error(error), cx),
+                }
+            });
+        }).detach();
+    }
+
     /// Attach an existing Herdr address as a new GPUI tab without running a
     /// replacement shell. Only available when Herdr is the selected backend.
     pub(super) fn open_herdr_terminal(
@@ -665,8 +727,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(focused) = self.focused_pane() else {
-            let root = self.space().root.clone();
-            self.open_tab(PaneKind::Agent, root, None, None, window, cx);
+            // No focused pane: preserve the active machine exactly as NewTab
+            // does, rather than constructing an implicit Windows agent.
+            self.on_new_tab(&NewTab, window, cx);
             return;
         };
         let (kind, target) = match what {
@@ -681,7 +744,40 @@ impl Workspace {
                 (kind, target)
             }
         };
-        let Some(pane) = self.new_pane(kind, target, None, None, window, cx) else {
+        if self.active_agent_is_remote(cx)
+            && matches!(kind, PaneKind::File | PaneKind::History)
+        {
+            window.push_notification(Notification::info(
+                "Use remote Files or History to open a pane on this Linux agent.",
+            ), cx);
+            return;
+        }
+        if kind == PaneKind::Terminal && self.active_agent_is_remote(cx) {
+            // A remote terminal needs a Herdr terminal.run on its machine;
+            // never silently launch a Windows/local PTY.
+            self.open_shell_on_selected_machine(Some(axis), window, cx);
+            return;
+        }
+        let created = if kind == PaneKind::Agent && self.active_agent_is_remote(cx) {
+            self.selected_remote_files(cx).map(|(_, machine, root)| {
+                self.new_agent_pane(
+                    target,
+                    AgentPaneInit {
+                        agent_target: Some(pi_rpc::AgentTarget::Remote {
+                            machine,
+                            cwd: root,
+                        }),
+                        start_now: true,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                )
+            })
+        } else {
+            self.new_pane(kind, target, None, None, window, cx)
+        };
+        let Some(pane) = created else {
             return;
         };
         let room = self

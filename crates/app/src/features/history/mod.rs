@@ -10,10 +10,107 @@ mod view;
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
+
+use serde_json::{Value, json};
 
 use gpui_kit::*;
 
 use crate::features::git::{self, Commit, Graph, History};
+
+/// Remote history is a read-only query on this same agent's existing Herdr
+/// RPC bridge. Linux paths remain POSIX strings, never passed to Windows Git.
+#[derive(Clone)]
+struct RemoteHistory {
+    machine: String,
+    root: String,
+    process: Arc<pi_rpc::RpcProcess>,
+}
+
+/// Decode the same structured Git history that the native History screen
+/// consumes, with explicit bounds and no fallback to the local repository.
+fn parse_remote_history(data: &Value, root: &str) -> Option<History> {
+    let toplevel = data["toplevel"].as_str()?;
+    if !toplevel.starts_with('/') || toplevel.contains('\\')
+        || (toplevel != root && !toplevel.starts_with(&(root.to_owned() + "/")))
+    {
+        return None;
+    }
+    let raw = data["log"].as_str()?;
+    if raw.len() > 384 * 1024 {
+        return None;
+    }
+    let commits = gentle_core::git::log::parse_log(raw);
+    if commits.len() > 800 {
+        return None;
+    }
+    let total = usize::try_from(data["total"].as_u64()?).ok()?;
+    let branches = data["branches"].as_array()?
+        .iter().map(|value| {
+            let name = value.as_str()?;
+            (!name.is_empty() && name.len() <= 512 &&
+                !name.chars().any(char::is_control))
+                .then(|| name.to_owned())
+        }).collect::<Option<Vec<_>>>()?;
+    if branches.len() > 120 {
+        return None;
+    }
+    let current = data["current"].as_str()
+        .map(str::to_owned);
+    let branch = data["branch"].as_str()
+        .map(str::to_owned);
+    Some(History {
+        commits, total, current, branch, branches,
+        dirty: data["dirty"].as_bool()?,
+    })
+}
+
+#[cfg(test)]
+mod remote_history_tests {
+    use super::parse_remote_history;
+    use serde_json::json;
+
+    #[test]
+    fn remote_history_is_root_scoped_and_uses_the_native_model() {
+        let data = json!({
+            "toplevel": "/srv/workspaces/project/repo",
+            "log": "",
+            "total": 0,
+            "current": "main",
+            "branch": "main",
+            "branches": ["main", "feature/test"],
+            "dirty": false
+        });
+        let parsed = parse_remote_history(&data, "/srv/workspaces/project").unwrap();
+        assert_eq!(parsed.branch.as_deref(), Some("main"));
+        assert_eq!(parsed.branches.len(), 2);
+        assert_eq!(parsed.total, 0);
+        assert!(parse_remote_history(&data, "/srv/workspaces/other").is_none());
+        let mut escaped = data.clone();
+        escaped["toplevel"] = json!("/srv/workspaces/project2");
+        assert!(parse_remote_history(&escaped, "/srv/workspaces/project").is_none());
+        escaped["toplevel"] = json!("C:\\Programacion\\repo");
+        assert!(parse_remote_history(&escaped, "/srv/workspaces/project").is_none());
+    }
+
+    #[test]
+    fn remote_history_rejects_invalid_refs_and_overlong_records() {
+        let mut data = json!({
+            "toplevel": "/srv/p",
+            "log": "",
+            "total": 0,
+            "current": null,
+            "branch": null,
+            "branches": ["main"],
+            "dirty": false
+        });
+        data["branches"] = json!(["bad\nbranch"]);
+        assert!(parse_remote_history(&data, "/srv/p").is_none());
+        data["branches"] = json!(["main"]);
+        data["log"] = json!("x".repeat(384 * 1024 + 1));
+        assert!(parse_remote_history(&data, "/srv/p").is_none());
+    }
+}
 
 /// Commits read at first, and how many more "Earlier history" adds.
 const PAGE: usize = 200;
@@ -31,6 +128,8 @@ enum Line {
 
 pub struct HistoryView {
     toplevel: PathBuf,
+    remote: Option<RemoteHistory>,
+    error: Option<String>,
     /// The branch asked for; `None` follows HEAD.
     branch: Option<String>,
     limit: usize,
@@ -61,6 +160,8 @@ impl HistoryView {
     pub fn new(cwd: PathBuf, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             toplevel: cwd,
+            remote: None,
+            error: None,
             branch: None,
             limit: PAGE,
             history: None,
@@ -79,15 +180,83 @@ impl HistoryView {
         this
     }
 
+    /// Same graph, header and branch picker with a remote Herdr source.
+    pub fn new_remote(
+        machine: String,
+        root: String,
+        process: Arc<pi_rpc::RpcProcess>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self {
+            toplevel: PathBuf::new(),
+            remote: Some(RemoteHistory { machine, root, process }),
+            error: None,
+            branch: None,
+            limit: PAGE,
+            history: None,
+            commits: Rc::new(Vec::new()),
+            graph: Rc::new(Graph::default()),
+            lines: Rc::new(Vec::new()),
+            selected: None,
+            loading: false,
+            now_ms: 0,
+            scroll: UniformListScrollHandle::new(),
+            width: Rc::default(),
+            focus: cx.focus_handle(),
+            _load: Task::ready(()),
+        };
+        this.reload(cx);
+        this
+    }
+
+    pub(super) fn folder_label(&self) -> String {
+        if let Some(remote) = &self.remote {
+            return format!("{} · {}", remote.machine, remote.root);
+        }
+        self.toplevel.file_name().map_or_else(
+            String::new, |name| name.to_string_lossy().into_owned(),
+        )
+    }
+
     /// The tab and pane label: `History · <repository>`.
     pub fn title(&self) -> SharedString {
-        match self.toplevel.file_name() {
-            Some(name) => format!("History · {}", name.to_string_lossy()).into(),
-            None => "History".into(),
-        }
+        format!("History · {}", self.folder_label()).into()
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
+        self.error = None;
+        if let Some(remote) = self.remote.clone() {
+            let branch = self.branch.clone();
+            let limit = self.limit;
+            self.loading = true;
+            self._load = cx.spawn(async move |this, cx| {
+                let reply = remote.process.request(json!({
+                    "type": "herdr_git_history",
+                    "root": remote.root,
+                    "branch": branch,
+                    "limit": limit,
+                })).await;
+                let (history, error) = match reply {
+                    Ok(response) => {
+                        let parsed = parse_remote_history(&response.data, &remote.root);
+                        let error = parsed.is_none()
+                            .then(|| "Invalid remote Git History response".to_owned());
+                        (parsed, error)
+                    }
+                    Err(error) => (None, Some(format!(
+                        "Remote History unavailable on this agent: {error}. Open a new remote agent if it uses an older bridge."
+                    ))),
+                };
+                let _ = this.update(cx, |this, cx| {
+                    this.loading = false;
+                    this.error = error;
+                    this.apply(history.map(|history| (PathBuf::new(), history)));
+                    cx.notify();
+                });
+            });
+            cx.notify();
+            return;
+        }
         let cwd = self.toplevel.clone();
         let branch = self.branch.clone();
         let limit = self.limit;

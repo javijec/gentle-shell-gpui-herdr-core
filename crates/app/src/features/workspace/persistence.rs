@@ -66,6 +66,13 @@ impl Workspace {
         if pane.item.kind == PaneKind::File && pane.path.is_none() {
             return None;
         }
+        // The remote History pane is tied to a living Herdr RPC session;
+        // never rehydrate it through the Windows Git history factory.
+        if pane.item.kind == PaneKind::History
+            && matches!(pane.agent_target.as_ref(), Some(pi_rpc::AgentTarget::Remote { .. }))
+        {
+            return None;
+        }
         Some(SavedPane {
             kind: pane.item.kind,
             cwd: self.pane_cwd(pane, cx),

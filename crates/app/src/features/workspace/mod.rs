@@ -22,6 +22,7 @@ use crate::features::docs::{DocsEvent, DocsView};
 use crate::features::files::{
     FileTreeView, RemoteFilesEvent, RemoteFilesView, RemoteGitDiffView,
 };
+use crate::features::history::HistoryView;
 use crate::features::machines::{
     model as machine_model, MachinesEvent, MachinesView,
     RemoteDirectoryEvent, RemoteDirectoryPicker,
@@ -30,7 +31,8 @@ use crate::features::memory::{MemoryEvent, MemoryView};
 use crate::features::notices::{self, Notices};
 use crate::features::onboarding::{OnboardingEvent, OnboardingView, Probe};
 use crate::features::palette::{
-    Activity, Category, PaletteAction, PaletteEvent, PaletteInput, PaletteView, WorkspaceRow,
+    Activity, Category, PaletteAction, PaletteEvent, PaletteInput, PaletteRemote,
+    PaletteView, WorkspaceRow,
 };
 use crate::features::profiles::{ModelChoice, ProfilesEvent, ProfilesView};
 use crate::features::providers::{ProvidersEvent, ProvidersView};

@@ -1522,6 +1522,42 @@ impl RemoteFilesView {
         cx.notify();
     }
 
+    /// Open the same Changes screen for a remote session as for a local one,
+    /// without ever touching the Windows worktree.
+    /// The architecture-docs screen is a local installer. For a remote
+    /// agent, open its own docs folder instead of reading Windows docs.
+    pub fn show_remote_docs(&mut self, cx: &mut Context<Self>) {
+        self.set_tab(RemoteTab::Files, cx);
+        if self.root != "/" {
+            let docs = format!("{}/docs", self.root.trim_end_matches('/'));
+            self.load_directory(docs, cx);
+        }
+    }
+
+    pub fn show_changes(&mut self, cx: &mut Context<Self>) {
+        self.set_tab(RemoteTab::Changes, cx);
+        if self.git.is_none() {
+            self.refresh_git(cx);
+        }
+    }
+
+    /// A branch chosen from the machine-scoped palette opens the remote
+    /// Branches view. The actual mutation still requires the existing
+    /// second explicit confirmation on the branch row.
+    pub fn select_remote_branch(&mut self, branch: String, cx: &mut Context<Self>) {
+        self.set_tab(RemoteTab::Branches, cx);
+        if self.git.as_ref().is_some_and(|snapshot| {
+            snapshot.branches.iter().any(|item| item.local && item.name == branch)
+        }) {
+            self.git_switch_branch(branch, cx);
+        } else {
+            self.git_feedback = Some(
+                "Refresh remote Branches and select the branch again to confirm.".into(),
+            );
+            cx.notify();
+        }
+    }
+
     fn set_tab(&mut self, tab: RemoteTab, cx: &mut Context<Self>) {
         if self.pane_path.is_some() || self.tab == tab {
             return;

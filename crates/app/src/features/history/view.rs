@@ -109,11 +109,7 @@ impl HistoryView {
         let branches = history.map(|h| h.branches.clone()).unwrap_or_default();
         let shown = self.shown_branch();
         let label = shown.clone().unwrap_or_else(|| "Detached HEAD".into());
-        let folder = self
-            .toplevel
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let folder = self.folder_label();
         let weak = cx.entity().downgrade();
         // The pane header, as the file viewer's: no line under it.
         h_flex()
@@ -406,6 +402,17 @@ impl HistoryView {
                 .text_color(ui::muted())
                 .child(Spinner::new().small().color(ui::muted()))
                 .child("Reading history…")
+                .into_any_element(),
+            Some(None) if self.error.is_some() => v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .py_8()
+                .px_5()
+                .gap_2()
+                .child(Icon::new(IconName::FolderGit).text_color(ui::warning()))
+                .child(div().text_sm().text_color(ui::muted())
+                    .child(self.error.clone().unwrap_or_default()))
                 .into_any_element(),
             Some(None) => state(
                 IconName::FolderGit,

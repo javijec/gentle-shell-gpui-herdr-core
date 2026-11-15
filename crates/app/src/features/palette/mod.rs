@@ -4,6 +4,9 @@
 //! rename, delete, create), files under the workspace root and git branches.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use serde_json::json;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{InputEvent, InputState};
@@ -70,8 +73,12 @@ pub enum PaletteAction {
         pick_folder: bool,
     },
     OpenFile(PathBuf),
+    /// Remote Linux paths are POSIX strings, never Windows paths. Include
+    /// the originating machine/root to reject stale palette selections.
+    OpenRemoteFile { machine: String, root: String, terminal: String, path: String },
     /// Asks for confirmation before running `git switch`.
     SwitchBranch(String),
+    SwitchRemoteBranch { machine: String, root: String, terminal: String, branch: String },
 }
 
 pub enum PaletteEvent {
@@ -127,12 +134,22 @@ pub struct Activity {
     pub needs_you: usize,
 }
 
+#[derive(Clone)]
+pub struct PaletteRemote {
+    pub machine: String,
+    pub root: String,
+    pub terminal: String,
+    pub process: Option<Arc<pi_rpc::RpcProcess>>,
+}
+
 pub struct PaletteInput {
     /// Slash commands of the active agent pane: `(name, description)`.
     pub commands: Vec<(String, String)>,
     pub workspaces: Vec<WorkspaceRow>,
-    /// The current workspace's root, for files and branches.
+    /// The Windows workspace root; not used for filesystem/branch queries
+    /// when a remote source is present.
     pub root: PathBuf,
+    pub remote: Option<PaletteRemote>,
     pub category: Category,
 }
 
@@ -163,6 +180,9 @@ pub struct PaletteView {
     commands: Vec<Row>,
     workspaces: Vec<WorkspaceRow>,
     root: PathBuf,
+    remote: Option<PaletteRemote>,
+    remote_error: Option<String>,
+    remote_truncated: bool,
     files: Option<Vec<FileEntry>>,
     branches: Option<Vec<(String, bool)>>,
     renaming: Option<(usize, Entity<InputState>)>,
@@ -199,35 +219,78 @@ impl PaletteView {
         }
         commands.extend(input.commands.into_iter().filter_map(command_row));
 
-        let root = input.root.clone();
-        let files = cx.spawn(async move |this, cx| {
-            let files = cx
-                .background_executor()
-                .spawn(async move {
-                    walk_files(&root, MAX_FILES)
-                        .into_iter()
-                        .map(FileEntry::new)
-                        .collect::<Vec<_>>()
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.files = Some(files);
-                this.refresh_rows(cx);
-                cx.notify();
+        let tasks = if let Some(remote) = input.remote.clone() {
+            vec![cx.spawn(async move |this, cx| {
+                let result = match remote.process {
+                    Some(process) => process.request(json!({
+                        "type": "herdr_palette_snapshot",
+                        "root": remote.root,
+                    })).await.map_err(|error| error.to_string()),
+                    None => Err("The selected remote agent is disconnected or its directory is unknown".to_owned()),
+                };
+                let _ = this.update(cx, |this, cx| {
+                    match result {
+                        Ok(response) => {
+                            let parsed = sources::parse_remote_palette(&response.data);
+                            match parsed {
+                                Some((files, branches, truncated)) => {
+                                    this.files = Some(files);
+                                    this.branches = Some(branches);
+                                    this.remote_truncated = truncated;
+                                }
+                                None => {
+                                    this.files = Some(Vec::new());
+                                    this.branches = Some(Vec::new());
+                                    this.remote_error = Some(
+                                        "The remote palette returned invalid data.".into()
+                                    );
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            this.files = Some(Vec::new());
+                            this.branches = Some(Vec::new());
+                            this.remote_error = Some(format!(
+                                "Remote project indexing failed: {error}. Open a new agent if it uses an older bridge."
+                            ));
+                        }
+                    }
+                    this.refresh_rows(cx);
+                    cx.notify();
+                });
+            })]
+        } else {
+            let root = input.root.clone();
+            let files = cx.spawn(async move |this, cx| {
+                let files = cx
+                    .background_executor()
+                    .spawn(async move {
+                        walk_files(&root, MAX_FILES)
+                            .into_iter()
+                            .map(FileEntry::new)
+                            .collect::<Vec<_>>()
+                    })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.files = Some(files);
+                    this.refresh_rows(cx);
+                    cx.notify();
+                });
             });
-        });
-        let root = input.root.clone();
-        let branches = cx.spawn(async move |this, cx| {
-            let branches = cx
-                .background_executor()
-                .spawn(async move { list_branches(&root) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.branches = Some(branches);
-                this.refresh_rows(cx);
-                cx.notify();
+            let root = input.root.clone();
+            let branches = cx.spawn(async move |this, cx| {
+                let branches = cx
+                    .background_executor()
+                    .spawn(async move { list_branches(&root) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.branches = Some(branches);
+                    this.refresh_rows(cx);
+                    cx.notify();
+                });
             });
-        });
+            vec![files, branches]
+        };
 
         let mut this = Self {
             query,
@@ -236,6 +299,9 @@ impl PaletteView {
             commands,
             workspaces: input.workspaces,
             root: input.root,
+            remote: input.remote,
+            remote_error: None,
+            remote_truncated: false,
             files: None,
             branches: None,
             renaming: None,
@@ -244,7 +310,7 @@ impl PaletteView {
             lines: Vec::new(),
             scroll: ScrollHandle::new(),
             _subscriptions: vec![subscription],
-            _tasks: vec![files, branches],
+            _tasks: tasks,
         };
         this.refresh_rows(cx);
         this

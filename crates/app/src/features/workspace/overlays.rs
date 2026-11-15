@@ -29,10 +29,31 @@ impl Workspace {
             .map(|t| t.read(cx).commands())
             .unwrap_or_default();
         let workspaces = self.workspace_rows();
+        // An active remote agent is authoritative even if its bridge is
+        // currently disconnected. Never index the Windows working tree as
+        // though it were the remote agent's Files/Branches.
+        let remote = if self.active_agent_is_remote(cx) {
+            self.selected_remote_files(cx).map(|(session, machine, root)| {
+                PaletteRemote {
+                    machine,
+                    root,
+                    terminal: session.read(cx).herdr_terminal().unwrap_or_default(),
+                    process: session.read(cx).remote_fs_process(),
+                }
+            }).or_else(|| Some(PaletteRemote {
+                machine: String::new(),
+                root: String::new(),
+                terminal: String::new(),
+                process: None,
+            }))
+        } else {
+            None
+        };
         let input = PaletteInput {
             commands,
             workspaces,
             root: self.space().root.clone(),
+            remote,
             category,
         };
         let view = cx.new(|cx| PaletteView::new(input, window, cx));
@@ -86,8 +107,12 @@ impl Workspace {
             PaletteAction::Memory => self.open_memory(window, cx),
             PaletteAction::Docs => self.open_docs(window, cx),
             PaletteAction::History => {
-                let cwd = self.active_cwd(cx);
-                self.open_history(cwd, window, cx)
+                if self.active_agent_is_remote(cx) {
+                    self.open_remote_history(window, cx);
+                } else {
+                    let cwd = self.active_cwd(cx);
+                    self.open_history(cwd, window, cx);
+                }
             }
             PaletteAction::Devices => self.devices.update(cx, |panel, cx| panel.show(cx)),
             PaletteAction::Settings => self.open_settings(window, cx),
@@ -137,8 +162,39 @@ impl Workspace {
                 name,
                 pick_folder: true,
             } => self.pick_workspace_folder(name, window, cx),
-            PaletteAction::OpenFile(path) => self.open_file(path, window, cx),
-            PaletteAction::SwitchBranch(branch) => self.confirm_switch_branch(branch, window, cx),
+            PaletteAction::OpenFile(path) => {
+                if self.active_agent_is_remote(cx) {
+                    window.push_notification(Notification::info(
+                        "Local file results cannot be opened for a remote agent. Reopen the palette.",
+                    ), cx);
+                } else {
+                    self.open_file(path, window, cx);
+                }
+            }
+            PaletteAction::OpenRemoteFile { machine, root, terminal, path } => {
+                match self.selected_remote_files(cx) {
+                    Some((session, current_machine, current_root))
+                        if !terminal.is_empty() && machine == current_machine
+                            && root == current_root
+                            && session.read(cx).herdr_terminal().as_deref() == Some(terminal.as_str()) =>
+                            self.open_remote_file(path, window, cx),
+                    _ => window.push_notification(Notification::info(
+                        "The active machine changed. Reopen the remote Files palette.",
+                    ), cx),
+                }
+            }
+            PaletteAction::SwitchBranch(branch) => {
+                if self.active_agent_is_remote(cx) {
+                    window.push_notification(Notification::info(
+                        "Local Git cannot switch a remote branch. Reopen the remote palette.",
+                    ), cx);
+                } else {
+                    self.confirm_switch_branch(branch, window, cx);
+                }
+            }
+            PaletteAction::SwitchRemoteBranch { machine, root, terminal, branch } => {
+                self.select_palette_remote_branch(&machine, &root, &terminal, branch, window, cx);
+            }
         }
     }
 
@@ -185,6 +241,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Slash commands belong to their originating Pi session. A screen
+        // event arriving late from another tab must not open the Windows
+        // or JaviPi resources belonging to the newly focused tab.
+        if let Some(origin) = session.as_ref()
+            && self.active_session().as_ref() != Some(origin)
+        {
+            window.push_notification(Notification::info(
+                "Select the agent that requested this screen before opening it.",
+            ), cx);
+            return;
+        }
         match screen {
             Screen::Usage => self.open_usage(window, cx),
             Screen::Stats => {
@@ -202,17 +269,30 @@ impl Workspace {
                 self.open_palette(Category::Commands, window, cx);
             }
             Screen::Changes => {
-                let Some(tree) = self
-                    .sidebar
-                    .clone()
-                    .and_then(|view| view.downcast::<FileTreeView>().ok())
-                else {
+                let target = session.or_else(|| self.active_session());
+                // An event emitted by an inactive local *or* remote agent
+                // must never redirect the active machine's Git dock.
+                if target != self.active_session() {
+                    window.push_notification(Notification::info(
+                        "Select the originating agent before opening its Changes.",
+                    ), cx);
                     return;
-                };
-                if !self.sidebar_visible {
-                    self.toggle_sidebar(cx);
                 }
-                tree.update(cx, |tree, cx| tree.show_changes(window, cx));
+                if target.as_ref().is_some_and(|agent| agent.read(cx).is_remote_herdr()) {
+                    self.show_selected_remote_changes(window, cx);
+                } else {
+                    let Some(tree) = self
+                        .sidebar
+                        .clone()
+                        .and_then(|view| view.downcast::<FileTreeView>().ok())
+                    else {
+                        return;
+                    };
+                    if !self.files_sidebar_open {
+                        self.toggle_files_panel(cx);
+                    }
+                    tree.update(cx, |tree, cx| tree.show_changes(window, cx));
+                }
             }
         }
     }
@@ -309,6 +389,13 @@ impl Workspace {
     }
 
     pub(super) fn open_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_agent_is_remote(cx) {
+            window.push_notification(Notification::info(
+                "Saved Sessions browsing is local to this computer. Showing live Herdr machines and terminals; no Windows session will be opened on JaviPi.",
+            ), cx);
+            self.open_machines(window, cx);
+            return;
+        }
         self.start_active_session(window, cx);
         let cwd = self.active_cwd(cx);
         let current = self
@@ -359,9 +446,12 @@ impl Workspace {
             })
             .collect();
         let session = self.active_session();
+        let owner = session.clone();
         let view = cx.new(|cx| ProfilesView::new(cwd, models, session, window, cx));
-        let subscription = cx.subscribe_in(&view, window, |this, _, event: &ProfilesEvent, window, cx| {
-            let tab = this.active_session();
+        let subscription = cx.subscribe_in(&view, window, move |this, _, event: &ProfilesEvent, window, cx| {
+            // Profile actions must reach the session that opened the screen,
+            // never whichever machine happened to gain focus since then.
+            let tab = owner.clone();
             match event {
                 ProfilesEvent::Close => this.close_overlay(window, cx),
                 ProfilesEvent::Changed => {}
@@ -404,6 +494,11 @@ impl Workspace {
     }
 
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_agent_is_remote(cx) {
+            window.push_notification(Notification::info(
+                "Settings manages this Windows desktop and local Gentle Shell installation. Remote agent settings are not modified by this screen.",
+            ), cx);
+        }
         self.start_active_session(window, cx);
         let cwd = self.active_cwd(cx);
         let view = cx.new(|cx| SettingsView::new(cwd, window, cx));
@@ -414,7 +509,9 @@ impl Workspace {
                 SettingsEvent::Close => this.close_overlay(window, cx),
                 SettingsEvent::Changed => {
                     for tab in this.sessions() {
-                        tab.update(cx, |session, cx| session.reload_models(window, cx));
+                        if !tab.read(cx).is_remote_herdr() {
+                            tab.update(cx, |session, cx| session.reload_models(window, cx));
+                        }
                     }
                 }
                 SettingsEvent::DevicesChanged(prefs) => {
@@ -432,7 +529,9 @@ impl Workspace {
                 }
                 SettingsEvent::BackendUpdated => {
                     for tab in this.sessions() {
-                        tab.update(cx, |session, cx| session.restart_for_update(window, cx));
+                        if !tab.read(cx).is_remote_herdr() {
+                            tab.update(cx, |session, cx| session.restart_for_update(window, cx));
+                        }
                     }
                 }
                 SettingsEvent::Setup(event) => {
@@ -445,10 +544,11 @@ impl Workspace {
                         let _ = view.update(cx, |view, cx| view.shell_done(result, cx));
                     };
                     match this.active_session() {
-                        Some(session) => session.update(cx, |session, cx| {
-                            session.run_extension_command(text.clone(), cx, report)
-                        }),
-                        None => report(
+                        Some(session) if !session.read(cx).is_remote_herdr() =>
+                            session.update(cx, |session, cx| {
+                                session.run_extension_command(text.clone(), cx, report)
+                            }),
+                        _ => report(
                             Err(
                                 "Open an agent tab first: Gentle Shell applies this setting."
                                     .into(),
@@ -472,6 +572,13 @@ impl Workspace {
     }
 
     pub(super) fn open_docs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_agent_is_remote(cx) {
+            self.show_selected_remote_docs(window, cx);
+            window.push_notification(Notification::info(
+                "Showing Linux docs in Remote Files. Architecture Docs installation and checks run only in the local workspace; use the remote agent to generate or update docs.",
+            ), cx);
+            return;
+        }
         let root = self.space().root.clone();
         let skill = self.docs_skill_dir(cx);
         let view = cx.new(|cx| DocsView::new(root.clone(), skill, window, cx));
@@ -502,6 +609,12 @@ impl Workspace {
     }
 
     pub(super) fn open_memory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_agent_is_remote(cx) {
+            window.push_notification(Notification::info(
+                "The Memory browser connects to this computer's Engram, not JaviPi. Query the remote agent for its own memories.",
+            ), cx);
+            return;
+        }
         let cwd = self.active_cwd(cx);
         let view = cx.new(|cx| MemoryView::new(cwd, window, cx));
         let subscription = cx.subscribe_in(
@@ -533,6 +646,11 @@ impl Workspace {
     }
 
     pub(super) fn open_providers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_agent_is_remote(cx) {
+            window.push_notification(Notification::info(
+                "Provider accounts here belong to the Windows installation. JaviPi uses its own credentials and provider configuration.",
+            ), cx);
+        }
         let cwd = self.active_cwd(cx);
         let view = cx.new(|cx| ProvidersView::new(cwd, window, cx));
         let subscription = cx.subscribe_in(
@@ -548,7 +666,9 @@ impl Workspace {
                 }
                 ProvidersEvent::Changed => {
                     for tab in this.sessions() {
-                        tab.update(cx, |session, cx| session.reload_models(window, cx));
+                        if !tab.read(cx).is_remote_herdr() {
+                            tab.update(cx, |session, cx| session.reload_models(window, cx));
+                        }
                     }
                 }
             },

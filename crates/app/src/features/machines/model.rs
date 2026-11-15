@@ -117,16 +117,31 @@ pub fn discover() -> Result<Snapshot, String> {
 /// Request an OS shell on the selected machine. The local Herdr core owns the
 /// terminal; a subsequent GPUI panel only attaches to the returned address.
 pub fn create_shell(machine: Option<&str>) -> Result<String, String> {
+    create_shell_in(machine, None)
+}
+
+/// Create a shell in the selected agent's actual project directory. Unlike
+/// opening a fresh local PTY, Herdr starts the shell on its owning machine.
+pub fn create_shell_in(machine: Option<&str>, cwd: Option<&str>) -> Result<String, String> {
+    if let Some(cwd) = cwd
+        && (!cwd.starts_with('/') || cwd.contains('\\') || cwd.len() > 2048
+            || cwd.chars().any(char::is_control)
+            || cwd.split('/').any(|part| part == ".." || part == "."))
+    {
+        return Err("Invalid remote working directory".into());
+    }
     let mut client = client()?;
-    let reply = client.call(
-        "terminal.run",
-        json!({
-            "on": machine,
-            "no_parent": true,
-            "wait": false,
-            "size": {"cols": 80, "rows": 24},
-        }),
-    ).map_err(|e| e.to_string())?;
+    let mut params = json!({
+        "on": machine,
+        "no_parent": true,
+        "wait": false,
+        "size": {"cols": 80, "rows": 24},
+    });
+    if let Some(cwd) = cwd {
+        params["cwd"] = json!(cwd);
+    }
+    let reply = client.call("terminal.run", params)
+        .map_err(|e| e.to_string())?;
     reply["address"].as_str()
         .filter(|address| !address.is_empty())
         .map(str::to_string)

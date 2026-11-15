@@ -355,6 +355,17 @@ impl ProfilesView {
     /// profile survive when that profile still exists. Which path reads them
     /// is decided here, once, from what the tab's Shell reports.
     fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.session.as_ref()
+            .is_some_and(|session| session.read(cx).is_remote_herdr())
+            && matches!(self.backend, Backend::Legacy)
+        {
+            self.loading = false;
+            self.error = Some(
+                "This remote Gentle Shell does not support Desktop configuration RPC.                  Upgrade the remote agent; Windows profile files will not be read or changed.".into(),
+            );
+            cx.notify();
+            return;
+        }
         match self.backend {
             Backend::Legacy => return self.reload_files(cx),
             Backend::Rpc(_) => return self.reload_rpc(cx),
@@ -366,8 +377,17 @@ impl ProfilesView {
         };
         match support {
             ConfigSupport::Legacy => {
-                self.backend = Backend::Legacy;
-                self.reload_files(cx);
+                if self.session.as_ref()
+                    .is_some_and(|session| session.read(cx).is_remote_herdr())
+                {
+                    self.loading = false;
+                    self.error = Some(
+                        "Remote Profiles require Desktop configuration RPC.                          Windows profile files cannot configure JaviPi.".into(),
+                    );
+                } else {
+                    self.backend = Backend::Legacy;
+                    self.reload_files(cx);
+                }
             }
             ConfigSupport::Rpc => {
                 self.backend = Backend::Rpc(Box::new(Remote::new()));
@@ -482,6 +502,19 @@ impl ProfilesView {
     /// the files (neither is a config store).
     fn reload_rpc(&mut self, cx: &mut Context<Self>) {
         self.reread(&SCREEN_STORES, cx);
+        // Remote configuration comes from the selected Pi session over RPC.
+        // Do not mix its models/routes with agent names and defaults loaded
+        // from the Windows user's ~/.gentle-shell directory.
+        if self.session.as_ref()
+            .is_some_and(|session| session.read(cx).is_remote_herdr())
+        {
+            self.env = None;
+            self.names.clear();
+            self.pi_default = None;
+            self.local_loaded = true;
+            self.adopt_rpc(true, cx);
+            return;
+        }
         let env = self.env.clone();
         let cwd = self.cwd.clone();
         self.run_io(

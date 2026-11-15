@@ -160,7 +160,16 @@ impl PaletteView {
                     meta: String::new(),
                     detail: dir,
                     group: "Files",
-                    action: PaletteAction::OpenFile(self.root.join(path)),
+                    action: self.remote.as_ref().map_or_else(
+                        || PaletteAction::OpenFile(self.root.join(path)),
+                        |remote| PaletteAction::OpenRemoteFile {
+                            machine: remote.machine.clone(),
+                            root: remote.root.clone(),
+                            terminal: remote.terminal.clone(),
+                            path: format!("{}/{}",
+                                remote.root.trim_end_matches('/'), path),
+                        },
+                    ),
                     workspace: None,
                     current: false,
                 }
@@ -194,7 +203,15 @@ impl PaletteView {
                 },
                 detail: String::new(),
                 group: "Branches",
-                action: PaletteAction::SwitchBranch(name.clone()),
+                action: self.remote.as_ref().map_or_else(
+                    || PaletteAction::SwitchBranch(name.clone()),
+                    |remote| PaletteAction::SwitchRemoteBranch {
+                        machine: remote.machine.clone(),
+                        root: remote.root.clone(),
+                        terminal: remote.terminal.clone(),
+                        branch: name.clone(),
+                    },
+                ),
                 workspace: None,
                 current: *current,
             })
