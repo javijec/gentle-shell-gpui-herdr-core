@@ -22,6 +22,7 @@ impl MachinesView {
     ) -> AnyElement {
         let active = terminal.live();
         let address = terminal.address.clone();
+        let close_address = address.clone();
         let agent = terminal.gentle_shell || self.known_agents.contains(&address);
         let kind = if agent { "Gentle Shell" } else { "Terminal" };
         let title = format!("{kind} · {}", terminal.display_title());
@@ -66,6 +67,19 @@ impl MachinesView {
                         })),
                 )
             })
+            .child(
+                Button::new(("machines-terminate-terminal", index))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(IconName::X))
+                    .tooltip("Terminate permanently (confirmation required)")
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(MachinesEvent::TerminateExisting {
+                            address: close_address.clone(),
+                            agent,
+                        })
+                    })),
+            )
             .into_any_element()
     }
 
@@ -92,7 +106,8 @@ impl MachinesView {
         let terminals: Vec<&Terminal> = snapshot
             .terminals
             .iter()
-            .filter(|terminal| terminal.belongs_to(name))
+            .filter(|terminal| terminal.belongs_to(name)
+                && !self.terminated_sessions.contains(&terminal.address))
             .collect();
         let count = terminals.len();
         let live = terminals.iter().filter(|t| t.live()).count();
