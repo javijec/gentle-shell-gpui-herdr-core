@@ -79,7 +79,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if self.active_agent_is_remote(cx) {
-            self.open_shell_on_selected_machine(window, cx);
+            self.open_shell_on_selected_machine(None, window, cx);
             return;
         }
         let cwd = self.active_cwd(cx);
