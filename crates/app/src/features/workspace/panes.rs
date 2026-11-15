@@ -97,7 +97,8 @@ impl Workspace {
             f32::from(viewport.width),
             self.remote_files.is_some(),
             self.sidebar_visible,
-            self.files_sidebar_open,
+            self.files_sidebar_open
+                && (self.remote_files.is_some() || self.sidebar.is_some()),
         );
         let count = f32::from(u8::from(machines > 0.) + u8::from(files > 0.));
         let w = f32::from(viewport.width)
