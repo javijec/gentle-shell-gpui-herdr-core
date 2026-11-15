@@ -37,11 +37,13 @@ impl Workspace {
                 PaletteRemote {
                     machine,
                     root,
+                    terminal: session.read(cx).herdr_terminal().unwrap_or_default(),
                     process: session.read(cx).remote_fs_process(),
                 }
             }).or_else(|| Some(PaletteRemote {
                 machine: String::new(),
                 root: String::new(),
+                terminal: String::new(),
                 process: None,
             }))
         } else {
@@ -169,10 +171,12 @@ impl Workspace {
                     self.open_file(path, window, cx);
                 }
             }
-            PaletteAction::OpenRemoteFile { machine, root, path } => {
+            PaletteAction::OpenRemoteFile { machine, root, terminal, path } => {
                 match self.selected_remote_files(cx) {
-                    Some((_, current_machine, current_root))
-                        if machine == current_machine && root == current_root =>
+                    Some((session, current_machine, current_root))
+                        if !terminal.is_empty() && machine == current_machine
+                            && root == current_root
+                            && session.read(cx).herdr_terminal().as_deref() == Some(&terminal) =>
                             self.open_remote_file(path, window, cx),
                     _ => window.push_notification(Notification::info(
                         "The active machine changed. Reopen the remote Files palette.",
@@ -188,8 +192,8 @@ impl Workspace {
                     self.confirm_switch_branch(branch, window, cx);
                 }
             }
-            PaletteAction::SwitchRemoteBranch { machine, root, branch } => {
-                self.select_palette_remote_branch(&machine, &root, branch, window, cx);
+            PaletteAction::SwitchRemoteBranch { machine, root, terminal, branch } => {
+                self.select_palette_remote_branch(&machine, &root, &terminal, branch, window, cx);
             }
         }
     }
