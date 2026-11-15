@@ -532,6 +532,142 @@ async function remoteEntry(req) {
   return { path: destination, operation: op };
 }
 
+
+// A recoverable, private trash directory *beside* the selected workspace.
+// Its files stay on the same volume as the project and never pollute Git.
+// The caller can only identify a token produced by this bridge, not choose
+// a destination outside its selected project. No shell or OS trash utility.
+const trashInFlight = new Set();
+function trashLocations(root) {
+  const parent = path.posix.dirname(root);
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const home = path.posix.join(parent, ".gentle-shell-trash-" + uid);
+  return { home, files: path.posix.join(home, "files"),
+    info: path.posix.join(home, "info") };
+}
+async function secureTrashDirectory(root, create) {
+  const dirs = trashLocations(root);
+  for (const dir of [dirs.home, dirs.files, dirs.info]) {
+    if (create) {
+      try { await fs.mkdir(dir, { mode: 0o700 }); }
+      catch (e) { if (e.code !== "EEXIST") throw e; }
+    }
+    const st = await fs.lstat(dir);
+    if (!st.isDirectory() || st.isSymbolicLink() ||
+        (typeof process.getuid === "function" && st.uid !== process.getuid()) ||
+        (st.mode & 0o077) !== 0) {
+      throw new Error("Unsafe private trash directory");
+    }
+  }
+  return dirs;
+}
+async function guardedTrash(req) {
+  const root = await fs.realpath(req.root);
+  if (root === "/" || root !== await fs.realpath(process.cwd())) {
+    throw new Error("Trash requires a selected project directory");
+  }
+  if (trashInFlight.has(root)) throw new Error("Another Trash operation is running");
+  trashInFlight.add(root);
+  try {
+    const selected = await safeRemotePath(req.root, req.path);
+    const source = await fs.realpath(selected);
+    if (source === root || protectedGitPath(root, source)) {
+      throw new Error("Cannot trash the root or private Git files");
+    }
+    const st = await fs.lstat(selected);
+    if ((!st.isFile() && !st.isDirectory()) ||
+        (typeof process.getuid === "function" && st.uid !== process.getuid())) {
+      throw new Error("Only owned files or directories can be moved to Trash");
+    }
+    const dirs = await secureTrashDirectory(root, true);
+    const token = Date.now().toString(36) + "-" + randomBytes(12).toString("hex");
+    const stored = path.posix.join(dirs.files, token);
+    const manifest = path.posix.join(dirs.info, token + ".json");
+    const handle = await fs.open(manifest,
+      fsConstants.O_CREAT | fsConstants.O_EXCL |
+      fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW, 0o600);
+    try {
+      await handle.writeFile(JSON.stringify({
+        root, original: source, directory: st.isDirectory(), token,
+        deletedAt: new Date().toISOString(),
+      }), { encoding: "utf8" });
+    } finally {
+      await handle.close();
+    }
+    try {
+      // Same-volume rename. EXDEV fails closed: no partial trash / deletion.
+      await fs.rename(selected, stored);
+    } catch (error) {
+      await fs.unlink(manifest);
+      throw error;
+    }
+    return { token, path: source, directory: st.isDirectory() };
+  } finally {
+    trashInFlight.delete(root);
+  }
+}
+async function restoreTrash(req) {
+  const root = await fs.realpath(req.root);
+  if (root === "/" || root !== await fs.realpath(process.cwd())) {
+    throw new Error("Restore requires a selected project directory");
+  }
+  if (trashInFlight.has(root)) throw new Error("Another Trash operation is running");
+  trashInFlight.add(root);
+  try {
+    const token = req.token;
+    if (typeof token !== "string" ||
+        !/^[a-z0-9]+-[a-f0-9]{24}$/.test(token)) {
+      throw new Error("Invalid Trash token");
+    }
+    const dirs = await secureTrashDirectory(root, false);
+    const infoPath = path.posix.join(dirs.info, token + ".json");
+    const infoHandle = await fs.open(infoPath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    let data;
+    try {
+      if ((await infoHandle.stat()).size > 4096) {
+        throw new Error("Invalid Trash manifest");
+      }
+      data = JSON.parse(await infoHandle.readFile({ encoding: "utf8" }));
+    } finally { await infoHandle.close(); }
+    if (data.token !== token || data.root !== root ||
+        !validLinuxPath(data.original) || data.original === root ||
+        !within(root, data.original) || protectedGitPath(root, data.original)) {
+      throw new Error("Trash entry does not belong to this workspace");
+    }
+    const stored = path.posix.join(dirs.files, token);
+    const stat = await fs.lstat(stored);
+    if ((!stat.isDirectory() && !stat.isFile()) ||
+        stat.isDirectory() !== data.directory ||
+        (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+      throw new Error("Invalid Trash entry type");
+    }
+    const parent = path.posix.dirname(data.original);
+    await safeRemotePath(root, parent);
+    try {
+      await fs.lstat(data.original);
+      throw new Error("Cannot restore over an existing entry");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    if (stat.isDirectory()) {
+      await fs.mkdir(data.original, { mode: 0o700 });
+      try { await fs.rename(stored, data.original); }
+      catch (error) {
+        await fs.rmdir(data.original);
+        throw error;
+      }
+    } else {
+      await fs.link(stored, data.original);
+      await fs.unlink(stored);
+    }
+    await fs.unlink(infoPath);
+    return { path: data.original, directory: data.directory };
+  } finally {
+    trashInFlight.delete(root);
+  }
+}
+
 async function remoteFilesRequest(req) {
   const command = req.type;
   const response = (success, data, error) => emit("O", JSON.stringify({
@@ -543,7 +679,7 @@ async function remoteFilesRequest(req) {
       throw new Error("Missing request identifier");
     }
     if (!["herdr_fs_list", "herdr_fs_read", "herdr_fs_write", "herdr_fs_create",
-          "herdr_fs_entry"].includes(command)) {
+          "herdr_fs_entry", "herdr_fs_trash", "herdr_fs_restore"].includes(command)) {
       throw new Error("Unsupported filesystem operation");
     }
     if (command === "herdr_fs_write") {
@@ -556,6 +692,14 @@ async function remoteFilesRequest(req) {
     }
     if (command === "herdr_fs_entry") {
       response(true, await remoteEntry(req));
+      return;
+    }
+    if (command === "herdr_fs_trash") {
+      response(true, await guardedTrash(req));
+      return;
+    }
+    if (command === "herdr_fs_restore") {
+      response(true, await restoreTrash(req));
       return;
     }
     const selected = await safeRemotePath(req.root, req.path);
@@ -1276,7 +1420,9 @@ function inputLine() {
                         request.type === "herdr_fs_read" ||
                         request.type === "herdr_fs_write" ||
                         request.type === "herdr_fs_create" ||
-                        request.type === "herdr_fs_entry")) {
+                        request.type === "herdr_fs_entry" ||
+                        request.type === "herdr_fs_trash" ||
+                        request.type === "herdr_fs_restore")) {
           void remoteFilesRequest(request);
         } else if (request && (request.type === "herdr_git_snapshot" ||
                                request.type === "herdr_git_diff" ||
