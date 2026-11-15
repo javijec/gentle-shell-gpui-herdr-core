@@ -285,7 +285,7 @@ impl Workspace {
 
     /// Remote filesystem root is the agent's launch directory, never the
     /// locally saved Windows workspace root.
-    fn selected_remote_files(&self, cx: &App) -> Option<(Entity<SessionView>, String, String)> {
+    pub(super) fn selected_remote_files(&self, cx: &App) -> Option<(Entity<SessionView>, String, String)> {
         let session = self.active_session()?;
         let agent = session.read(cx);
         if !agent.is_remote_herdr() {
