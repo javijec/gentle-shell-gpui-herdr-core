@@ -18,6 +18,128 @@ fn remote_file_in_root(root: &str, path: &str) -> bool {
 }
 
 impl Workspace {
+    /// Open the common Commit History graph with the current Linux agent as
+    /// its source. No Windows Git lookup or extra Pi session is created.
+    pub(super) fn open_remote_history(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((session, machine, root)) = self.selected_remote_files(cx) else {
+            window.push_notification(Notification::info(
+                "Remote agent identity is not ready. Try again after connecting.",
+            ), cx);
+            return;
+        };
+        if root.is_empty() || root == "/" {
+            window.push_notification(Notification::info(
+                "Open the remote agent inside a Git project to view its history.",
+            ), cx);
+            return;
+        }
+        let Some(process) = session.read(cx).remote_fs_process() else {
+            window.push_notification(Notification::info(
+                "Remote History requires a connected Herdr agent.",
+            ), cx);
+            return;
+        };
+        let view = cx.new(|cx| HistoryView::new_remote(
+            machine.clone(), root.clone(), process, cx,
+        ));
+        let title = view.clone();
+        let item = PaneItem {
+            kind: PaneKind::History,
+            view: view.clone().into(),
+            focus: view.focus_handle(cx),
+            title: Rc::new(move |cx: &App| title.read(cx).title()),
+            unsaved: None,
+            terminal_address: None,
+        };
+        let id = self.alloc_id();
+        let mut pane = Pane {
+            item,
+            session: None,
+            linked_session: Some(session),
+            cwd: self.space().root.clone(),
+            path: None,
+            session_file: None,
+            herdr_address: None,
+            agent_target: Some(pi_rpc::AgentTarget::Remote {
+                machine, cwd: root,
+            }),
+            title: SharedString::default(),
+            running: false,
+            needs_you: false,
+            _subscriptions: Vec::new(),
+        };
+        pane.sync_chrome(cx);
+        self.panes.insert(id, pane);
+        self.place_preview(id, window, cx);
+    }
+
+    /// Select the remote Files dock's Changes page for a command owned by
+    /// the current agent, preserving the two independent sidebars.
+    pub(super) fn show_selected_remote_changes(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.files_sidebar_open {
+            self.toggle_files_panel(cx);
+        }
+        self.sync_remote_files(window, cx);
+        let Some((session, _, root)) = self.selected_remote_files(cx) else {
+            window.push_notification(Notification::info(
+                "The selected remote agent has no known project directory.",
+            ), cx);
+            return;
+        };
+        if let Some(view) = &self.remote_files
+            && view.read(cx).matches(&session, &root)
+        {
+            view.update(cx, |view, cx| view.show_changes(cx));
+        } else {
+            window.push_notification(Notification::info(
+                "Remote Files is waiting for the selected agent.",
+            ), cx);
+        }
+    }
+
+    /// A remote branch result is tagged with the original machine and root.
+    /// If the focus changes before the user picks it, fail closed instead of
+    /// executing Git on a different Linux host or on Windows.
+    pub(super) fn select_palette_remote_branch(
+        &mut self,
+        machine: &str,
+        root: &str,
+        branch: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((session, active_machine, active_root)) = self.selected_remote_files(cx)
+        else {
+            window.push_notification(Notification::info(
+                "Remote branch selection requires the original agent.",
+            ), cx);
+            return;
+        };
+        if active_machine != machine || active_root != root {
+            window.push_notification(Notification::info(
+                "The selected remote agent changed. Reopen the palette.",
+            ), cx);
+            return;
+        }
+        if !self.files_sidebar_open {
+            self.toggle_files_panel(cx);
+        }
+        self.sync_remote_files(window, cx);
+        if let Some(view) = &self.remote_files
+            && view.read(cx).matches(&session, &active_root)
+        {
+            view.update(cx, |view, cx| view.select_remote_branch(branch, cx));
+        }
+    }
+
     /// Render the selected agent's remote diff in a central native Diff pane.
     /// It borrows, but never owns or terminates, the underlying Pi agent.
     pub(super) fn open_remote_git_diff(
