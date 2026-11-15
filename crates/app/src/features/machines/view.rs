@@ -22,7 +22,9 @@ impl MachinesView {
     ) -> AnyElement {
         let active = terminal.live();
         let address = terminal.address.clone();
-        let title = terminal.display_title().to_string();
+        let agent = self.known_agents.contains(&address);
+        let kind = if agent { "Gentle Shell" } else { "Terminal" };
+        let title = format!("{kind} · {}", terminal.display_title());
         let subtitle = if terminal.cwd.is_empty() {
             terminal.address.clone()
         } else {
@@ -37,7 +39,7 @@ impl MachinesView {
             .rounded_lg()
             .hover(|d| d.bg(ui::surface_hover()))
             .child(
-                Icon::new(IconName::SquareTerminal)
+                Icon::new(if agent { IconName::Bot } else { IconName::SquareTerminal })
                     .small()
                     .text_color(if active { ui::accent() } else { ui::faint() }),
             )
@@ -210,9 +212,9 @@ impl MachinesView {
                         .child(if !connected {
                             "No terminal list while this machine is disconnected."
                         } else if local {
-                            "No local Herdr terminals. Use New shell to create one."
+                            "No Herdr sessions on this computer yet. Use New to start one."
                         } else {
-                            "No active terminals on this machine."
+                            "No Herdr sessions on this machine yet."
                         }),
                 )
             })
