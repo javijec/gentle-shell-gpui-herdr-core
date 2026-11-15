@@ -516,7 +516,8 @@ impl Workspace {
             _remote_files_events: None,
             // Machines and local Files have separate dock positions.
             // Default to showing both without restoring the old tab strip.
-            sidebar_visible: true,
+            // false restores the compact rail; true restores the full tree.
+            sidebar_visible: saved.sidebar,
             files_sidebar_open: true,
             machines_dock_width: saved.machines_dock_width,
             files_dock_width: saved.files_dock_width,
