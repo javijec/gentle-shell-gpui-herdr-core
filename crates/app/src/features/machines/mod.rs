@@ -8,6 +8,7 @@ mod view;
 pub use directory_picker::{RemoteDirectoryEvent, RemoteDirectoryPicker};
 
 use gpui_kit::*;
+use std::collections::HashSet;
 use gpui_kit::component::input::InputState;
 
 pub enum MachinesEvent {
@@ -21,6 +22,7 @@ pub enum MachinesEvent {
 
 pub struct MachinesView {
     snapshot: Option<model::Snapshot>,
+    known_agents: HashSet<String>,
     loading: bool,
     busy: bool,
     error: Option<String>,
@@ -42,6 +44,7 @@ impl MachinesView {
             .placeholder("Optional display name"));
         let mut this = Self {
             snapshot: None,
+            known_agents: HashSet::new(),
             loading: false,
             busy: false,
             error: None,
@@ -58,6 +61,17 @@ impl MachinesView {
             this.refresh(cx);
         }
         this
+    }
+
+    /// Mark exact Herdr addresses that are known to be Gentle Shell panes,
+    /// including agents in other or not-yet-restored workspaces.
+    pub(crate) fn set_known_agent_addresses(
+        &mut self, addresses: HashSet<String>, cx: &mut Context<Self>,
+    ) {
+        if self.known_agents != addresses {
+            self.known_agents = addresses;
+            cx.notify();
+        }
     }
 
     /// Open Machines directly on the registration form when the header +
