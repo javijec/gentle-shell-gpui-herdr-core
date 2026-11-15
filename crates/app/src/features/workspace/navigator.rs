@@ -940,7 +940,10 @@ impl Workspace {
                                                                     button.bg(ui::surface_hover())
                                                                         .text_color(ui::danger())
                                                                 })
-                                                                .tooltip("Terminate session permanently")
+                                                                .tooltip(|window, cx| {
+                                                                    Tooltip::new("Terminate session permanently")
+                                                                        .build(window, cx)
+                                                                })
                                                                 .on_click(cx.listener(
                                                                     move |this, _, window, cx| {
                                                                         cx.stop_propagation();
