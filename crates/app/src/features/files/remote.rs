@@ -488,6 +488,7 @@ pub struct RemoteFilesView {
     tree_scroll: UniformListScrollHandle,
     tree_expanded: HashSet<String>,
     tree_loading: HashSet<String>,
+    show_ignored: bool,
     tree_selected_directory: Option<String>,
     tree_selected_entry: Option<(String, bool)>,
     file_clipboard: Option<(String, bool)>,
@@ -744,6 +745,7 @@ impl RemoteFilesView {
             tree_scroll: UniformListScrollHandle::new(),
             tree_expanded: HashSet::new(),
             tree_loading: HashSet::new(),
+            show_ignored: false,
             tree_selected_directory: None,
             tree_selected_entry: None,
             file_clipboard: None,
@@ -893,7 +895,7 @@ impl RemoteFilesView {
             return;
         };
         let response = WorkspaceBackend::herdr(self.root.clone(), process)
-            .list(WorkspacePath::Herdr(directory), false);
+            .list(WorkspacePath::Herdr(directory), self.show_ignored);
         cx.spawn(async move |this, cx| {
             let response = response.await;
             let _ = this.update(cx, |this, cx| {
@@ -919,6 +921,15 @@ impl RemoteFilesView {
         self.tree_rows = Rc::new(visible_rows(
             &self.root, &self.tree_children, &self.tree_expanded, &self.tree_loading,
         ));
+    }
+
+    fn toggle_ignored(&mut self, cx: &mut Context<Self>) {
+        self.show_ignored = !self.show_ignored;
+        self.tree_children.clear();
+        self.tree_expanded.clear();
+        self.tree_loading.clear();
+        self.rebuild_remote_rows();
+        self.toggle_remote_directory(self.root.clone(), cx);
     }
 
     fn refresh_tree_folder(&mut self, folder: String, cx: &mut Context<Self>) {
@@ -1174,7 +1185,7 @@ impl RemoteFilesView {
         self.rebuild_remote_rows();
         let generation = self.generation;
         let response = WorkspaceBackend::herdr(self.root.clone(), process)
-            .list(WorkspacePath::Herdr(path.clone()), false);
+            .list(WorkspacePath::Herdr(path.clone()), self.show_ignored);
         cx.spawn(async move |this, cx| {
             let result = response.await;
             let _ = this.update(cx, |this, cx| {
@@ -1252,7 +1263,7 @@ impl RemoteFilesView {
             self.tree_selected_entry.as_ref()
                 .is_some_and(|(selected, _)| selected == &node.path),
             &node.entry.name, directory, opened,
-            false, None, None, false,
+            node.entry.ignored, None, None, false,
         )
         .cursor_pointer()
         .when(node.loading, |row| {
@@ -2057,6 +2068,23 @@ impl Render for RemoteFilesView {
                         } else {
                             format!("Remote Files · {}", self.machine)
                         }))
+                    .when(!central, |bar| bar.child(
+                        Button::new("remote-show-ignored")
+                            .ghost().xsmall()
+                            .icon(Icon::new(if self.show_ignored {
+                                IconName::Eye
+                            } else {
+                                IconName::EyeOff
+                            }))
+                            .tooltip(if self.show_ignored {
+                                "Hide ignored and hidden files"
+                            } else {
+                                "Show ignored and hidden files"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_ignored(cx)
+                            })),
+                    ))
                     .when_some(if central {
                         self.markdown.as_ref().map(|(mode, _)| *mode)
                     } else { None }, |bar, mode| {

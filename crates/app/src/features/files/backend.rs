@@ -117,7 +117,8 @@ impl WorkspaceBackend {
                 (Self::Herdr { root, process }, WorkspacePath::Herdr(directory)) => {
                     ensure_herdr_path(&root, &directory)?;
                     let reply = process.request(json!({
-                        "type": "herdr_fs_list", "root": root, "path": directory
+                        "type": "herdr_fs_list", "root": root, "path": directory,
+                        "showIgnored": show_ignored
                     })).await.map_err(|error| error.to_string())?;
                     let data = reply.data;
                     let entries = data["entries"].as_array()
@@ -134,7 +135,8 @@ impl WorkspaceBackend {
                                     "directory" | "file" | "symlink" | "other"))
                                 .ok_or("Invalid remote directory entry kind")?;
                             Ok(WorkspaceDirEntry {
-                                name: name.to_owned(), kind: kind.to_owned(), ignored: false,
+                                name: name.to_owned(), kind: kind.to_owned(),
+                                ignored: item["ignored"].as_bool().unwrap_or(false),
                             })
                         })
                         .collect::<Result<Vec<_>, &'static str>>()

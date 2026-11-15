@@ -706,6 +706,8 @@ async function remoteFilesRequest(req) {
     if (command === "herdr_fs_list") {
       const entries = await fs.readdir(selected, { withFileTypes: true });
       const sorted = entries
+        .filter((entry) => entry.name !== ".git" &&
+          !entry.name.startsWith(".herdr-save-"))
         .map((entry) => ({
           name: entry.name,
           kind: entry.isDirectory() ? "directory" :
@@ -714,9 +716,31 @@ async function remoteFilesRequest(req) {
         .sort((a, b) => (a.kind === "directory" ? 0 : 1) -
                          (b.kind === "directory" ? 0 : 1) ||
                          a.name.localeCompare(b.name));
+      const ignored = new Set(sorted.filter((entry) =>
+        entry.name.startsWith(".")).map((entry) => entry.name));
+      // Check ignored state in bounded batches, without running user shell.
+      // Outside a Git repository, hidden-file filtering still behaves
+      // consistently and an unavailable Git command does not break Files.
+      for (let start = 0; start < sorted.length; start += 100) {
+        const group = sorted.slice(start, start + 100);
+        try {
+          const output = await runGit(selected, ["check-ignore", "-z", "--",
+            ...group.map((entry) => ":(literal)" + entry.name)], true);
+          for (const name of strictUtf8(output).split("\0").filter(Boolean)) {
+            ignored.add(name);
+          }
+        } catch {
+          // No git repository / no ignored names; never fail filesystem UI.
+        }
+      }
+      const showIgnored = req.showIgnored === true;
+      const visible = sorted.filter((entry) =>
+        showIgnored || !ignored.has(entry.name)).map((entry) => ({
+        ...entry, ignored: ignored.has(entry.name),
+      }));
       response(true, {
-        path: selected, entries: sorted.slice(0, MAX_REMOTE_ENTRIES),
-        truncated: sorted.length > MAX_REMOTE_ENTRIES,
+        path: selected, entries: visible.slice(0, MAX_REMOTE_ENTRIES),
+        truncated: visible.length > MAX_REMOTE_ENTRIES,
       });
     } else {
       const stat = await fs.stat(selected);
