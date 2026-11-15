@@ -504,10 +504,15 @@ impl Workspace {
                 }
                 ProfilesEvent::UseInSession { profile, model, thinking } => {
                     if let Some(tab) = tab {
-                        let (model, thinking) = (model.clone(), thinking.clone());
+                        let (profile, model, thinking) =
+                            (profile.clone(), model.clone(), thinking.clone());
                         let note = format!("Profile \u{201c}{profile}\u{201d} applied to this session's orchestrator; helpers keep the routing this session started with.");
                         tab.update(cx, |s, cx| {
                             s.note(note, cx);
+                            // Older Shells apply by set_model, not Desktop RPC.
+                            // Keep the binding on the actual owning session,
+                            // regardless of whether it is local or Herdr-backed.
+                            s.set_session_profile(Some(profile), cx);
                             if let Some((provider, id)) = model {
                                 s.send_command(serde_json::json!({"type": "set_model", "provider": provider, "modelId": id}), cx);
                             }
