@@ -551,6 +551,130 @@ impl Workspace {
         }
     }
 
+    /// Herdr-style compact Machines rail: always visible, icon-only.
+    /// A click expands the full tree with its previous width intact. No
+    /// session is created, restored or terminated by this navigation.
+    pub(super) fn render_machine_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let groups = self.navigator_groups();
+        let herdr = crate::features::terminal::herdr_enabled();
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .items_center()
+            .child(
+                div()
+                    .w_full()
+                    .h(px(42.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_b_1()
+                    .border_color(ui::border())
+                    .child(
+                        Button::new("machine-rail-expand")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::PanelLeftOpen))
+                            .tooltip("Expand Machines (Ctrl+B)")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_sidebar(cx)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .id("machine-rail-scroll")
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .py_2()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_1()
+                            .children(groups.into_iter().enumerate().map(|(index, group)| {
+                                let icon = if group.local {
+                                    IconName::SquareTerminal
+                                } else {
+                                    IconName::Layers
+                                };
+                                let connected = group.connected;
+                                let tooltip = format!(
+                                    "{} · {} session{}{}",
+                                    group.name, group.sessions.len(),
+                                    if group.sessions.len() == 1 { "" } else { "s" },
+                                    if connected { "" } else { " · disconnected" },
+                                );
+                                div()
+                                    .id(("machine-rail-item", index))
+                                    .w_full()
+                                    .h(px(42.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(6.))
+                                    .cursor_pointer()
+                                    .hover(|row| row.bg(ui::surface_hover().opacity(0.55)))
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(tooltip.clone()).build(window, cx)
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_sidebar(cx);
+                                    }))
+                                    .child(
+                                        v_flex()
+                                            .items_center()
+                                            .gap(px(3.))
+                                            .child(
+                                                Icon::new(icon)
+                                                    .small()
+                                                    .text_color(if connected {
+                                                        ui::fg()
+                                                    } else {
+                                                        ui::muted()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .size(px(5.))
+                                                    .rounded_full()
+                                                    .bg(if connected {
+                                                        ui::accent()
+                                                    } else {
+                                                        ui::muted()
+                                                    }),
+                                            ),
+                                    )
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .h(px(38.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_t_1()
+                    .border_color(ui::border())
+                    .when(herdr, |bar| {
+                        bar.child(
+                            Button::new("machine-rail-manage")
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Settings))
+                                .tooltip("Manage Herdr machines")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_machines(window, cx);
+                                })),
+                        )
+                    }),
+            )
+    }
+
     pub(super) fn render_machine_navigator(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let groups = self.navigator_groups();
         let herdr = crate::features::terminal::herdr_enabled();
