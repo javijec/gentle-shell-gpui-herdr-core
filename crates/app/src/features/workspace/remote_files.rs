@@ -18,6 +18,55 @@ fn remote_file_in_root(root: &str, path: &str) -> bool {
 }
 
 impl Workspace {
+    /// Render the selected agent's remote diff in a central native Diff pane.
+    /// It borrows, but never owns or terminates, the underlying Pi agent.
+    pub(super) fn open_remote_git_diff(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((session, machine, root)) = self.selected_remote_files(cx) else {
+            return;
+        };
+        if !remote_file_in_root(&root, &path) {
+            window.push_notification(Notification::info(
+                "Remote Git diff path is outside the selected project.",
+            ), cx);
+            return;
+        }
+        let view = cx.new(|cx| RemoteGitDiffView::new(
+            session.clone(), machine.clone(), root.clone(), path, cx,
+        ));
+        let title = view.clone();
+        let item = PaneItem {
+            kind: PaneKind::File,
+            view: view.clone().into(),
+            focus: view.focus_handle(cx),
+            title: Rc::new(move |cx: &App| title.read(cx).title()),
+            unsaved: None,
+            terminal_address: None,
+        };
+        let id = self.alloc_id();
+        let mut pane = Pane {
+            item,
+            session: None,
+            linked_session: Some(session),
+            cwd: self.space().root.clone(),
+            path: None,
+            session_file: None,
+            herdr_address: None,
+            agent_target: Some(pi_rpc::AgentTarget::Remote { machine, cwd: root }),
+            title: SharedString::default(),
+            running: false,
+            needs_you: false,
+            _subscriptions: Vec::new(),
+        };
+        pane.sync_chrome(cx);
+        self.panes.insert(id, pane);
+        self.place_preview(id, window, cx);
+    }
+
     /// A selected Linux file opens beside its agent in the main workspace,
     /// just like a local FileView preview. Files stays a directory browser.
     pub(super) fn open_remote_file(
@@ -135,6 +184,14 @@ impl Workspace {
             |this, source, event: &RemoteFilesEvent, window, cx| {
                 match event {
                     RemoteFilesEvent::Close => this.toggle_files_panel(cx),
+                    RemoteFilesEvent::OpenDiff(path) => {
+                        if this.active_session().as_ref()
+                            != Some(source.read(cx).session())
+                        {
+                            return;
+                        }
+                        this.open_remote_git_diff(path.clone(), window, cx);
+                    },
                     RemoteFilesEvent::OpenFile(path) => {
                         if this.active_session().as_ref()
                             != Some(source.read(cx).session())

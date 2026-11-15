@@ -42,7 +42,18 @@ function harness(cwd = "/srv/workspaces/JaviPi") {
   };
   const requireMock = (name) => {
     if (name === "node:child_process") {
-      return { spawn: (...args) => { calls.push(args); return child; } };
+      return {
+        spawn: (...args) => {
+          if (args[0] === "git") {
+            return require("node:child_process").spawn(...args);
+          }
+          calls.push(args);
+          return child;
+        },
+        // Git queries spawn only the git executable in real OS tests;
+        // the agent remains a fake process and receives no Git RPC.
+        execFile: (...args) => require("node:child_process").execFile(...args),
+      };
     }
     // Remote Files uses built-in fs and SHA-256 for opt-in revision-checked
     // writes; no I/O occurs until the matching private command arrives.
@@ -173,7 +184,8 @@ function rpcInput(h, value) {
 }
 
 async function fsReply(h, id) {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  // Busy ARM64 disks may need more than 1 second to scan a large worktree.
+  for (let attempt = 0; attempt < 2000; attempt++) {
     const stream = Buffer.concat(readFrames(h.stdout)
       .filter((frame) => frame.kind === "O")
       .map((frame) => frame.payload)).toString();
@@ -369,4 +381,184 @@ test("5B refuses editing when the remote agent root is the filesystem root", {
   const result = await fsReply(h, "root-denied");
   assert.equal(result.success, false);
   assert.match(result.error, /project directory, not/);
+});
+
+function gitInit(root) {
+  const cp = require("node:child_process");
+  const git = (...args) => {
+    const result = cp.spawnSync("git", [
+      "-C", root, ...args,
+    ], { encoding: "utf8", timeout: 10000 });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  git("init", "-q");
+  fs.writeFileSync(path.join(root, "tracked.txt"), "first\n");
+  git("add", "--", "tracked.txt");
+  git("-c", "user.name=Herdr", "-c", "user.email=herdr@example.invalid",
+    "commit", "-qm", "Initial");
+  return git;
+}
+
+test("5C reports remote Git changes and branches without sending Pi commands", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-status-"));
+  try {
+    const git = gitInit(root);
+    git("branch", "feature/test");
+    fs.writeFileSync(path.join(root, "tracked.txt"), "changed\n");
+    git("add", "--", "tracked.txt");
+    fs.writeFileSync(path.join(root, "tracked.txt"), "changed again\n");
+    fs.writeFileSync(path.join(root, "new.txt"), "untracked\n");
+    const h = harness(root);
+    const before = h.childWrites.length;
+    rpcInput(h, { type: "herdr_git_snapshot", id: "git-1", root });
+    const result = await fsReply(h, "git-1");
+    assert.equal(result.success, true, result.error);
+    assert.equal(result.data.toplevel, root);
+    assert.equal(result.data.readOnly, true);
+    assert.ok(result.data.files.some(x => x.path === "tracked.txt" &&
+      x.index === "M" && x.worktree === "M"));
+    assert.ok(result.data.files.some(x => x.path === "new.txt" &&
+      x.index === "?" && x.worktree === "?"));
+    assert.ok(result.data.branches.some(x => x.name === "feature/test"));
+    assert.ok(result.data.branches.some(x => x.current));
+    assert.equal(h.childWrites.length, before);
+    assert.equal(h.calls.length, 1, "no additional agents or terminals");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("5C shows tracked and untracked diffs read-only", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-diff-"));
+  try {
+    const git = gitInit(root);
+    fs.writeFileSync(path.join(root, "tracked.txt"), "changed\n");
+    git("add", "--", "tracked.txt");
+    fs.writeFileSync(path.join(root, "tracked.txt"), "latest\n");
+    fs.writeFileSync(path.join(root, "new.txt"), "untracked\n");
+    const h = harness(root);
+    for (const [id, file, expected] of [
+      ["diff-tracked", "tracked.txt", "+latest"],
+      ["diff-untracked", "new.txt", "+untracked"],
+    ]) {
+      rpcInput(h, {
+        type: "herdr_git_diff", id, root, path: path.join(root, file),
+      });
+      const reply = await fsReply(h, id);
+      assert.equal(reply.success, true, reply.error);
+      assert.match(reply.data.patch, /diff --git/);
+      assert.ok(reply.data.patch.includes(expected), reply.data.patch);
+    }
+    assert.equal(fs.readFileSync(path.join(root, "tracked.txt"), "utf8"), "latest\n");
+    assert.equal(fs.readFileSync(path.join(root, "new.txt"), "utf8"), "untracked\n");
+    assert.equal(h.childWrites.length, 1, "Git must not leak into Pi RPC");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("5C rejects external, traversed, symlinked and unchanged Git diff paths", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-deny-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-outside-"));
+  try {
+    gitInit(root);
+    fs.writeFileSync(path.join(outside, "secret.txt"), "secret!");
+    fs.symlinkSync(path.join(outside, "secret.txt"), path.join(root, "alias"));
+    const h = harness(root);
+    const paths = [
+      path.join(outside, "secret.txt"),
+      root + "/../" + path.basename(outside) + "/secret.txt",
+      path.join(root, "alias"),
+      path.join(root, "tracked.txt"), // unchanged
+      "C:\\Windows\\file.txt",
+    ];
+    for (let i = 0; i < paths.length; i++) {
+      const id = "git-deny-" + i;
+      rpcInput(h, { type: "herdr_git_diff", id, root, path: paths[i] });
+      const reply = await fsReply(h, id);
+      assert.equal(reply.success, false, id);
+    }
+    assert.equal(fs.readFileSync(path.join(outside, "secret.txt"), "utf8"), "secret!");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("5C refuses a Git repository above the remote agent launch directory", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-parent-"));
+  try {
+    gitInit(root);
+    fs.mkdirSync(path.join(root, "child"));
+    const child = path.join(root, "child");
+    const h = harness(child);
+    rpcInput(h, { type: "herdr_git_snapshot", id: "git-outside", root: child });
+    const reply = await fsReply(h, "git-outside");
+    assert.equal(reply.success, false);
+    assert.match(reply.error, /outside this agent/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("5C never forwards Git requests with invalid roots to the Pi agent", async () => {
+  const h = harness();
+  const before = h.childWrites.length;
+  rpcInput(h, {
+    type: "herdr_git_snapshot", id: "git-bad-root",
+    root: "C:\\Users\\javij",
+  });
+  const reply = await fsReply(h, "git-bad-root");
+  assert.equal(reply.success, false);
+  assert.equal(h.childWrites.length, before);
+});
+
+test("5C caps very large Git status without maxBuffer errors and diffs late paths", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-many-"));
+  try {
+    gitInit(root);
+    // Shared long nested path makes 240 entries exceed the old 384-KiB
+    // execFile maxBuffer limit while keeping each filename valid on ext4.
+    let folder = root;
+    for (let i = 0; i < 8; i++) {
+      folder = path.join(folder, "nested-" + i + "-" + "x".repeat(215));
+      fs.mkdirSync(folder);
+    }
+    for (let i = 0; i < 240; i++) {
+      fs.writeFileSync(path.join(folder, "untracked-" + i + ".txt"), "hi\n");
+    }
+    const h = harness(root);
+    const before = h.childWrites.length;
+    rpcInput(h, { type: "herdr_git_snapshot", id: "git-many", root });
+    const snapshot = await fsReply(h, "git-many");
+    assert.equal(snapshot.success, true, snapshot.error);
+    assert.equal(snapshot.data.files.length, 200);
+    assert.equal(snapshot.data.filesTruncated, true);
+    assert.equal(snapshot.data.readOnly, true);
+
+    // The file's own status is small despite the huge full-tree status.
+    const last = path.join(folder, "untracked-239.txt");
+    rpcInput(h, { type: "herdr_git_diff", id: "git-late", root, path: last });
+    const diff = await fsReply(h, "git-late");
+    assert.equal(diff.success, true, diff.error);
+    assert.match(diff.data.patch, /\+hi/);
+    assert.equal(h.childWrites.length, before);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

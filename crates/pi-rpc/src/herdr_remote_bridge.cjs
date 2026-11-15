@@ -4,7 +4,7 @@
 // replace an existing text file after checking its content revision.
 "use strict";
 
-const { spawn } = require("node:child_process");
+const { spawn, execFile } = require("node:child_process");
 
 const token = process.argv[1] || "";
 if (!/^[a-zA-Z0-9]{1,48}$/.test(token)) {
@@ -331,6 +331,296 @@ async function remoteFilesRequest(req) {
   }
 }
 
+// Read-only Git queries for the already running agent's Linux project.
+// Never execute user-provided command names, Git aliases, shells, hooks,
+// Windows Git, checkout, staging, commits, pushes or repository mutations.
+const MAX_GIT_LIST = 200;
+const MAX_GIT_BRANCHES = 120;
+const MAX_GIT_DIFF = 96 * 1024;
+
+function strictUtf8(bytes) {
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
+
+function runGit(directory, args, allowedDiffExit = false) {
+  return new Promise((resolve, reject) => {
+    execFile("git", [
+      "--no-optional-locks",
+      "-c", "core.fsmonitor=false",
+      "-c", "diff.external=",
+      "-c", "diff.trustExitCode=false",
+      "-C", directory, ...args,
+    ], {
+      shell: false,
+      timeout: 8000,
+      maxBuffer: 384 * 1024,
+      encoding: "buffer",
+      env: {
+        ...process.env,
+        GIT_PAGER: "cat",
+        GIT_EXTERNAL_DIFF: "0",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    }, (error, stdout, stderr) => {
+      if (error && !(allowedDiffExit && error.code === 1 &&
+            !error.killed && !error.signal)) {
+        const detail = Buffer.from(stderr || "").toString("utf8").trim() ||
+          (error && error.message ? error.message : "Unknown Git error");
+        reject(new Error("Remote Git query failed: " + detail.slice(0, 300)));
+      } else {
+        resolve(Buffer.from(stdout));
+      }
+    });
+  });
+}
+
+// Stream large status/branch listings instead of buffering the full Git
+// output. A busy repository may have millions of untracked files: collect
+// at most N complete records plus one sentinel, then stop Git. This is not
+// a transport failure; it is an explicitly marked partial snapshot.
+function runGitListing(directory, args, separator, maxRecords) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", [
+      "--no-optional-locks",
+      "-c", "core.fsmonitor=false",
+      "-c", "diff.external=",
+      "-c", "diff.trustExitCode=false",
+      "-C", directory, ...args,
+    ], {
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        GIT_PAGER: "cat",
+        GIT_EXTERNAL_DIFF: "0",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    });
+    const MAX_RECORD_BYTES = 4096;
+    const MAX_STDERR = 1024;
+    const records = [];
+    let pending = Buffer.alloc(0);
+    let stderr = "";
+    let truncated = false;
+    let failure = null;
+    let timeoutExpired = false;
+    const timer = setTimeout(() => {
+      timeoutExpired = true;
+      child.kill("SIGKILL");
+    }, 15000);
+    child.stdout.on("data", (chunk) => {
+      if (truncated || failure || timeoutExpired) return;
+      pending = Buffer.concat([pending, chunk]);
+      let cut;
+      while ((cut = pending.indexOf(separator)) !== -1) {
+        const record = pending.subarray(0, cut);
+        pending = pending.subarray(cut + 1);
+        if (record.length > MAX_RECORD_BYTES) {
+          failure = "Remote Git record exceeds the 4096-byte safety limit";
+          child.kill("SIGKILL");
+          return;
+        }
+        // The extra record tells us whether more than maxRecords exist.
+        if (records.length === maxRecords) {
+          truncated = true;
+          child.kill("SIGTERM");
+          return;
+        }
+        records.push(Buffer.concat([record, Buffer.from([separator])]));
+      }
+      if (pending.length > MAX_RECORD_BYTES) {
+        failure = "Remote Git record exceeds the 4096-byte safety limit";
+        child.kill("SIGKILL");
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      if (stderr.length < MAX_STDERR) {
+        stderr += chunk.toString("utf8").slice(0, MAX_STDERR - stderr.length);
+      }
+    });
+    child.on("error", (error) => {
+      failure = error.message;
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (failure) {
+        reject(new Error("Remote Git query failed: " + failure));
+      } else if (timeoutExpired) {
+        reject(new Error("Remote Git query timed out after 8 seconds"));
+      } else if (!truncated && code !== 0) {
+        reject(new Error("Remote Git query failed: " +
+          (stderr.trim() || "Git exit code " + code).slice(0, 300)));
+      } else if (!truncated && pending.length) {
+        reject(new Error("Remote Git query returned an incomplete record"));
+      } else {
+        resolve({ output: Buffer.concat(records), truncated });
+      }
+    });
+  });
+}
+
+async function gitRepository(root) {
+  const selected = await safeRemotePath(root, root);
+  const actualRoot = await fs.realpath(selected);
+  const output = await runGit(actualRoot, ["rev-parse", "--show-toplevel"]);
+  const declared = strictUtf8(output).trim();
+  if (!validLinuxPath(declared)) {
+    throw new Error("Invalid Git repository location");
+  }
+  const toplevel = await fs.realpath(declared);
+  // Never query a parent repository outside the current agent's project.
+  if (!within(actualRoot, toplevel)) {
+    throw new Error("Git repository is outside this agent's directory. Start the agent at the repository root");
+  }
+  return { toplevel, actualRoot };
+}
+
+function safeGitRelative(name) {
+  return typeof name === "string" && name.length > 0 &&
+    name.length <= 2048 && !name.startsWith("/") &&
+    !name.includes("\\") && !name.includes(":") &&
+    !/[\x00-\x1f\x7f]/.test(name) &&
+    !name.split("/").some((part) => part === "." || part === "..");
+}
+
+function parseGitEntries(output) {
+  const entries = [];
+  const segments = output.toString("utf8").split("\0");
+  for (const segment of segments) {
+    if (!segment) continue;
+    if (segment.length < 4 || segment[2] !== " ") {
+      throw new Error("Invalid Git status record");
+    }
+    const name = segment.slice(3);
+    if (!safeGitRelative(name)) {
+      throw new Error("Invalid Git status path");
+    }
+    if (entries.length >= MAX_GIT_LIST) break;
+    entries.push({ path: name, index: segment[0], worktree: segment[1] });
+  }
+  return { entries, truncated: segments.filter(Boolean).length > entries.length };
+}
+
+function parseGitBranches(output) {
+  const rows = strictUtf8(output).split("\n").filter(Boolean);
+  const branches = [];
+  for (const row of rows.slice(0, MAX_GIT_BRANCHES)) {
+    const [name, mark] = row.split("\0");
+    if (!name || name.length > 512 || /[\x00-\x1f\x7f]/.test(name)) {
+      throw new Error("Invalid Git branch");
+    }
+    branches.push({ name, current: mark === "*" });
+  }
+  return { branches, truncated: rows.length > branches.length };
+}
+
+async function remoteGit(req) {
+  const { toplevel } = await gitRepository(req.root);
+  if (req.type === "herdr_git_snapshot") {
+    const [status, branches] = await Promise.all([
+      runGitListing(toplevel, ["status", "--porcelain=v1", "-z",
+        "--no-renames", "--untracked-files=all", "--ignore-submodules=all"],
+        0, MAX_GIT_LIST),
+      runGitListing(toplevel, ["branch", "--all", "--list",
+        "--format=%(refname:short)%00%(HEAD)"],
+        10, MAX_GIT_BRANCHES),
+    ]);
+    const files = parseGitEntries(status.output);
+    const refs = parseGitBranches(branches.output);
+    return {
+      toplevel, files: files.entries,
+      filesTruncated: files.truncated || status.truncated,
+      branches: refs.branches,
+      branchesTruncated: refs.truncated || branches.truncated,
+      readOnly: true,
+    };
+  }
+  if (req.type !== "herdr_git_diff" || !validLinuxPath(req.path)) {
+    throw new Error("Unsupported remote Git request or path");
+  }
+  const target = path.posix.normalize(req.path);
+  if (!within(toplevel, target) || target === toplevel) {
+    throw new Error("Git path is outside the selected repository");
+  }
+  const relative = path.posix.relative(toplevel, target);
+  if (!safeGitRelative(relative)) {
+    throw new Error("Unsafe Git diff path");
+  }
+  // Do not expose arbitrary files through Git diff. Only paths currently
+  // reported as changed may be inspected.
+  // Scope the membership check to one literal path. The full repository
+  // status could exceed maxBuffer even when this one file has a tiny diff.
+  const status = parseGitEntries(await runGit(toplevel, [
+    "status", "--porcelain=v1", "-z", "--no-renames",
+    "--untracked-files=all", "--ignore-submodules=all",
+    "--", ":(literal)" + relative,
+  ]));
+  const entry = status.entries.find((x) => x.path === relative);
+  if (!entry) {
+    throw new Error("Git path is not a changed file (or status list was truncated)");
+  }
+  let output;
+  if (entry.index === "?" && entry.worktree === "?") {
+    // O_NOFOLLOW style path validation applies before diffing untracked
+    // files; this blocks symlinks escaping the remote agent's root.
+    await safeRemotePath(req.root, target);
+    const st = await fs.stat(target);
+    if (!st.isFile() || st.size > MAX_REMOTE_FILE) {
+      throw new Error("Untracked diff requires a regular file under 128 KiB");
+    }
+    output = await runGit(toplevel, [
+      "diff", "--no-ext-diff", "--no-textconv", "--no-index",
+      "--", "/dev/null", target,
+    ], true);
+  } else {
+    // HEAD combines index and working-tree changes in one patch.
+    // Unborn repositories fall back to the staged diff first.
+    try {
+      output = await runGit(toplevel, [
+        "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+        "HEAD", "--", relative,
+      ]);
+    } catch {
+      output = await runGit(toplevel, [
+        "diff", "--cached", "--no-ext-diff", "--no-textconv",
+        "--no-renames", "--", relative,
+      ]);
+      if (!output.length) {
+        output = await runGit(toplevel, [
+          "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+          "--", relative,
+        ]);
+      }
+    }
+  }
+  if (output.length > MAX_GIT_DIFF) {
+    throw new Error("Diff exceeds the 96 KiB remote preview limit");
+  }
+  return {
+    toplevel, path: target, patch: strictUtf8(output), readOnly: true,
+  };
+}
+
+async function remoteGitRequest(req) {
+  const command = req.type;
+  const response = (success, data, error) => emit("O", JSON.stringify({
+    type: "response", command, id: req.id, success,
+    ...(success ? { data } : { error }),
+  }) + "\n");
+  try {
+    if (typeof req.id !== "string" || req.id.length > 128) {
+      throw new Error("Missing request identifier");
+    }
+    if (!["herdr_git_snapshot", "herdr_git_diff"].includes(command)) {
+      throw new Error("Unsupported remote Git operation");
+    }
+    response(true, await remoteGit(req));
+  } catch (error) {
+    response(false, null,
+      error && error.message ? error.message : "Remote Git query failed");
+  }
+}
+
 // The PTY is line-buffered: GPUI submits each encoded input frame with CR.
 // Accept CR, LF and CRLF, echo/control-character noise and stream splits.
 let rpcInput = [];
@@ -367,6 +657,9 @@ function inputLine() {
                         request.type === "herdr_fs_read" ||
                         request.type === "herdr_fs_write")) {
           void remoteFilesRequest(request);
+        } else if (request && (request.type === "herdr_git_snapshot" ||
+                               request.type === "herdr_git_diff")) {
+          void remoteGitRequest(request);
         } else {
           agent.stdin.write(requestLine);
         }

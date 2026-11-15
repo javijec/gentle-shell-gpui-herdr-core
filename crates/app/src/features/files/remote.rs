@@ -19,6 +19,8 @@ pub enum RemoteFilesEvent {
     InsertPath(String),
     /// Open an existing remote Linux file in a normal central editor pane.
     OpenFile(String),
+    /// Request a native central diff for a changed Linux file.
+    OpenDiff(String),
     Close,
 }
 
@@ -36,6 +38,83 @@ struct RemotePreview {
     revision: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteTab {
+    Files,
+    Changes,
+    Branches,
+}
+
+struct RemoteGitFile {
+    path: String,
+    index: char,
+    worktree: char,
+}
+
+struct RemoteGitBranch {
+    name: String,
+    current: bool,
+}
+
+struct RemoteGitSnapshot {
+    toplevel: String,
+    files: Vec<RemoteGitFile>,
+    branches: Vec<RemoteGitBranch>,
+    files_truncated: bool,
+    branches_truncated: bool,
+}
+
+/// The JSON shape is not trusted just because it came from an RPC bridge.
+/// Never turn a returned Linux path into a local Windows file path.
+fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'static str> {
+    let toplevel = data["toplevel"].as_str()
+        .filter(|root| root.starts_with('/') && !root.contains('\\'))
+        .ok_or("Invalid remote Git repository path")?
+        .to_owned();
+    if data["readOnly"].as_bool() != Some(true) {
+        return Err("Invalid remote Git snapshot mode");
+    }
+    let files = data["files"].as_array()
+        .ok_or("Missing remote Git status")?
+        .iter()
+        .take(200)
+        .map(|item| {
+            let path = item["path"].as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 2048
+                    && !s.starts_with('/') && !s.contains('\\') && !s.contains(':')
+                    && !s.chars().any(char::is_control)
+                    && !s.split('/').any(|p| p == "." || p == ".."))
+                .ok_or("Invalid Git status file")?;
+            let index = item["index"].as_str()
+                .filter(|s| s.len() == 1)
+                .ok_or("Invalid Git index state")?
+                .chars().next().ok_or("Invalid Git index state")?;
+            let worktree = item["worktree"].as_str()
+                .filter(|s| s.len() == 1)
+                .ok_or("Invalid Git worktree state")?
+                .chars().next().ok_or("Invalid Git worktree state")?;
+            Ok(RemoteGitFile { path: path.to_owned(), index, worktree })
+        }).collect::<Result<Vec<_>, &'static str>>()?;
+    let branches = data["branches"].as_array()
+        .ok_or("Missing remote branches")?
+        .iter()
+        .take(120)
+        .map(|item| {
+            let name = item["name"].as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 512
+                    && !s.chars().any(char::is_control))
+                .ok_or("Invalid remote branch")?;
+            let current = item["current"].as_bool()
+                .ok_or("Missing active branch state")?;
+            Ok(RemoteGitBranch { name: name.to_owned(), current })
+        }).collect::<Result<Vec<_>, &'static str>>()?;
+    Ok(RemoteGitSnapshot {
+        toplevel, files, branches,
+        files_truncated: data["filesTruncated"].as_bool().unwrap_or(false),
+        branches_truncated: data["branchesTruncated"].as_bool().unwrap_or(false),
+    })
+}
+
 const MAX_EDIT_BYTES: usize = 128 * 1024;
 const CONTEXT: &str = "GentleRemoteFileView";
 const SAVE_HINT: &str = if cfg!(target_os = "macos") { "⌘S" } else { "Ctrl+S" };
@@ -50,6 +129,12 @@ pub struct RemoteFilesView {
     /// A central file pane has a fixed remote file path; None is the
     /// right-hand directory browser. Never convert this into Windows PathBuf.
     pane_path: Option<String>,
+    /// The right dock uses Files/Changes/Branches, never the local Git repo.
+    tab: RemoteTab,
+    git: Option<RemoteGitSnapshot>,
+    git_loading: bool,
+    git_error: Option<String>,
+    git_generation: u64,
     focus: FocusHandle,
     entries: Vec<RemoteEntry>,
     preview: Option<RemotePreview>,
@@ -126,6 +211,11 @@ impl RemoteFilesView {
             current: root.clone(),
             root,
             pane_path: None,
+            tab: RemoteTab::Files,
+            git: None,
+            git_loading: false,
+            git_error: None,
+            git_generation: 0,
             focus: cx.focus_handle(),
             entries: Vec::new(),
             preview: None,
@@ -501,8 +591,228 @@ impl RemoteFilesView {
         cx.notify();
     }
 
+    fn set_tab(&mut self, tab: RemoteTab, cx: &mut Context<Self>) {
+        if self.pane_path.is_some() || self.tab == tab {
+            return;
+        }
+        self.tab = tab;
+        if tab != RemoteTab::Files {
+            self.refresh_git(cx);
+        }
+        cx.notify();
+    }
+
+    fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        self.git_generation = self.git_generation.wrapping_add(1);
+        let generation = self.git_generation;
+        self.git_loading = true;
+        self.git_error = None;
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.git_loading = false;
+            self.git_error = Some("Remote agent disconnected. Refresh after reconnection.".into());
+            cx.notify();
+            return;
+        };
+        let response = process.request(json!({
+            "type": "herdr_git_snapshot", "root": self.root,
+        }));
+        cx.spawn(async move |this, cx| {
+            let result = response.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.git_generation != generation {
+                    return;
+                }
+                this.git_loading = false;
+                match result {
+                    Ok(reply) => match parse_git_snapshot(&reply.data) {
+                        Ok(snapshot) => {
+                            this.git = Some(snapshot);
+                            this.git_error = None;
+                        }
+                        Err(error) => {
+                            this.git = None;
+                            this.git_error = Some(error.into());
+                        }
+                    },
+                    Err(error) => {
+                        this.git = None;
+                        this.git_error = Some(friendly_error(&error.to_string()));
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    fn render_tabs(&self, cx: &mut Context<Self>) -> Div {
+        let files = self.tab == RemoteTab::Files;
+        let changes = self.tab == RemoteTab::Changes;
+        let branches = self.tab == RemoteTab::Branches;
+        let count = self.git.as_ref().map_or(0, |snapshot| snapshot.files.len());
+        h_flex()
+            .flex_none()
+            .px_2()
+            .pb_1p5()
+            .gap_1()
+            .child(
+                (if files {
+                    Button::new("remote-tab-files").primary().small().label("Files")
+                } else {
+                    Button::new("remote-tab-files").ghost().small().label("Files")
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_tab(RemoteTab::Files, cx)
+                })),
+            )
+            .child(
+                (if changes {
+                    Button::new("remote-tab-changes").primary().small()
+                        .label(format!("Changes ({count})"))
+                } else {
+                    Button::new("remote-tab-changes").ghost().small()
+                        .label(format!("Changes ({count})"))
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_tab(RemoteTab::Changes, cx)
+                })),
+            )
+            .child(
+                (if branches {
+                    Button::new("remote-tab-branches").primary().small().label("Branches")
+                } else {
+                    Button::new("remote-tab-branches").ghost().small().label("Branches")
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_tab(RemoteTab::Branches, cx)
+                })),
+            )
+    }
+
+    fn render_git_panel(&self, cx: &mut Context<Self>) -> Div {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        if let Some(snapshot) = &self.git {
+            rows.push(
+                div().px_3().py_2().text_xs().text_color(ui::muted())
+                    .child(snapshot.toplevel.clone()).into_any_element(),
+            );
+            if self.tab == RemoteTab::Changes {
+                if snapshot.files.is_empty() {
+                    rows.push(div().px_3().py_3().text_sm().text_color(ui::muted())
+                        .child("Working tree clean").into_any_element());
+                }
+                for (index, entry) in snapshot.files.iter().enumerate() {
+                    let target = format!("{}/{}",
+                        snapshot.toplevel.trim_end_matches('/'), entry.path);
+                    let badge = format!("{}{}", entry.index, entry.worktree);
+                    rows.push(
+                        h_flex()
+                            .id(("remote-git-change", index))
+                            .h(px(28.))
+                            .px_2()
+                            .gap_2()
+                            .cursor_pointer()
+                            .hover(|row| row.bg(ui::surface_hover()))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(RemoteFilesEvent::OpenDiff(target.clone()));
+                            }))
+                            .child(div().w(px(28.)).font_family(ui::MONO)
+                                .text_xs().text_color(ui::warning()).child(badge))
+                            .child(div().flex_1().min_w_0().truncate()
+                                .text_xs().child(entry.path.clone()))
+                            .into_any_element(),
+                    );
+                }
+                if snapshot.files_truncated {
+                    rows.push(div().px_3().py_2().text_xs()
+                        .text_color(ui::warning())
+                        .child("Showing first 200 changed files").into_any_element());
+                }
+            } else {
+                if snapshot.branches.is_empty() {
+                    rows.push(div().px_3().py_3().text_sm().text_color(ui::muted())
+                        .child("No Git branches").into_any_element());
+                }
+                for (index, branch) in snapshot.branches.iter().enumerate() {
+                    rows.push(
+                        h_flex()
+                            .id(("remote-git-branch", index))
+                            .h(px(28.)).px_3().gap_2()
+                            .child(Icon::new(IconName::GitBranch).small()
+                                .text_color(if branch.current {
+                                    ui::success()
+                                } else { ui::muted() }))
+                            .child(div().flex_1().min_w_0().truncate().text_xs()
+                                .font_weight(if branch.current {
+                                    FontWeight::SEMIBOLD
+                                } else { FontWeight::NORMAL })
+                                .child(branch.name.clone()))
+                            .when(branch.current, |row| row.child(
+                                div().text_xs().text_color(ui::success())
+                                    .child("HEAD"),
+                            ))
+                            .into_any_element(),
+                    );
+                }
+                if snapshot.branches_truncated {
+                    rows.push(div().px_3().py_2().text_xs()
+                        .text_color(ui::warning())
+                        .child("Showing first 120 branches").into_any_element());
+                }
+            }
+        }
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .child(
+                h_flex().h(px(40.)).px_2().gap_1().flex_none()
+                    .child(Icon::new(IconName::GitBranch).small().text_color(ui::petal()))
+                    .child(div().flex_1().min_w_0().truncate().text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format!("Remote Git · {}", self.machine)))
+                    .child(
+                        Button::new("remote-git-refresh")
+                            .ghost().xsmall()
+                            .icon(Icon::new(IconName::RefreshCw))
+                            .tooltip("Refresh remote Git status and branches")
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_git(cx))),
+                    )
+                    .child(
+                        Button::new("remote-git-close").ghost().xsmall()
+                            .icon(Icon::new(IconName::X))
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(RemoteFilesEvent::Close);
+                            })),
+                    ),
+            )
+            .child(self.render_tabs(cx))
+            .when(self.git_loading, |panel| panel.child(
+                div().px_3().py_2().text_xs().text_color(ui::muted())
+                    .child("Reading status from remote Git…"),
+            ))
+            .when_some(self.git_error.clone(), |panel, error| panel.child(
+                div().px_3().py_2().text_xs().text_color(ui::warning())
+                    .child(error),
+            ))
+            .child(
+                div().id("remote-git-scroll").flex_1().min_h_0()
+                    .overflow_y_scroll()
+                    .child(v_flex().children(rows)),
+            )
+            .child(
+                div().h(px(26.)).flex_none().border_t_1()
+                    .border_color(ui::border()).px_3().text_size(px(10.))
+                    .text_color(ui::muted())
+                    .child("Remote Git · read-only · click a change to view diff"),
+            )
+    }
+
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.load_directory(self.current.clone(), cx);
+        if self.tab == RemoteTab::Files {
+            self.load_directory(self.current.clone(), cx);
+        } else {
+            self.refresh_git(cx);
+        }
     }
 }
 
@@ -516,6 +826,9 @@ impl Focusable for RemoteFilesView {
 
 impl Render for RemoteFilesView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.pane_path.is_none() && self.tab != RemoteTab::Files {
+            return self.render_git_panel(cx).into_any_element();
+        }
         let parent = remote_parent(&self.root, &self.current);
         let central = self.pane_path.is_some();
         let mut content = v_flex().gap(px(1.));
@@ -758,6 +1071,7 @@ impl Render for RemoteFilesView {
                             })),
                     )),
             )
+            .when(!central, |panel| panel.child(self.render_tabs(cx)))
             .when(!central, |panel| panel.child(
                 div().px_3().pb_2().text_xs().text_color(ui::muted())
                     .child(self.current.clone()),
@@ -788,15 +1102,16 @@ impl Render for RemoteFilesView {
                     .child(if self.editor.is_some() {
                         "Editing · SHA-256 conflict protection · 128 KiB"
                     } else {
-                        "Preview first · Edit to modify · 128 KiB maximum"
+                        "Files · preview first · 128 KiB maximum"
                     }),
             )
+            .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{remote_child, remote_parent};
+    use super::{parse_git_snapshot, remote_child, remote_parent};
     #[test]
     fn remote_paths_remain_under_root() {
         assert_eq!(remote_child("/srv/workspaces/demo", "Cargo.toml"),
@@ -806,4 +1121,47 @@ mod tests {
             Some("/srv/workspaces/demo".to_owned()));
         assert_eq!(remote_parent("/srv/workspaces/demo", "/srv/workspaces/demo"), None);
     }
+    #[test]
+    fn git_snapshot_accepts_status_and_branches_from_selected_machine() {
+        let data = serde_json::json!({
+            "toplevel": "/srv/workspaces/JaviPi",
+            "readOnly": true,
+            "files": [
+                { "path": "src/main.rs", "index": "M", "worktree": " " },
+                { "path": "README.md", "index": " ", "worktree": "M" }
+            ],
+            "branches": [
+                { "name": "main", "current": true },
+                { "name": "feature/rust", "current": false }
+            ],
+            "filesTruncated": false,
+            "branchesTruncated": false
+        });
+        let snapshot = parse_git_snapshot(&data).unwrap();
+        assert_eq!(snapshot.files.len(), 2);
+        assert_eq!(snapshot.files[0].index, 'M');
+        assert_eq!(snapshot.files[1].worktree, 'M');
+        assert!(snapshot.branches[0].current);
+    }
+
+    #[test]
+    fn git_snapshot_rejects_local_and_parent_paths() {
+        let base = serde_json::json!({
+            "toplevel": "/srv/workspaces/JaviPi",
+            "readOnly": true,
+            "files": [{"path": "../secret", "index": "?", "worktree": "?"}],
+            "branches": []
+        });
+        assert!(parse_git_snapshot(&base).is_err());
+        for bad in ["C:/Users/demo", "/tmp/x"] {
+            let mut data = base.clone();
+            data["files"][0]["path"] = serde_json::json!(bad);
+            assert!(parse_git_snapshot(&data).is_err());
+        }
+        let mut writable = base;
+        writable["files"] = serde_json::json!([]);
+        writable["readOnly"] = serde_json::json!(false);
+        assert!(parse_git_snapshot(&writable).is_err());
+    }
+
 }
