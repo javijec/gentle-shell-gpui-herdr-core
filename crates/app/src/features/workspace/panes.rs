@@ -442,6 +442,7 @@ impl Workspace {
     /// exactly once. No replacement Pi agent is created.
     pub(super) fn open_shell_on_selected_machine(
         &mut self,
+        split_axis: Option<SplitAxis>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -457,6 +458,10 @@ impl Workspace {
             ), cx);
             return;
         }
+        let originating = split_axis.and_then(|axis| {
+            self.tab().map(|tab| (tab.id, tab.focused, axis))
+        });
+        let local_cwd = self.active_cwd(cx);
         let task = cx.background_executor().spawn(async move {
             machine_model::create_shell_in(Some(&machine), Some(&root))
         });
@@ -464,7 +469,31 @@ impl Workspace {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
-                    Ok(address) => this.open_herdr_terminal(address, window, cx),
+                    Ok(address) => {
+                        let can_split = originating.is_some_and(|(tab_id, focused, axis)| {
+                            this.tab().is_some_and(|tab| {
+                                tab.id == tab_id && tab.tree.contains(&focused)
+                            }) && this.pane_sizes(window).into_iter()
+                                .find(|(id, ..)| *id == focused)
+                                .is_some_and(|(_, w, h)| fits_split(axis, w, h))
+                        });
+                        if can_split {
+                            if let Some((_, focused, axis)) = originating
+                                && let Some(pane) = this.new_factory_pane_restored(
+                                    PaneKind::Terminal, local_cwd,
+                                    Some(address.clone()), window, cx,
+                                )
+                            {
+                                if let Some(tab) = this.tab_mut() {
+                                    tab.tree.split(&focused, pane, axis);
+                                }
+                                this.focus_pane(pane, window, cx);
+                                this.schedule_save(cx);
+                                return;
+                            }
+                        }
+                        this.open_herdr_terminal(address, window, cx);
+                    }
                     Err(error) => window.push_notification(Notification::error(error), cx),
                 }
             });
@@ -727,7 +756,7 @@ impl Workspace {
         if kind == PaneKind::Terminal && self.active_agent_is_remote(cx) {
             // A remote terminal needs a Herdr terminal.run on its machine;
             // never silently launch a Windows/local PTY.
-            self.open_shell_on_selected_machine(window, cx);
+            self.open_shell_on_selected_machine(Some(axis), window, cx);
             return;
         }
         let created = if kind == PaneKind::Agent && self.active_agent_is_remote(cx) {
