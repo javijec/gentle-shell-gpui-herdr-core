@@ -353,14 +353,38 @@ impl Workspace {
 
     /// Herdr machine and terminal browser (all discovery/actions off the UI thread).
     pub(super) fn open_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_machines_impl(false, window, cx);
+    }
+
+    /// The + in the Machines navigator registers an SSH machine in Herdr.
+    /// Creating an agent remains an explicit per-machine action.
+    pub(super) fn open_machine_registration(
+        &mut self, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        self.open_machines_impl(true, window, cx);
+    }
+
+    fn open_machines_impl(
+        &mut self, register: bool, window: &mut Window, cx: &mut Context<Self>,
+    ) {
         if !crate::features::terminal::herdr_enabled() {
             return;
         }
-        if matches!(&self.overlay, Some((Overlay::Machines(_), _))) {
-            self.close_overlay(window, cx);
+        if let Some((Overlay::Machines(view), _)) = &self.overlay {
+            if register {
+                view.update(cx, |view, cx| view.begin_add_machine(window, cx));
+            } else {
+                self.close_overlay(window, cx);
+            }
             return;
         }
-        let view = cx.new(|cx| MachinesView::new(window, cx));
+        let view = cx.new(|cx| {
+            if register {
+                MachinesView::new_for_registration(window, cx)
+            } else {
+                MachinesView::new(window, cx)
+            }
+        });
         let subscription = cx.subscribe_in(
             &view,
             window,
