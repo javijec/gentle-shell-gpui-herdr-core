@@ -3,7 +3,7 @@
 //! Downloads are explicitly written to a local user-selected directory.
 //! Uploads are atomic, SHA-256 checked and refuse to overwrite existing files.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
