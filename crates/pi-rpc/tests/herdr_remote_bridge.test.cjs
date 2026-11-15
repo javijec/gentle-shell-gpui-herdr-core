@@ -522,6 +522,109 @@ test("5F guarded remote file entry actions never overwrite or escape", {
   }
 });
 
+test("Stage 5 recursive folder copy is bounded and rejects symlink children", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-recursive-"));
+  try {
+    fs.mkdirSync(path.join(root, "src", "nested"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src", "nested", "a.txt"), "a");
+    const h = harness(root);
+    const mutate = async (id, target) => {
+      rpcInput(h, {
+        type: "herdr_fs_entry", id, root, path: target, operation: "duplicate",
+      });
+      return await fsReply(h, id);
+    };
+    const copy = await mutate("recursive-copy", path.join(root, "src"));
+    assert.equal(copy.success, true, copy.error);
+    assert.equal(fs.readFileSync(path.join(root, "src copy", "nested", "a.txt"), "utf8"), "a");
+    fs.symlinkSync(path.join(root, "src", "nested", "a.txt"),
+      path.join(root, "src", "nested", "symlink"));
+    const reject = await mutate("recursive-reject", path.join(root, "src"));
+    assert.equal(reject.success, false);
+    assert.match(reject.error, /symlink|unsupported/i);
+    assert.equal(fs.existsSync(path.join(root, "src copy 2")), false);
+    assert.equal(h.childWrites.length, 1, "no filesystem command sent to Pi agent");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Stage 5 private Trash allows safe Undo but never replaces destination", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-trash-"));
+  try {
+    fs.mkdirSync(path.join(root, "folder"));
+    fs.writeFileSync(path.join(root, "folder", "note.txt"), "original");
+    const h = harness(root);
+    const note = path.join(root, "folder", "note.txt");
+    const send = async (id, type, more) => {
+      rpcInput(h, { type, id, root, ...more });
+      return fsReply(h, id);
+    };
+    const trash = await send("trash-1", "herdr_fs_trash", { path: note });
+    assert.equal(trash.success, true, trash.error);
+    assert.match(trash.data.token, /^[a-z0-9]+-[a-f0-9]{24}$/);
+    assert.equal(fs.existsSync(note), false);
+    assert.equal(fs.existsSync(path.join(root, ".gentle-shell-trash")), false);
+    fs.writeFileSync(note, "replacement");
+    const conflict = await send("trash-conflict", "herdr_fs_restore",
+      { token: trash.data.token });
+    assert.equal(conflict.success, false);
+    assert.equal(fs.readFileSync(note, "utf8"), "replacement");
+    fs.unlinkSync(note);
+    const restored = await send("trash-restore", "herdr_fs_restore",
+      { token: trash.data.token });
+    assert.equal(restored.success, true, restored.error);
+    assert.equal(restored.data.path, note);
+    assert.equal(fs.readFileSync(note, "utf8"), "original");
+    assert.equal((await send("trash-replay", "herdr_fs_restore",
+      { token: trash.data.token })).success, false);
+    assert.equal((await send("trash-root", "herdr_fs_trash",
+      { path: root })).success, false);
+    assert.equal((await send("trash-traversal", "herdr_fs_restore",
+      { token: "../escape" })).success, false);
+    assert.equal(h.childWrites.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Stage 5 remote ignored toggle honors .gitignore and hidden entries", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-ignored-"));
+  try {
+    gitInit(root);
+    fs.writeFileSync(path.join(root, ".gitignore"), "*.log\n");
+    fs.writeFileSync(path.join(root, "ignored.log"), "private\n");
+    fs.writeFileSync(path.join(root, ".hidden"), "hidden\n");
+    const h = harness(root);
+    const listing = async (id, showIgnored) => {
+      rpcInput(h, { type: "herdr_fs_list", id, root, path: root, showIgnored });
+      return fsReply(h, id);
+    };
+    const normal = await listing("ignored-off", false);
+    assert.equal(normal.success, true, normal.error);
+    assert.ok(!normal.data.entries.some((entry) => entry.name === "ignored.log"));
+    assert.ok(!normal.data.entries.some((entry) => entry.name === ".hidden"));
+    assert.ok(!normal.data.entries.some((entry) => entry.name === ".git"));
+    const all = await listing("ignored-on", true);
+    assert.equal(all.success, true, all.error);
+    assert.equal(all.data.entries.find((entry) => entry.name === "ignored.log").ignored, true);
+    assert.equal(all.data.entries.find((entry) => entry.name === ".hidden").ignored, true);
+    assert.ok(!all.data.entries.some((entry) => entry.name === ".git"));
+    assert.equal(h.childWrites.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("5C reports remote Git changes and branches without sending Pi commands", {
   skip: process.platform === "win32",
 }, async () => {
