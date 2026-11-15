@@ -224,6 +224,9 @@ mod tests {
                 machine: "javipi".into(),
                 cwd: "/srv/workspaces/JaviPi".into(),
             }),
+            remote_path: None,
+            remote_owner: None,
+            remote_draft: None,
         }
     }
 
