@@ -9,6 +9,7 @@ use anyhow::Result;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
 use pi_rpc::RpcProcess;
+use pi_rpc::desktop_rpc::{ConfigStore, ConfigWrite, DesktopMethod};
 use serde_json::{Value, json};
 
 use super::state::desktop::config::Applied as ConfigApplied;
