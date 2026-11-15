@@ -410,7 +410,7 @@ impl HistoryView {
                 .py_8()
                 .px_5()
                 .gap_2()
-                .child(Icon::new(IconName::AlertTriangle).text_color(ui::warning()))
+                .child(Icon::new(IconName::FolderGit).text_color(ui::warning()))
                 .child(div().text_sm().text_color(ui::muted())
                     .child(self.error.clone().unwrap_or_default()))
                 .into_any_element(),
