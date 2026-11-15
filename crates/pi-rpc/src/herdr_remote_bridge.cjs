@@ -131,6 +131,7 @@ const { constants: fsConstants } = require("node:fs");
 const { createHash, randomBytes } = require("node:crypto");
 const path = require("node:path");
 const { TextDecoder } = require("node:util");
+const { performance } = require("node:perf_hooks");
 const MAX_REMOTE_FILE = 128 * 1024;
 const MAX_REMOTE_ENTRIES = 500;
 const writeInFlight = new Set();
@@ -1040,9 +1041,13 @@ async function remoteFilesRequest(req) {
       response(true, await restoreTrash(req));
       return;
     }
+    const profile = command === "herdr_fs_list" && req.diagnostics === true;
+    const startedAt = profile ? performance.now() : 0;
     const selected = await safeRemotePath(req.root, req.path);
+    const resolvedAt = profile ? performance.now() : 0;
     if (command === "herdr_fs_list") {
       const entries = await fs.readdir(selected, { withFileTypes: true });
+      const readAt = profile ? performance.now() : 0;
       const sorted = entries
         .filter((entry) => entry.name !== ".git" &&
           !entry.name.startsWith(".herdr-save-") &&
@@ -1055,30 +1060,48 @@ async function remoteFilesRequest(req) {
         .sort((a, b) => (a.kind === "directory" ? 0 : 1) -
                          (b.kind === "directory" ? 0 : 1) ||
                          a.name.localeCompare(b.name));
+      const classifiedAt = profile ? performance.now() : 0;
       const ignored = new Set(sorted.filter((entry) =>
         entry.name.startsWith(".")).map((entry) => entry.name));
+      let ignoreBatches = 0;
+      let ignoreErrors = 0;
       // Check ignored state in bounded batches, without running user shell.
       // Outside a Git repository, hidden-file filtering still behaves
       // consistently and an unavailable Git command does not break Files.
       for (let start = 0; start < sorted.length; start += 100) {
         const group = sorted.slice(start, start + 100);
+        ignoreBatches++;
         try {
           const ignoredNames = await remoteCheckIgnore(
             selected, group.map((entry) => entry.name),
           );
           for (const name of ignoredNames) ignored.add(name);
         } catch {
+          ignoreErrors++;
           // No git repository / no ignored names; never fail filesystem UI.
         }
       }
+      const ignoredAt = profile ? performance.now() : 0;
       const showIgnored = req.showIgnored === true;
       const visible = sorted.filter((entry) =>
         showIgnored || !ignored.has(entry.name)).map((entry) => ({
         ...entry, ignored: ignored.has(entry.name),
       }));
+      const filteredAt = profile ? performance.now() : 0;
       response(true, {
         path: selected, entries: visible.slice(0, MAX_REMOTE_ENTRIES),
         truncated: visible.length > MAX_REMOTE_ENTRIES,
+        ...(profile ? { diagnostics: {
+          totalMs: Math.round(filteredAt - startedAt),
+          resolveMs: Math.round(resolvedAt - startedAt),
+          readdirMs: Math.round(readAt - resolvedAt),
+          classifyMs: Math.round(classifiedAt - readAt),
+          gitIgnoreMs: Math.round(ignoredAt - classifiedAt),
+          filterMs: Math.round(filteredAt - ignoredAt),
+          scannedEntries: entries.length,
+          returnedEntries: Math.min(visible.length, MAX_REMOTE_ENTRIES),
+          ignoreBatches, ignoreErrors,
+        } } : {}),
       });
     } else {
       const stat = await fs.stat(selected);
