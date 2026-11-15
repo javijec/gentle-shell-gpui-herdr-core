@@ -2659,7 +2659,7 @@ impl Render for RemoteFilesView {
                         .disabled(self.creating || self.entry_busy || self.root == "/")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.create_remote_entry(true, window, cx)
-                        }))),
+                        })))
                     .child(Button::new("remote-transfer-upload")
                         .ghost().xsmall().label("Upload")
                         .tooltip("Upload a local file (binary-safe, 16 MiB maximum)")
