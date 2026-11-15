@@ -310,6 +310,199 @@ impl Workspace {
         addresses
     }
 
+    /// Close from Machines means permanent termination, not merely detaching
+    /// the GPUI viewer or saving an Undo snapshot. Always ask first.
+    pub(super) fn confirm_terminate_herdr_address(
+        &mut self, address: String, agent: bool,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        self.confirm_permanent_session_close(
+            NavigatorSessionSource::Herdr {
+                address: address.clone(), live: true, agent,
+            },
+            Some(address), agent, window, cx,
+        );
+    }
+
+    fn confirm_permanent_session_close(
+        &mut self, source: NavigatorSessionSource,
+        address: Option<String>, agent: bool,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if address.as_ref().is_some_and(|address| {
+            self.terminating_herdr_sessions.contains(address)
+                || self.terminated_herdr_sessions.contains(address)
+        }) {
+            return;
+        }
+        let kind = if agent { "Gentle Shell agent" } else { "terminal" };
+        let title = format!("Terminate {kind} permanently?");
+        let description = format!(
+            "This stops the {kind} on its computer and removes it from Machines. \
+             It will not be restored on the next launch. This action cannot be undone. \
+             Saved conversation files are not deleted."
+        );
+        let weak = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let weak = weak.clone();
+            let source = source.clone();
+            let address = address.clone();
+            alert
+                .title(title.clone())
+                .description(description.clone())
+                .ok_text("Terminate permanently")
+                .ok_variant(ButtonVariant::Danger)
+                .show_cancel(true)
+                .on_ok(move |_, window, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.permanently_close_machine_session(
+                            source.clone(), address.clone(), agent, window, cx,
+                        );
+                    });
+                    true
+                })
+        });
+    }
+
+    fn permanently_close_machine_session(
+        &mut self, source: NavigatorSessionSource,
+        address: Option<String>, agent: bool,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if let Some(address) = address {
+            if !self.terminating_herdr_sessions.insert(address.clone())
+                || self.terminated_herdr_sessions.contains(&address)
+            {
+                return;
+            }
+            cx.notify();
+            let task = cx.background_executor().spawn({
+                let address = address.clone();
+                async move { machine_model::terminate_session(&address, agent) }
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.terminating_herdr_sessions.remove(&address);
+                    match result {
+                        Ok(()) => {
+                            this.terminated_herdr_sessions.insert(address.clone());
+                            this.remove_machine_session_from_desktop(
+                                &source, Some(&address), window, cx,
+                            );
+                            this.save_now(cx);
+                            window.push_notification(Notification::info(
+                                "Session terminated in Herdr and removed from Machines.",
+                            ), cx);
+                        }
+                        Err(error) => {
+                            window.push_notification(Notification::error(format!(
+                                "Could not terminate Herdr session {address}: {error}"
+                            )), cx);
+                        }
+                    }
+                    cx.notify();
+                });
+            }).detach();
+        } else {
+            // A local agent may be pending launch and have no address yet.
+            // There is no Herdr terminal to kill; disposing the pane stops
+            // its owned Pi backend and prevents subsequent restore.
+            self.remove_machine_session_from_desktop(&source, None, window, cx);
+            self.save_now(cx);
+        }
+    }
+
+    /// Remove all desktop references to a terminated session. This also
+    /// clears its linked remote file/history panes and stale saved layouts.
+    /// Unlike close_tab(), nothing enters the Undo/reopen queue.
+    fn remove_machine_session_from_desktop(
+        &mut self,
+        source: &NavigatorSessionSource,
+        address: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected_pane = match source {
+            NavigatorSessionSource::Open { pane, .. } => Some(*pane),
+            _ => None,
+        };
+        let selected_saved = match source {
+            NavigatorSessionSource::Saved { space, tab, pane_index } =>
+                Some((*space, *tab, *pane_index)),
+            _ => None,
+        };
+        let matching: std::collections::HashSet<PaneId> = self.panes.iter()
+            .filter_map(|(id, pane)| {
+                let same_address = address.is_some_and(|address| {
+                    pane.herdr_address.as_deref() == Some(address)
+                        || pane.item.terminal_address.as_ref()
+                            .and_then(|get| get(cx)).as_deref() == Some(address)
+                        || pane.linked_session.as_ref()
+                            .and_then(|session| session.read(cx).herdr_terminal())
+                            .as_deref() == Some(address)
+                });
+                (same_address || selected_pane == Some(*id)).then_some(*id)
+            })
+            .collect();
+
+        for id in &matching {
+            self.shutdown_agent_pane(*id, cx);
+        }
+        for (space_index, space) in self.spaces.iter_mut().enumerate() {
+            space.tabs.retain_mut(|tab| {
+                let Some(tree) = tab.tree.filter_map(&mut |id| {
+                    (!matching.contains(id)).then_some(*id)
+                }) else {
+                    return false;
+                };
+                if !tree.contains(&tab.focused) {
+                    tab.focused = tree.leaves()[0];
+                }
+                tab.tree = tree;
+                true
+            });
+            space.active = space.active.min(space.tabs.len().saturating_sub(1));
+            if let Some((tabs, active)) = &mut space.saved {
+                let mut tab_index = 0;
+                tabs.retain_mut(|tab| {
+                    let original_tab = tab_index;
+                    tab_index += 1;
+                    let mut pane_index = 0;
+                    let Some(tree) = tab.layout.filter_map(&mut |pane: &SavedPane| {
+                        let original_pane = pane_index;
+                        pane_index += 1;
+                        let same_address = address.is_some_and(|addr| {
+                            pane.herdr_terminal.as_deref() == Some(addr)
+                                || pane.remote_owner.as_deref() == Some(addr)
+                        });
+                        let selected = selected_saved == Some((
+                            space_index, original_tab, original_pane,
+                        ));
+                        (!same_address && !selected).then_some(pane.clone())
+                    }) else {
+                        return false;
+                    };
+                    tab.focused = tab.focused.min(tree.leaves().len().saturating_sub(1));
+                    tab.layout = tree;
+                    true
+                });
+                *active = (*active).min(tabs.len().saturating_sub(1));
+            }
+        }
+        for id in matching {
+            self.panes.remove(&id);
+        }
+        // Undo records intentionally omit dead Herdr addresses, so there is
+        // no reliable way to pick only this one's old close snapshots.
+        // Clearing them ensures Undo cannot resurrect a terminated agent.
+        self.closed.clear();
+        window.remove_notification::<closed::Closed>(cx);
+        self.focus_active(window, cx);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
     fn toggle_machine_group(&mut self, key: String, cx: &mut Context<Self>) {
         if !self.collapsed_machines.insert(key.clone()) {
             self.collapsed_machines.remove(&key);
