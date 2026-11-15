@@ -117,6 +117,19 @@ pub fn discover() -> Result<Snapshot, String> {
     })
 }
 
+/// Only list registered machines for the Machines management modal.
+/// The workspace's navigation refresh uses discover() for sessions as well.
+pub fn discover_registered_machines() -> Result<Snapshot, String> {
+    let mut client = client()?;
+    let local_name = client.hello().core.name.clone();
+    let machines = client.list_machines().map_err(|error| error.to_string())?;
+    Ok(Snapshot {
+        local_name,
+        machines: machines.machines.iter().filter_map(parse_machine).collect(),
+        terminals: Vec::new(),
+    })
+}
+
 /// Request an OS shell on the selected machine. The local Herdr core owns the
 /// terminal; a subsequent GPUI panel only attaches to the returned address.
 pub fn create_shell(machine: Option<&str>) -> Result<String, String> {
@@ -151,34 +164,52 @@ pub fn create_shell_in(machine: Option<&str>, cwd: Option<&str>) -> Result<Strin
         .ok_or_else(|| "Herdr returned no terminal address".to_string())
 }
 
-/// Prepare the machine.add payload without ever starting an agent or shell.
-/// The target can be an SSH config Host, user@host or user@host:port.
-fn machine_add_params(target: &str, name: Option<&str>) -> Result<Value, String> {
-    let target = target.trim();
-    if target.is_empty() || target.len() > 512 || target.starts_with('-')
-        || target.chars().any(char::is_whitespace)
-        || target.chars().any(char::is_control)
+/// Build an actual Herdr Core machine.add request. Transport can be an
+/// SSH-style host identifier or any supported duplex connection command.
+/// The latter uses Herdr's 'via' API and does not require SSH specifically.
+fn machine_add_params(
+    connection: &str, name: Option<&str>, via: bool,
+) -> Result<Value, String> {
+    let connection = connection.trim();
+    if connection.is_empty() || connection.len() > 1024
+        || connection.chars().any(char::is_control)
+        || (!via && (connection.starts_with('-')
+            || connection.chars().any(char::is_whitespace)))
     {
-        return Err("Enter a valid SSH target (for example dietpi@javipi).".into());
+        return Err(if via {
+            "Enter a connection command that can run Herdr Core on the remote machine.".into()
+        } else {
+            "Enter a valid host or network address.".into()
+        });
     }
-    let mut params = json!({"target": target});
-    if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) {
-        if name.len() > 64
+    let name = name.map(str::trim).filter(|name| !name.is_empty());
+    if via && name.is_none() {
+        return Err("A machine name is required for a custom Herdr connection.".into());
+    }
+    if let Some(name) = name
+        && (name.len() > 64
             || !name.chars().all(|ch| ch.is_ascii_alphanumeric()
-                || matches!(ch, '-' | '_' | '.'))
-        {
-            return Err("Machine name must contain only letters, numbers, ., - or _ (max 64 characters).".into());
-        }
+                || matches!(ch, '-' | '_' | '.')))
+    {
+        return Err("Machine name must use letters, numbers, periods, hyphens or underscores (max 64).".into());
+    }
+    let mut params = if via {
+        json!({"via": connection})
+    } else {
+        json!({"target": connection})
+    };
+    if let Some(name) = name {
         params["name"] = json!(name);
     }
     Ok(params)
 }
 
-/// Register a new SSH machine in the local Herdr Core. This is an actual
-/// machine.add RPC, not a remote agent, a terminal, or a GPUI-only bookmark.
-/// Blocking SSH work runs on a background executor in MachinesView.
-pub fn add_machine(target: &str, name: Option<&str>) -> Result<(), String> {
-    let params = machine_add_params(target, name)?;
+/// Register another Herdr Core in this one. All networking is managed by
+/// Herdr's machine.add; the GUI never launches a shell or an agent.
+pub fn add_machine(
+    connection: &str, name: Option<&str>, via: bool,
+) -> Result<(), String> {
+    let params = machine_add_params(connection, name, via)?;
     let mut client = client()?;
     if !client.hello().methods.iter().any(|method| method == "machine.add") {
         return Err("The connected Herdr Core does not support machine.add. Update hc.".into());
@@ -186,11 +217,33 @@ pub fn add_machine(target: &str, name: Option<&str>) -> Result<(), String> {
     client.call("machine.add", params).map(|_| ()).map_err(|error| {
         let details = error.to_string();
         if details.contains("hc_missing") {
-            format!("{details}. Install hc on the remote machine first, or use 'hc machine add TARGET --install' in a terminal.")
+            format!("{details}. Herdr Core must be installed on the remote machine.")
         } else {
             details
         }
     })
+}
+
+/// Remove only the registered machine profile. Herdr Core deliberately
+/// leaves every remote agent, terminal and saved conversation running.
+pub fn remove_machine(name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() || name.len() > 64
+        || !name.chars().all(|ch| ch.is_ascii_alphanumeric()
+            || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err("Invalid Herdr machine name.".into());
+    }
+    let mut client = client()?;
+    if !client.hello().methods.iter().any(|method| method == "machine.rm") {
+        return Err("The connected Herdr Core does not support machine.rm. Update hc.".into());
+    }
+    let result = client.call("machine.rm", json!({"machine": name}))
+        .map_err(|error| error.to_string())?;
+    if result["removed"].as_str() != Some(name) {
+        return Err("Herdr did not confirm the removed machine name.".into());
+    }
+    Ok(())
 }
 
 /// Refuse to terminate an arbitrary Herdr terminal or a session whose type
@@ -250,24 +303,36 @@ mod tests {
 
     #[test]
     fn machine_registration_uses_ssh_target_and_optional_name() {
-        let request = machine_add_params(" dietpi@javipi:2222 ", Some("pi-home")).unwrap();
+        let request = machine_add_params(" dietpi@javipi:2222 ", Some("pi-home"), false).unwrap();
         assert_eq!(request, json!({
             "target": "dietpi@javipi:2222", "name": "pi-home"
         }));
-        assert_eq!(machine_add_params("workbox", None).unwrap(),
+        assert_eq!(machine_add_params("workbox", None, false).unwrap(),
             json!({"target":"workbox"}));
-        assert_eq!(machine_add_params("ssh://user@10.0.0.7:2222", Some("")).unwrap(),
+        assert_eq!(machine_add_params("ssh://user@10.0.0.7:2222", Some(""), false).unwrap(),
             json!({"target":"ssh://user@10.0.0.7:2222"}));
     }
 
     #[test]
     fn machine_registration_rejects_empty_or_unsafe_values() {
         for target in ["", " ", "--config", "user@host with spaces", "box\nnext"] {
-            assert!(machine_add_params(target, None).is_err());
+            assert!(machine_add_params(target, None, false).is_err());
         }
         for name in ["space name", "bad/name", "bad\nname"] {
-            assert!(machine_add_params("workbox", Some(name)).is_err());
+            assert!(machine_add_params("workbox", Some(name), false).is_err());
         }
+    }
+
+    #[test]
+    fn machine_registration_supports_herdr_via_without_ssh() {
+        let request = machine_add_params(
+            "wsl.exe -d Ubuntu -e sh -c", Some("wsl"), true,
+        ).unwrap();
+        assert_eq!(request, json!({
+            "via": "wsl.exe -d Ubuntu -e sh -c", "name": "wsl"
+        }));
+        assert!(machine_add_params("wsl.exe -d Ubuntu", None, true).is_err());
+        assert!(machine_add_params("cmd\nthing", Some("win"), true).is_err());
     }
 
     #[test]
