@@ -35,8 +35,10 @@ impl Workspace {
                 && self
                     .panes
                     .get(id)
-                    .is_some_and(|p| p.item.kind == PaneKind::File
-                        && !p.item.unsaved.as_ref().is_some_and(|probe| probe(cx)))
+                    .is_some_and(|p| {
+                        Some(p.item.kind) == kind
+                            && !p.item.unsaved.as_ref().is_some_and(|probe| probe(cx))
+                    })
         });
         if let Some(old) = preview
             && let Some(pane) = self.panes.remove(&new)
@@ -278,6 +280,7 @@ impl Workspace {
         let available = match kind {
             PaneKind::Terminal => factories.terminal.is_some(),
             PaneKind::File => factories.file.is_some(),
+            PaneKind::History => factories.history.is_some(),
             PaneKind::Agent => false,
         };
         if !available {
@@ -304,6 +307,7 @@ impl Workspace {
         let item = match kind {
             PaneKind::Terminal => (factories.terminal?)(target.clone(), herdr_terminal, window, cx),
             PaneKind::File => (factories.file?)(target.clone(), window, cx),
+            PaneKind::History => (factories.history?)(target.clone(), window, cx),
             PaneKind::Agent => return None,
         };
         let id = self.alloc_id();
@@ -346,9 +350,12 @@ impl Workspace {
         let mut pane = Pane {
             item,
             session: None,
+            linked_session: None,
             cwd,
             path: Some(path),
             session_file: None,
+            herdr_address: None,
+            agent_target: None,
             title: SharedString::default(),
             running: false,
             needs_you: false,
@@ -375,7 +382,9 @@ impl Workspace {
                 window,
                 cx,
             )),
-            PaneKind::Terminal | PaneKind::File => self.new_factory_pane(kind, target, window, cx),
+            PaneKind::Terminal | PaneKind::File | PaneKind::History => {
+                self.new_factory_pane(kind, target, window, cx)
+            },
         }
     }
 
