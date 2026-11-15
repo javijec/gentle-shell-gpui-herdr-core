@@ -699,8 +699,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(focused) = self.focused_pane() else {
-            let root = self.space().root.clone();
-            self.open_tab(PaneKind::Agent, root, None, None, window, cx);
+            // No focused pane: preserve the active machine exactly as NewTab
+            // does, rather than constructing an implicit Windows agent.
+            self.on_new_tab(&NewTab, window, cx);
             return;
         };
         let (kind, target) = match what {
