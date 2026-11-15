@@ -8,7 +8,8 @@
 use gentle_core::profiles::{
     PROFILE_EXPORT_FILE, PinRead, ProfileExport, ProfilesFile, Routing, create_profile,
     delete_profile, duplicate_profile, normalize_routing, parse_model_ref, parse_profile_export,
-    parse_profiles, rename_profile, serialize_profile_export, serialize_profiles, update_profile,
+    parse_profiles, rename_profile, serialize_profile_export, serialize_profiles,
+    set_orchestrator_mode, update_profile,
 };
 use gpui_kit::*;
 use pi_rpc::desktop_rpc::{
@@ -95,8 +96,8 @@ impl ProfilesView {
         );
     }
 
-    /// The draft as the store would hold it (create or update), or `None`
-    /// when it already matches.
+    /// The draft (routing and orchestrator mode) as the store would hold it
+    /// (create or update), or `None` when it already matches.
     fn saved_draft(&self) -> Result<Option<ProfilesFile>, String> {
         let Some(name) = &self.selected else {
             return Ok(None);
@@ -106,14 +107,16 @@ impl ProfilesView {
             .file
             .get(name)
             .map(|r| normalize_routing(&r.to_json()).unwrap_or_default());
-        if stored.as_ref() == Some(&normalized) {
+        let mode_saved = self.file.orchestrator_mode(name) == self.draft_mode;
+        if stored.as_ref() == Some(&normalized) && mode_saved {
             return Ok(None);
         }
-        if self.file.has(name) {
-            update_profile(&self.file, name, self.draft.clone()).map(Some)
+        let next = if self.file.has(name) {
+            update_profile(&self.file, name, self.draft.clone())?
         } else {
-            create_profile(&self.file, name, self.draft.clone()).map(Some)
-        }
+            create_profile(&self.file, name, self.draft.clone())?
+        };
+        set_orchestrator_mode(&next, name, self.draft_mode).map(Some)
     }
 
     /// Save pending edits, then continue with `then` (told whether it saved).
@@ -127,6 +130,7 @@ impl ProfilesView {
             Ok(None) => then(self, false, cx),
             Ok(Some(next)) => self.write_store(next, cx, move |this, cx| {
                 this.stored = this.draft.clone();
+                this.stored_mode = this.draft_mode;
                 then(this, true, cx);
             }),
         }
@@ -453,6 +457,9 @@ impl ProfilesView {
     }
 
     pub(super) fn clear_session(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = self.session.clone() {
+            session.update(cx, |session, cx| session.set_session_profile(None, cx));
+        }
         self.say("Sent /gentle:profiles clear.", Tone::Info);
         cx.emit(ProfilesEvent::RunCommand("/gentle:profiles clear".into()));
         cx.notify();
