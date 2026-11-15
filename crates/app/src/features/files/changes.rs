@@ -46,7 +46,8 @@ pub enum ChangesEvent {
     RemoteCommit(String),
     RemoteBulkStage { stage: bool },
     RemoteStashPush(String),
-}
+    RemoteDiscard { path: String, index: char, worktree: char, staged: bool },
+
 
 #[derive(Clone, PartialEq)]
 struct Repo {
@@ -919,12 +920,30 @@ impl ChangesView {
                         }),
                 );
             let path = entry.path.clone();
+            let menu_entry = entry.clone();
+            let discard_weak = cx.entity().downgrade();
+            let writable = self.remote_writable && !self.remote_busy;
             return change_row(
                 SharedString::from(id), &entry.path, badge, selected, indent, control,
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.click_entry(&path, side, cx)
             }))
+            .context_menu(move |menu, _, _| {
+                let entry = menu_entry.clone();
+                let weak = discard_weak.clone();
+                menu.item(PopupMenuItem::new("Discard changes…")
+                    .icon(Icon::new(IconName::Undo2))
+                    .disabled(!writable || entry.kind == EntryKind::Conflict)
+                    .on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |_, cx| {
+                            cx.emit(ChangesEvent::RemoteDiscard {
+                                path: entry.path.clone(), index: entry.index,
+                                worktree: entry.worktree, staged: side == Side::Staged,
+                            });
+                        });
+                    }))
+            })
             .into_any_element();
         }
         let id = format!("change-{side:?}-{}", entry.path);

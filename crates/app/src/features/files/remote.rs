@@ -491,6 +491,7 @@ pub struct RemoteFilesView {
     git_confirm_stash: Option<(String, StashAction)>,
     git_confirm_network: Option<String>,
     git_confirm_worktree: Option<(RemoteWorktreeAction, String)>,
+    git_confirm_discard: Option<(String, bool)>,
     _git_events: Vec<Subscription>,
     focus: FocusHandle,
     tree_children: HashMap<String, Vec<RemoteEntry>>,
@@ -723,6 +724,9 @@ impl RemoteFilesView {
                 ChangesEvent::RemoteStashPush(message) => {
                     this.git_stash_push(message.clone(), cx);
                 }
+                ChangesEvent::RemoteDiscard { path, index, worktree, staged } => {
+                    this.git_discard(path.clone(), *index, *worktree, *staged, cx);
+                }
                 _ => {}
             }
         });
@@ -760,6 +764,7 @@ impl RemoteFilesView {
             git_confirm_stash: None,
             git_confirm_network: None,
             git_confirm_worktree: None,
+            git_confirm_discard: None,
             _git_events: git_events,
             focus: cx.focus_handle(),
             tree_children: HashMap::new(),
@@ -1525,6 +1530,7 @@ impl RemoteFilesView {
         self.git_confirm_stash = None;
         self.git_confirm_network = None;
         self.git_confirm_worktree = None;
+        self.git_confirm_discard = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
             view.mark_remote_stash(None, cx);
@@ -1599,13 +1605,18 @@ impl RemoteFilesView {
             return;
         };
         self.git_write_future(async move {
-            process.request(command).await.map(|_| ())
-                .map_err(|error| error.to_string())
+            let reply = process.request(command).await
+                .map_err(|error| error.to_string())?;
+            let trashed = reply.data["trashToken"].as_str().and_then(|token| {
+                reply.data["trashedPath"].as_str()
+                    .map(|path| (token.to_owned(), path.to_owned()))
+            });
+            Ok(trashed)
         }, cx);
     }
 
     fn git_write_future(
-        &mut self, operation: impl std::future::Future<Output = Result<(), String>>
+        &mut self, operation: impl std::future::Future<Output = Result<Option<(String, String)>, String>>
             + Send + 'static,
         cx: &mut Context<Self>,
     ) {
@@ -1621,6 +1632,7 @@ impl RemoteFilesView {
         self.git_confirm_stash = None;
         self.git_confirm_network = None;
         self.git_confirm_worktree = None;
+        self.git_confirm_discard = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
             view.mark_remote_stash(None, cx);
@@ -1634,7 +1646,10 @@ impl RemoteFilesView {
                     view.set_remote_busy(false, cx);
                 });
                 match result {
-                    Ok(_) => {
+                    Ok(trashed) => {
+                        if let Some(receipt) = trashed {
+                            this.last_trash = Some(receipt);
+                        }
                         this.git_feedback = Some("Remote Git updated. Status refreshed.".into());
                         this.refresh_git(cx);
                     }
@@ -1668,7 +1683,9 @@ impl RemoteFilesView {
                 index_token,
             }),
         };
-        self.git_write_future(backend.git_file(action, request), cx);
+        self.git_write_future(async move {
+            backend.git_file(action, request).await.map(|_| None)
+        }, cx);
     }
 
     /// A confirmed commit from the shared ChangesView; retain Herdr guards.
@@ -1736,6 +1753,38 @@ impl RemoteFilesView {
             "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
             "expectedIndexToken": snapshot.index_token,
             "branch": branch,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_discard(&mut self, path: String, index: char, worktree: char,
+        staged: bool, cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self.git.as_ref().filter(|s|
+            s.writes_enabled && s.index_token.is_some()
+        ) else { return; };
+        if !snapshot.files.iter().any(|entry|
+            entry.path == path && entry.index == index && entry.worktree == worktree
+        ) { return; }
+        let pending = (path.clone(), staged);
+        if self.git_confirm_discard.as_ref() != Some(&pending) {
+            self.git_confirm_discard = Some(pending);
+            self.git_feedback = Some(
+                "Discard replaces local changes; select the action again to confirm.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        let absolute = format!("{}/{}", snapshot.toplevel.trim_end_matches('/'), path);
+        let command = json!({
+            "type": "herdr_git_discard", "root": self.root,
+            "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "path": absolute, "staged": staged,
+            "expectedIndex": index.to_string(),
+            "expectedWorktree": worktree.to_string(),
         });
         self.git_write(command, cx);
     }

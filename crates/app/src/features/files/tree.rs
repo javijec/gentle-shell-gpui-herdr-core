@@ -214,7 +214,8 @@ impl FileTreeView {
                 | ChangesEvent::RemoteOpenDiff(_)
                 | ChangesEvent::RemoteCommit(_)
                 | ChangesEvent::RemoteBulkStage { .. }
-                | ChangesEvent::RemoteStashPush(_) => {},
+                | ChangesEvent::RemoteStashPush(_)
+                | ChangesEvent::RemoteDiscard { .. } => {},
             }),
             cx.subscribe(&refs, |_, _, event: &RefsEvent, cx| match event {
                 RefsEvent::OpenAgent(path) => cx.emit(FileTreeEvent::OpenAgent(path.clone())),
