@@ -178,11 +178,12 @@ fn machine_add_params(
         return Err("A machine name is required for a custom Herdr connection.".into());
     }
     if let Some(name) = name
-        && (name.len() > 64
-            || !name.chars().all(|ch| ch.is_ascii_alphanumeric()
+        && (name.len() > 32
+            || !name.starts_with(|ch: char| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+            || !name.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()
                 || matches!(ch, '-' | '_' | '.')))
     {
-        return Err("Machine name must use letters, numbers, periods, hyphens or underscores (max 64).".into());
+        return Err("Herdr machine names must be 1-32 lowercase letters, numbers, - _ or ., beginning with a letter or number.".into());
     }
     let mut params = if via {
         json!({"via": connection})
@@ -302,7 +303,7 @@ mod tests {
         for target in ["", " ", "--config", "user@host with spaces", "box\nnext"] {
             assert!(machine_add_params(target, None, false).is_err());
         }
-        for name in ["space name", "bad/name", "bad\nname"] {
+        for name in ["space name", "bad/name", "bad\nname", "UPPERCASE", "-bad"] {
             assert!(machine_add_params("workbox", Some(name), false).is_err());
         }
     }
