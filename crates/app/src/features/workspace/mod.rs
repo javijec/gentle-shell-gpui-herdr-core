@@ -31,7 +31,8 @@ use crate::features::memory::{MemoryEvent, MemoryView};
 use crate::features::notices::{self, Notices};
 use crate::features::onboarding::{OnboardingEvent, OnboardingView, Probe};
 use crate::features::palette::{
-    Activity, Category, PaletteAction, PaletteEvent, PaletteInput, PaletteView, WorkspaceRow,
+    Activity, Category, PaletteAction, PaletteEvent, PaletteInput, PaletteRemote,
+    PaletteView, WorkspaceRow,
 };
 use crate::features::profiles::{ModelChoice, ProfilesEvent, ProfilesView};
 use crate::features::providers::{ProvidersEvent, ProvidersView};
