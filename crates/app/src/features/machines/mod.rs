@@ -8,7 +8,9 @@ mod view;
 pub use directory_picker::{RemoteDirectoryEvent, RemoteDirectoryPicker};
 
 use gpui_kit::*;
+use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::input::InputState;
+use gpui_kit::component::WindowExt as _;
 
 pub enum MachinesEvent {
     Close,
