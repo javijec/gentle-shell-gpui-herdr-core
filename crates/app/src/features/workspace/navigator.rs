@@ -828,6 +828,7 @@ mod tests {
                 title: "Gentle Shell".into(),
                 cwd: "/srv/workspaces/OtherProject".into(),
                 state: "live".into(),
+                gentle_shell: true,
             }],
         };
         assert_eq!(
