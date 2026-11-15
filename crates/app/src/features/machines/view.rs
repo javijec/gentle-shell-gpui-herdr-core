@@ -1,6 +1,8 @@
 //! Machines management modal: registered computers only.
 //! Never show, open, close or create individual sessions from this screen.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
@@ -40,6 +42,21 @@ impl MachinesView {
             format!("SSH · {}", machine.target)
         };
         let can_retry = !matches!(machine.state.as_str(), "connected" | "connecting" | "needs_update");
+        let offline_age = machine.since_ms.and_then(|since| {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+            let minutes = (now.as_millis() as u64).saturating_sub(since) / 60_000;
+            Some(if minutes == 0 {
+                "Offline less than a minute".to_string()
+            } else {
+                format!("Offline for {minutes} min")
+            })
+        });
+        let logout_warning = match machine.logout_linger_user.as_deref() {
+            Some(user) => format!(
+                "Remote Core may stop at logout. On that machine run: sudo loginctl enable-linger -- {user}"
+            ),
+            None => "Remote Core may stop at logout; enable systemd lingering on that machine.".to_string(),
+        };
         h_flex()
             .id(("machines-registered", index))
             .min_w_0()
@@ -81,9 +98,12 @@ impl MachinesView {
                         col.child(div().text_xs().text_color(ui::muted())
                             .child("Temporary machine profile"))
                     })
+                    .when_some(offline_age, |col, age| {
+                        col.child(div().text_xs().text_color(ui::faint()).child(age))
+                    })
                     .when(machine.keeps_running_after_logout == Some(false), |col| {
                         col.child(div().text_xs().text_color(ui::warning())
-                            .child("Remote Core may stop at logout; enable systemd lingering on that machine."))
+                            .child(logout_warning))
                     })
                     .when(machine.state == "needs_login", |col| {
                         col.child(div().text_xs().text_color(ui::warning())
@@ -221,7 +241,7 @@ impl Render for MachinesView {
                                 h_flex().gap_2()
                                     .child(
                                         Button::new("machines-via")
-                                            .small().label("Custom transport (no SSH)")
+                                            .small().label("Custom transport")
                                             .when(self.add_via, |button| button.primary())
                                             .when(!self.add_via, |button| button.ghost())
                                             .disabled(self.busy)
@@ -279,7 +299,7 @@ impl Render for MachinesView {
                             .child(
                                 div().text_xs().text_color(ui::muted())
                                     .child(if self.add_via {
-                                        "The command must run the remote shell line supplied by Herdr, using bidirectional stdin/stdout without prompts. Example: wsl.exe -d Ubuntu -e sh -c. This does not use SSH."
+                                        "No SSH required: supply a command that runs Herdr's remote shell line over bidirectional stdin/stdout without prompts (e.g. wsl.exe -d Ubuntu -e sh -c). This is not direct IP pairing."
                                     } else {
                                         "Herdr Core connects over SSH using this host. Configure SSH keys first; passwords and host-key prompts cannot be answered in this dialog."
                                     }),
