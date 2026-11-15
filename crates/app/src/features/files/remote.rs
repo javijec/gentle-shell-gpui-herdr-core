@@ -561,6 +561,17 @@ fn remote_parent(root: &str, directory: &str) -> Option<String> {
         })
 }
 
+/// Retry transport startup failures, not filesystem permission/path errors.
+fn retryable_remote_loading_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("waiting for this remote agent to connect")
+        || error.contains("rpc bridge is not connected")
+        || error.contains("rpc bridge exited before replying")
+        || error.contains("remote agent is disconnected")
+        || error.contains("connection interrupted")
+        || error.contains("connection reset")
+}
+
 fn friendly_error(error: &str) -> String {
     let low = error.to_lowercase();
     if low.contains("unknown command") || low.contains("unsupported command")
@@ -821,31 +832,43 @@ impl RemoteFilesView {
             return view;
         }
         view.load_directory(view.root.clone(), cx);
-        // A newly launched remote Pi may still be connecting when the
-        // right panel appears. Wait for the SAME agent to become ready.
-        if view.error.is_some() {
-            view._wait_for_agent = cx.spawn_in(window, async move |this, cx| {
-                for _ in 0..45 {
-                    cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
-                    let ready = this.update_in(cx, |this, window, cx| {
-                        if this.session.read(cx).remote_fs_process().is_some() {
-                            if let Some(path) = this.pane_path.clone() {
-                                this.open(path, false, window, cx);
-                            } else {
-                                this.load_directory(this.root.clone(), cx);
-                            }
-                            true
-                        } else {
-                            false
+        // A newly launched Pi can expose a process before the bridge is
+        // ready. Retry only transient transport errors, including failures
+        // that arrive asynchronously after the initial directory request.
+        view._wait_for_agent = cx.spawn_in(window, async move |this, cx| {
+            for _ in 0..45 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(2))
+                    .await;
+                let finished = this.update_in(cx, |this, window, cx| {
+                    if this.pane_path.is_some() {
+                        if this.preview.is_some() {
+                            return true;
                         }
-                    });
-                    match ready {
-                        Ok(true) | Err(_) => break,
-                        Ok(false) => {}
+                    } else if this.tree_children.contains_key(&this.current) {
+                        return true;
                     }
+                    if this.loading {
+                        return false;
+                    }
+                    if !this.error.as_deref().is_some_and(retryable_remote_loading_error) {
+                        return true;
+                    }
+                    if this.session.read(cx).remote_fs_process().is_none() {
+                        return false;
+                    }
+                    if let Some(path) = this.pane_path.clone() {
+                        this.open(path, false, window, cx);
+                    } else {
+                        this.load_directory(this.current.clone(), cx);
+                    }
+                    false
+                });
+                if !matches!(finished, Ok(false)) {
+                    break;
                 }
-            });
-        }
+            }
+        });
         view
     }
 
@@ -1045,7 +1068,7 @@ impl RemoteFilesView {
 
     fn rebuild_remote_rows(&mut self) {
         self.tree_rows = Rc::new(visible_rows(
-            &self.root, &self.tree_children, &self.tree_expanded, &self.tree_loading,
+            &self.current, &self.tree_children, &self.tree_expanded, &self.tree_loading,
         ));
     }
 
@@ -2825,7 +2848,26 @@ impl Render for RemoteFilesView {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_git_snapshot, remote_child, remote_parent};
+    use super::{
+        parse_git_snapshot, remote_child, remote_parent, retryable_remote_loading_error,
+    };
+
+    #[test]
+    fn remote_listing_retries_only_transport_failures() {
+        assert!(retryable_remote_loading_error(
+            "Waiting for this remote agent to connect…"
+        ));
+        assert!(retryable_remote_loading_error(
+            "Herdr RPC bridge is not connected"
+        ));
+        assert!(!retryable_remote_loading_error(
+            "The requested root does not match this agent's working directory"
+        ));
+        assert!(!retryable_remote_loading_error(
+            "Permission denied"
+        ));
+    }
+
     #[test]
     fn remote_paths_remain_under_root() {
         assert_eq!(remote_child("/srv/workspaces/demo", "Cargo.toml"),
