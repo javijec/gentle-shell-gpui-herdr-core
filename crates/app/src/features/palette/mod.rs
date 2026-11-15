@@ -227,7 +227,7 @@ impl PaletteView {
                 let _ = this.update(cx, |this, cx| {
                     match result {
                         Ok(response) => {
-                            let parsed = super::sources::parse_remote_palette(&response.data);
+                            let parsed = sources::parse_remote_palette(&response.data);
                             match parsed {
                                 Some((files, branches, truncated)) => {
                                     this.files = Some(files);
