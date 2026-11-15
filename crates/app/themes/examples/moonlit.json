@@ -1,0 +1,15 @@
+{
+  "name": "Moonlit",
+  "bg": "#0d1530",
+  "text": "#dbe2f5",
+  "accent": "#d9c98f",
+  "background": {
+    "scene": "moonlit",
+    "sky": [
+      "#1a2a5e",
+      "#0d1530",
+      "#090f24"
+    ],
+    "speed": 1
+  }
+}

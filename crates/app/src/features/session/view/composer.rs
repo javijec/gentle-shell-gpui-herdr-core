@@ -11,7 +11,7 @@ const KISSES_MAX: usize = 10;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::Textarea;
+use gpui_kit::component::input::{InputToken, Textarea};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -21,6 +21,7 @@ use super::activity::chip_popover;
 use super::dialogs::checkbox_box;
 use super::{NARROW, TINY, image_tile, number_badge};
 use crate::features::session::SessionView;
+use crate::features::session::attachments::PastedText;
 use crate::shared::kisses::{HEART, LIPS, noise, paint_sprite};
 use crate::shared::ui;
 use gentle_core::transcript::format_tokens;
@@ -158,35 +159,41 @@ impl SessionView {
         )
     }
 
-    /// 64px numbered thumbnails of the images waiting to be sent, each with ×.
+    /// 64px tiles of what waits to be sent: numbered image thumbnails, then
+    /// pasted-text cards; each with ×.
     fn render_attachments(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if self.attachments.is_empty() {
+        if self.attachments.is_empty() && self.pasted.is_empty() {
             return None;
         }
-        let tiles = self.attachments.iter().enumerate().map(|(ix, attachment)| {
-            image_tile(Some(attachment.image.clone()), px(64.), px(64.))
-                .child(number_badge(ix + 1))
-                .child(
-                    h_flex()
-                        .id(("attachment-remove", ix))
-                        .absolute()
-                        .top(px(3.))
-                        .right(px(3.))
-                        .size(px(18.))
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(ui::well())
-                        .cursor_pointer()
-                        .hover(|s| s.bg(ui::danger()))
-                        .tooltip(|window, cx| Tooltip::new("Remove").build(window, cx))
-                        .on_click(cx.listener(move |this, _, window, cx| {
+        let images: Vec<_> = self
+            .attachments
+            .iter()
+            .enumerate()
+            .map(|(ix, attachment)| {
+                image_tile(Some(attachment.image.clone()), px(64.), px(64.))
+                    .child(number_badge(ix + 1))
+                    .child(remove_button(
+                        ("attachment-remove", ix),
+                        cx.listener(move |this, _, window, cx| {
                             this.remove_attachment(ix, window, cx)
-                        }))
-                        .child(Icon::new(IconName::X).xsmall().text_color(ui::fg())),
-                )
+                        }),
+                    ))
+            })
+            .collect();
+        let pastes = self.pasted.iter().enumerate().map(|(ix, paste)| {
+            pasted_card(ix + 1, paste).child(remove_button(
+                ("pasted-remove", ix),
+                cx.listener(move |this, _, window, cx| this.remove_pasted(ix, window, cx)),
+            ))
         });
-        Some(h_flex().w_full().flex_wrap().gap_2().children(tiles))
+        Some(
+            h_flex()
+                .w_full()
+                .flex_wrap()
+                .gap_2()
+                .children(images)
+                .children(pastes),
+        )
     }
 
     /// The text field; a click anywhere in it focuses the text area.
@@ -207,6 +214,18 @@ impl SessionView {
                 Textarea::new(&self.composer)
                     .appearance(false)
                     .disabled(!ready)
+                    // Pasted texts' tokens, as file-icon `#N` chips.
+                    .token(|token, _, _| {
+                        let chip = InputToken::new(token)
+                            .icon(IconName::FileText)
+                            .text_color(ui::info());
+                        if token.is_selected() {
+                            chip
+                        } else {
+                            chip.bg(ui::info().opacity(0.12))
+                                .border_color(ui::info().opacity(0.22))
+                        }
+                    })
                     .on_paste(move |item, window, cx| {
                         weak.update(cx, |this, cx| this.paste_clipboard(item, window, cx))
                             .unwrap_or(false)
@@ -573,4 +592,90 @@ impl SessionView {
                 )
             })
     }
+}
+
+/// The × in an attachment's top-right corner.
+fn remove_button(
+    id: impl Into<ElementId>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    h_flex()
+        .id(id)
+        .absolute()
+        .top(px(3.))
+        .right(px(3.))
+        .size(px(18.))
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(ui::well())
+        .cursor_pointer()
+        .hover(|s| s.bg(ui::danger()))
+        .tooltip(|window, cx| Tooltip::new("Remove").build(window, cx))
+        .on_click(on_click)
+        .child(Icon::new(IconName::X).xsmall().text_color(ui::fg()))
+}
+
+/// Pasted text `n` waiting to be sent: a page with its first lines in tiny
+/// type, then `#N` and how many lines it has.
+fn pasted_card(n: usize, paste: &PastedText) -> Div {
+    let lines = match paste.lines {
+        1 => "+1 line".to_string(),
+        lines => format!("+{lines} lines"),
+    };
+    h_flex()
+        .relative()
+        .flex_shrink_0()
+        .h(px(64.))
+        .pl(px(7.))
+        .pr(px(30.))
+        .gap_2p5()
+        .rounded_lg()
+        .border_1()
+        .border_color(ui::border_strong())
+        .bg(ui::surface())
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(38.))
+                .h(px(48.))
+                .p(px(4.))
+                .rounded_md()
+                .overflow_hidden()
+                .border_1()
+                .border_color(ui::border())
+                .bg(ui::well())
+                .font_family(ui::MONO)
+                .text_size(px(5.))
+                .line_height(px(6.))
+                .text_color(ui::faint())
+                .whitespace_nowrap()
+                .child(paste.preview.clone()),
+        )
+        .child(
+            v_flex()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Icon::new(IconName::FileText)
+                                .xsmall()
+                                .text_color(ui::muted()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(ui::fg())
+                                .child(format!("#{n}")),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(ui::muted())
+                        .child(lines),
+                ),
+        )
 }

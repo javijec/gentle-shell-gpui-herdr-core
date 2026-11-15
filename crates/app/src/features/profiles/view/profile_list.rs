@@ -29,16 +29,36 @@ impl ProfilesView {
             .border_color(ui::border())
             .child(
                 h_flex()
-                    .px_4()
+                    .pl_4()
+                    .pr_2()
                     .pt_3()
                     .pb_1()
                     .gap_2()
                     .child(ui::section_label("Profiles"))
                     .child(
                         div()
+                            .flex_1()
                             .text_xs()
                             .text_color(ui::faint())
                             .child(count.to_string()),
+                    )
+                    .child(
+                        Button::new("profile-import")
+                            .xsmall()
+                            .ghost()
+                            .icon(Icon::new(IconName::Download))
+                            .tooltip("Import a profile…")
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.import_profile(cx))),
+                    )
+                    .child(
+                        Button::new("profile-export")
+                            .xsmall()
+                            .ghost()
+                            .icon(Icon::new(IconName::Upload))
+                            .tooltip("Export this profile…")
+                            .disabled(self.busy || !has_selection)
+                            .on_click(cx.listener(|this, _, _, cx| this.export_profile(cx))),
                     ),
             )
             .child(

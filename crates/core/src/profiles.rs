@@ -25,9 +25,9 @@ pub use routing::{
     normalized_json, parse_model_ref,
 };
 pub use store::{
-    Drops, ProfilesFile, bootstrap_profiles, create_profile, delete_profile, duplicate_profile,
-    is_valid_profile_name, parse_profiles, rename_profile, serialize_profiles, set_active,
-    update_profile,
+    Drops, PROFILE_EXPORT_FILE, ProfileExport, ProfilesFile, bootstrap_profiles, create_profile,
+    delete_profile, duplicate_profile, is_valid_profile_name, parse_profile_export, parse_profiles,
+    rename_profile, serialize_profile_export, serialize_profiles, set_active, update_profile,
 };
 
 pub fn pretty(value: &Value) -> String {

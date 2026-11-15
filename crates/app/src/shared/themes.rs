@@ -12,6 +12,7 @@ use std::sync::{LazyLock, RwLock};
 use gpui_kit::{App, Global};
 use serde_json::Value;
 
+use crate::shared::backdrop::{self, Backdrop};
 use crate::shared::ui;
 
 /// The theme used when nothing else is chosen (and the fallback for unknown names).
@@ -31,6 +32,10 @@ pub enum Source {
     Gentle,
     /// `<agent dir>/themes/`.
     Pi,
+    /// The app's own themes: `<data dir>/gentle-shell-gpui/themes/` and the
+    /// examples it ships. They may carry a backdrop (`background`), which
+    /// Pi's strict theme schema would reject, so they don't live in Pi's folder.
+    App,
     /// Popular terminal schemes shipped with the app.
     Builtin,
 }
@@ -65,6 +70,10 @@ pub struct Theme {
     pub selection: u32,
     /// Normal 0–7, bright 8–15.
     pub ansi: [u32; 16],
+    /// Drawn behind the panes (app themes only).
+    pub background: Option<Backdrop>,
+    /// The file the theme was read from, when it has one.
+    pub file: Option<PathBuf>,
 }
 
 // ── Color math ─────────────────────────────────────────────────────────────
@@ -126,7 +135,11 @@ fn parse_hex(text: &str) -> Option<u32> {
 /// indices, and `colors` whose values are a hex color, an index, a var name, or
 /// `""` (terminal default). Terminal colors are not part of the format, so the
 /// ANSI table comes from ANSI-named vars when present, else from the roles.
-pub fn parse_pi_theme(text: &str, source: Source) -> Option<Theme> {
+///
+/// App themes may also be in claude-desktop-themes' shape (`bg`, `text` and
+/// `accent` at the top) and carry a backdrop; `file` is where the theme was
+/// read from, whose folder holds the backdrop's files.
+pub fn parse_pi_theme(text: &str, source: Source, file: Option<&Path>) -> Option<Theme> {
     let value: Value = serde_json::from_str(text).ok()?;
     let name = value.get("name")?.as_str()?.trim();
     if name.is_empty() {
@@ -148,12 +161,18 @@ pub fn parse_pi_theme(text: &str, source: Source) -> Option<Theme> {
     }
     let color = |key: &str| colors.get(key).and_then(|v| resolve(v, &vars, 0));
     let var = |key: &str| vars.get(key).and_then(|v| resolve(v, &vars, 0));
+    let top = |key: &str| {
+        (source == Source::App)
+            .then(|| value.get(key).and_then(|v| resolve(v, &vars, 0)))
+            .flatten()
+    };
 
-    let fg_guess = color("text");
+    let fg_guess = color("text").or_else(|| top("text"));
     let bg = export
         .get("pageBg")
         .and_then(|v| resolve(v, &vars, 0))
-        .or_else(|| var("bg"));
+        .or_else(|| var("bg"))
+        .or_else(|| top("bg"));
     let light = match (bg, fg_guess) {
         (Some(bg), _) => luminance(bg) > 0.5,
         (None, Some(fg)) => luminance(fg) < 0.5,
@@ -163,7 +182,7 @@ pub fn parse_pi_theme(text: &str, source: Source) -> Option<Theme> {
     let fg = fg_guess.unwrap_or(if light { 0x1f2328 } else { 0xe6e6e6 });
     let muted = color("muted").unwrap_or_else(|| mix(fg, bg, 0.35));
     let faint = color("dim").unwrap_or_else(|| mix(fg, bg, 0.55));
-    let accent = color("accent").unwrap_or(fg);
+    let accent = color("accent").or_else(|| top("accent")).unwrap_or(fg);
     let accent_active = color("borderAccent")
         .filter(|c| *c != accent)
         .unwrap_or_else(|| mix(accent, fg, 0.3));
@@ -205,6 +224,15 @@ pub fn parse_pi_theme(text: &str, source: Source) -> Option<Theme> {
     }
     let info = var("blue").unwrap_or_else(|| color("syntaxFunction").unwrap_or(ansi[4]));
 
+    // Only the app's themes may have one: Pi's schema rejects the key.
+    let background = (source == Source::App)
+        .then(|| {
+            backdrop::model::parse(&value, file.and_then(Path::parent), |v| {
+                resolve(v, &vars, 0)
+            })
+        })
+        .flatten();
+
     Some(Theme {
         name: name.to_string(),
         source,
@@ -228,6 +256,8 @@ pub fn parse_pi_theme(text: &str, source: Source) -> Option<Theme> {
         cursor: accent_active,
         selection: color("selectedBg").unwrap_or_else(|| mix(bg, accent, 0.25)),
         ansi,
+        background,
+        file: file.map(Path::to_path_buf),
     })
 }
 
@@ -296,7 +326,8 @@ fn gentle_ansi(name: &str) -> Option<[u32; 16]> {
     })
 }
 
-/// Every `*.json` Pi theme in `dir`, sorted by name; unreadable files are skipped.
+/// Every theme file in `dir` (`*.json`, and for the app's own folder shared
+/// `*.gentletheme` files too), sorted by name; unreadable files are skipped.
 pub fn read_theme_dir(dir: &Path, source: Source) -> Vec<Theme> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -304,8 +335,12 @@ pub fn read_theme_dir(dir: &Path, source: Source) -> Vec<Theme> {
     let mut themes: Vec<Theme> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .filter_map(|p| parse_pi_theme(&std::fs::read_to_string(p).ok()?, source))
+        .filter(|p| {
+            p.extension().is_some_and(|x| {
+                x == "json" || (source == Source::App && x == backdrop::SHARE_EXTENSION)
+            })
+        })
+        .filter_map(|p| parse_pi_theme(&std::fs::read_to_string(&p).ok()?, source, Some(&p)))
         .collect();
     themes.sort_by_key(|t| t.name.to_lowercase());
     themes
@@ -408,6 +443,8 @@ fn from_scheme(s: &Scheme) -> Theme {
         cursor: s.cursor,
         selection: s.selection,
         ansi: a,
+        background: None,
+        file: None,
     }
 }
 
@@ -443,6 +480,8 @@ fn oled_black() -> Theme {
         cursor: 0xf095c8,
         selection: 0x28121e,
         ansi,
+        background: None,
+        file: None,
     }
 }
 
@@ -458,12 +497,40 @@ pub fn builtin_themes() -> Vec<Theme> {
 fn embedded_gentle() -> Vec<Theme> {
     EMBEDDED
         .iter()
-        .map(|text| parse_pi_theme(text, Source::Gentle).expect("embedded Gentle theme parses"))
+        .map(|text| {
+            parse_pi_theme(text, Source::Gentle, None).expect("embedded Gentle theme parses")
+        })
+        .collect()
+}
+
+/// Themes with backdrops the app ships as examples (its `theme-examples`):
+/// the user's or the agent's own app themes of the same name replace them.
+const EXAMPLES: &[&str] = &[
+    include_str!("../../themes/examples/aurora.json"),
+    include_str!("../../themes/examples/petals.json"),
+    include_str!("../../themes/examples/moonlit.json"),
+    include_str!("../../themes/examples/koi-pond.json"),
+    include_str!("../../themes/examples/sakura-dusk.json"),
+    include_str!("../../themes/examples/neon-rain.json"),
+    include_str!("../../themes/examples/jellyfish.json"),
+    include_str!("../../themes/examples/lantern-night.json"),
+    include_str!("../../themes/examples/fireflies.json"),
+    include_str!("../../themes/examples/snow-cabin.json"),
+    include_str!("../../themes/examples/star-voyage.json"),
+    include_str!("../../themes/examples/honu-lagoon.json"),
+    include_str!("../../themes/examples/cloud-drift.json"),
+];
+
+pub fn example_themes() -> Vec<Theme> {
+    EXAMPLES
+        .iter()
+        .map(|text| parse_pi_theme(text, Source::App, None).expect("example theme parses"))
         .collect()
 }
 
 /// Gentle Shell's themes (installed files over the embedded copies), then the
-/// user's Pi themes, then the popular schemes. Names are unique, first wins.
+/// user's Pi and app themes, then the example app themes and the popular
+/// schemes. Names are unique, first wins.
 pub fn load_catalog(gentle: Vec<Theme>, user: Vec<Theme>) -> Vec<Theme> {
     let mut catalog = embedded_gentle();
     for theme in gentle {
@@ -472,12 +539,48 @@ pub fn load_catalog(gentle: Vec<Theme>, user: Vec<Theme>) -> Vec<Theme> {
             None => catalog.push(theme),
         }
     }
-    for theme in user.into_iter().chain(builtin_themes()) {
+    for theme in user
+        .into_iter()
+        .chain(example_themes())
+        .chain(builtin_themes())
+    {
         if !catalog.iter().any(|t| same_name(&t.name, &theme.name)) {
             catalog.push(theme);
         }
     }
     catalog
+}
+
+/// The app's own themes folder: `<data dir>/gentle-shell-gpui/themes/`.
+pub fn app_themes_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|dir| dir.join("gentle-shell-gpui").join("themes"))
+}
+
+/// The user's themes: Pi's folder, then the app's.
+fn read_user_themes(agent: &Path) -> Vec<Theme> {
+    let mut themes = read_theme_dir(&agent.join("themes"), Source::Pi);
+    if let Some(dir) = app_themes_dir() {
+        themes.extend(read_theme_dir(&dir, Source::App));
+    }
+    themes
+}
+
+/// A cheap fingerprint of a themes folder: each file with its size and
+/// modification time, so a poll notices themes (and their scenes and
+/// images) added, edited or removed.
+fn dir_stamp(dir: &Path) -> Vec<(PathBuf, u64, Option<std::time::SystemTime>)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut stamp: Vec<_> = entries
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            Some((e.path(), meta.len(), meta.modified().ok()))
+        })
+        .collect();
+    stamp.sort();
+    stamp
 }
 
 fn same_name(a: &str, b: &str) -> bool {
@@ -650,10 +753,7 @@ pub fn init(cx: &mut App) {
         .and_then(read_transparency)
         .unwrap_or(DEFAULT_TRANSPARENCY);
     let pi = read_pi_setting(&agent);
-    let catalog = load_catalog(
-        Vec::new(),
-        read_theme_dir(&agent.join("themes"), Source::Pi),
-    );
+    let catalog = load_catalog(Vec::new(), read_user_themes(&agent));
     let active = pick_default(&catalog, persisted.as_deref(), pi.as_deref());
     install(&catalog[active], transparency);
     cx.set_global(Themes {
@@ -662,6 +762,7 @@ pub fn init(cx: &mut App) {
         transparency,
     });
     ui::apply_theme(cx);
+    backdrop::init(cx);
 
     cx.spawn(async move |cx| {
         let gentle = cx
@@ -681,6 +782,127 @@ pub fn init(cx: &mut App) {
         cx.update(|cx| merge_gentle(gentle, persisted, pi, cx));
     })
     .detach();
+    watch_user_themes(agent, cx);
+}
+
+/// How often the user's theme folders are checked for new or edited themes
+/// (an agent writing one, say).
+const THEME_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Re-read Pi's and the app's theme folders whenever their files change, so
+/// a theme shows up in the picker (and an edited active theme applies)
+/// without a restart.
+fn watch_user_themes(agent: PathBuf, cx: &mut App) {
+    let dirs: Vec<PathBuf> = std::iter::once(agent.join("themes"))
+        .chain(app_themes_dir())
+        .collect();
+    cx.spawn(async move |cx| {
+        fn stamp(dirs: &[PathBuf]) -> Vec<Vec<(PathBuf, u64, Option<std::time::SystemTime>)>> {
+            dirs.iter().map(|d| dir_stamp(d)).collect()
+        }
+        let mut last = stamp(&dirs);
+        loop {
+            cx.background_executor().timer(THEME_POLL).await;
+            let (dirs_now, agent_now) = (dirs.clone(), agent.clone());
+            let last_seen = last.clone();
+            // Only a change re-reads (and re-parses) the themes.
+            let changed = cx
+                .background_executor()
+                .spawn(async move {
+                    let now = stamp(&dirs_now);
+                    (now != last_seen).then(|| (now, read_user_themes(&agent_now)))
+                })
+                .await;
+            let Some((now, user)) = changed else {
+                continue;
+            };
+            last = now;
+            cx.update(|cx| replace_user_themes(user, cx));
+        }
+    })
+    .detach();
+}
+
+/// Swap the user's themes in, keeping the active one by name (re-applying
+/// it when its file changed, or falling back to the default when it's gone).
+fn replace_user_themes(user: Vec<Theme>, cx: &mut App) {
+    let themes = cx.global::<Themes>();
+    let before = themes.active_theme().clone();
+    let transparency = themes.transparency;
+    let gentle: Vec<Theme> = themes
+        .catalog
+        .iter()
+        .filter(|t| t.source == Source::Gentle)
+        .cloned()
+        .collect();
+    let catalog = load_catalog(gentle, user);
+    let active = catalog
+        .iter()
+        .position(|t| same_name(&t.name, &before.name))
+        .unwrap_or_else(|| pick_default(&catalog, None, None));
+    let changed = catalog[active] != before;
+    if changed {
+        install(&catalog[active], transparency);
+    }
+    cx.set_global(Themes {
+        catalog,
+        active,
+        transparency,
+    });
+    if changed {
+        ui::apply_theme(cx);
+    }
+    cx.refresh_windows();
+}
+
+/// Add a shared theme (a `.gentletheme` file's text) to the app's themes
+/// folder and switch to it. Its name, or why it couldn't be added.
+pub fn install_shared(text: &str, cx: &mut App) -> Result<String, String> {
+    let theme = parse_pi_theme(text, Source::App, None)
+        .ok_or("That isn't a theme file: it needs at least a \"name\".")?;
+    let dir = app_themes_dir().ok_or("There's no data folder to keep themes in.")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!(
+        "{}.{}",
+        backdrop::model::file_stem(&theme.name),
+        backdrop::SHARE_EXTENSION
+    ));
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    replace_user_themes(read_user_themes(&pi_rpc::resolve_homes().agent), cx);
+    let index = cx
+        .global::<Themes>()
+        .catalog
+        .iter()
+        .position(|t| t.file.as_deref() == Some(path.as_path()));
+    if let Some(index) = index {
+        select(index, cx);
+    }
+    Ok(theme.name)
+}
+
+/// `theme` as one file to share (`<stem>.gentletheme`): its file with the
+/// scene and image put inside. App themes only; `None` for the others.
+pub fn share_text(theme: &Theme) -> Option<Result<(String, String), String>> {
+    if theme.source != Source::App {
+        return None;
+    }
+    let stem = backdrop::model::file_stem(&theme.name);
+    let text = match &theme.file {
+        Some(file) => {
+            let text = std::fs::read_to_string(file).map_err(|e| e.to_string());
+            let dir = file.parent().unwrap_or(Path::new("."));
+            text.and_then(|text| backdrop::model::bundle(&text, dir))
+        }
+        // An example: its scene is built in, so the file is already whole.
+        None => EXAMPLES
+            .iter()
+            .find(|text| {
+                parse_pi_theme(text, Source::App, None).is_some_and(|t| t.name == theme.name)
+            })
+            .map(|text| text.to_string())
+            .ok_or_else(|| "This theme has no file.".to_string()),
+    };
+    Some(text.map(|text| (stem, text)))
 }
 
 /// Swap the installed Gentle themes in, re-applying when the active one changed.
@@ -693,7 +915,7 @@ fn merge_gentle(gentle: Vec<Theme>, persisted: Option<String>, pi: Option<String
     let user: Vec<Theme> = themes
         .catalog
         .iter()
-        .filter(|t| t.source == Source::Pi)
+        .filter(|t| matches!(t.source, Source::Pi | Source::App))
         .cloned()
         .collect();
     let catalog = load_catalog(gentle, user);
@@ -781,7 +1003,7 @@ mod tests {
 
     #[test]
     fn parses_gentle_theme_json() {
-        let cute = parse_pi_theme(EMBEDDED[0], Source::Gentle).unwrap();
+        let cute = parse_pi_theme(EMBEDDED[0], Source::Gentle, None).unwrap();
         assert_eq!(cute.name, "Gentleman-Cute");
         assert!(!cute.light);
         assert_eq!(cute.bg, 0x060407);
@@ -800,7 +1022,7 @@ mod tests {
         assert_eq!(cute.ansi[1], 0xff718f);
 
         // Gentle: accent is a var reference; ANSI vars feed the info color.
-        let gentle = parse_pi_theme(EMBEDDED[2], Source::Gentle).unwrap();
+        let gentle = parse_pi_theme(EMBEDDED[2], Source::Gentle, None).unwrap();
         assert_eq!(gentle.name, "Gentle");
         assert_eq!(gentle.accent, 0x7fb4ca);
         assert_eq!(gentle.info, 0x7fb4ca);
@@ -815,7 +1037,7 @@ mod tests {
             "colors": { "text": 16, "accent": "#0af", "muted": "", "error": "red" },
             "export": { "pageBg": "ink" }
         }"##;
-        let theme = parse_pi_theme(text, Source::Pi).unwrap();
+        let theme = parse_pi_theme(text, Source::Pi, None).unwrap();
         assert!(theme.light);
         assert_eq!(theme.bg, 0xffffff);
         assert_eq!(theme.fg, 0x000000);
@@ -823,8 +1045,8 @@ mod tests {
         assert_eq!(theme.danger, 0xaa0000);
         assert_eq!(theme.ansi[1], 0xaa0000);
         assert_eq!(theme.ansi[9], 0xff0000);
-        assert!(parse_pi_theme("{\"vars\":{}}", Source::Pi).is_none());
-        assert!(parse_pi_theme("not json", Source::Pi).is_none());
+        assert!(parse_pi_theme("{\"vars\":{}}", Source::Pi, None).is_none());
+        assert!(parse_pi_theme("not json", Source::Pi, None).is_none());
     }
 
     #[test]
@@ -855,7 +1077,7 @@ mod tests {
 
     #[test]
     fn catalog_merges_without_duplicates() {
-        let mut installed = parse_pi_theme(EMBEDDED[0], Source::Gentle).unwrap();
+        let mut installed = parse_pi_theme(EMBEDDED[0], Source::Gentle, None).unwrap();
         installed.accent = 0x123456;
         let mut user = from_scheme(&SCHEMES[0]);
         user.source = Source::Pi;
@@ -939,5 +1161,72 @@ mod tests {
         assert_eq!(mix(0x000000, 0xffffff, 0.5), 0x808080);
         assert_eq!(mix(0x102030, 0x102030, 0.7), 0x102030);
         assert_eq!(mix(0xff0000, 0x0000ff, 0.0), 0xff0000);
+    }
+
+    #[test]
+    fn app_themes_read_their_backdrop_and_pi_themes_ignore_it() {
+        let text = r##"{
+            "name": "Petals",
+            "vars": {"pink": "#ffc9dd", "bg": "#120a10"},
+            "colors": {"accent": "#f4a6c6", "text": "#f7edf2"},
+            "background": {"scene": "petals", "sky": ["pink", "#fff", "nope", 7]}
+        }"##;
+        let theme = parse_pi_theme(text, Source::App, None).unwrap();
+        let backdrop = theme.background.unwrap();
+        assert_eq!(backdrop.scene.unwrap().name, "petals");
+        // Vars and hex resolve, an unknown name is skipped, an index is xterm's.
+        assert_eq!(backdrop.sky, [0xffc9dd, 0xffffff, xterm256(7)]);
+
+        // The same file in Pi's folder: Pi's schema has no `background`.
+        assert_eq!(
+            parse_pi_theme(text, Source::Pi, None).unwrap().background,
+            None
+        );
+    }
+
+    #[test]
+    fn app_themes_may_use_claude_desktop_themes_colors() {
+        let text = r##"{"id": "koi", "name": "Koi", "bg": "#11332d", "text": "#e4f2ea",
+            "accent": "#ef8a4a", "wallpaper": "koi-pond"}"##;
+        let theme = parse_pi_theme(text, Source::App, None).unwrap();
+        assert_eq!(
+            (theme.bg, theme.fg, theme.accent),
+            (0x11332d, 0xe4f2ea, 0xef8a4a)
+        );
+        assert!(!theme.light);
+        // An unknown wallpaper is no scene; a built-in one is found by name.
+        assert_eq!(theme.background.unwrap().scene.unwrap().name, "koi-pond");
+        // Pi themes keep Pi's format only.
+        assert_ne!(parse_pi_theme(text, Source::Pi, None).unwrap().bg, 0x11332d);
+    }
+
+    #[test]
+    fn example_themes_ship_with_scenes_and_yield_to_user_ones() {
+        let examples = example_themes();
+        assert!(examples.len() >= 10);
+        assert!(
+            examples
+                .iter()
+                .all(|t| t.background.as_ref().is_some_and(|b| b.scene.is_some()))
+        );
+        // None hides behind (or hides) a popular scheme's name.
+        for example in &examples {
+            assert!(
+                !builtin_themes()
+                    .iter()
+                    .any(|t| same_name(&t.name, &example.name))
+            );
+        }
+
+        // A user's app theme with an example's name replaces it.
+        let mut mine = examples[0].clone();
+        mine.background = None;
+        let catalog = load_catalog(Vec::new(), vec![mine]);
+        let found: Vec<_> = catalog
+            .iter()
+            .filter(|t| same_name(&t.name, &examples[0].name))
+            .collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].background, None);
     }
 }

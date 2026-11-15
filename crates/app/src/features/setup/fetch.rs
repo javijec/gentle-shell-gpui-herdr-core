@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::{Log, MIN_NODE, capture, parse_version, prefix_bin, toolchain_dir};
-use crate::features::app_update::{expected_digest, extract_tar_gz, extract_zip};
+use crate::features::app_update::{expected_digest, extract_tar_gz, extract_tar_xz, extract_zip};
 
 const USER_AGENT: &str = concat!("gentle-shell-gpui/", env!("CARGO_PKG_VERSION"));
 const NODE_DIST: &str = "https://nodejs.org/dist";
@@ -21,6 +21,10 @@ const MAESTRO_LATEST: &str = "https://api.github.com/repos/mobile-dev-inc/maestr
 const ADOPTIUM_LATEST: &str = "https://api.adoptium.net/v3/assets/latest";
 /// The Java Maestro runs on: Temurin's LTS JRE (Maestro needs 17 or newer).
 const JAVA_FEATURE: u32 = 21;
+/// merman's CLI draws Mermaid diagrams. Pinned: a diagram looks the same
+/// until the app moves to a newer one on purpose.
+const MERMAN_VERSION: &str = "0.10.0";
+const MERMAN_RELEASES: &str = "https://github.com/Latias94/merman/releases/download";
 
 // ── Pure helpers ───────────────────────────────────────────────────────────
 
@@ -288,6 +292,8 @@ fn extract(archive: &Path, dest: &Path) -> Result<(), String> {
     let name = archive.file_name().unwrap_or_default().to_string_lossy();
     let result = if name.ends_with(".zip") {
         extract_zip(archive, dest)
+    } else if name.ends_with(".tar.xz") {
+        extract_tar_xz(archive, dest)
     } else {
         extract_tar_gz(archive, dest)
     };
@@ -371,6 +377,13 @@ pub fn install_node(log: &Log) -> Result<(), String> {
 
 // ── Engram ─────────────────────────────────────────────────────────────────
 
+/// The latest Engram release's version (`3.7.2`), from GitHub.
+pub fn engram_latest() -> Result<String, String> {
+    parse_release(&get_text(ENGRAM_LATEST, true)?)
+        .map(|release| release.version)
+        .ok_or_else(|| "GitHub's answer about Engram's latest release is unreadable.".into())
+}
+
 /// The latest Engram release binary into `<toolchain>/bin`, verified when
 /// the release publishes checksums.
 pub fn install_engram_release(log: &Log) -> Result<(), String> {
@@ -414,11 +427,23 @@ pub fn install_engram_release(log: &Log) -> Result<(), String> {
         "engram"
     };
     let found = find_file(&unpacked, exe).ok_or_else(|| format!("{name} has no {exe}."))?;
+    let bin = place_binary(&toolchain, &found, exe)?;
+    log(format!(
+        "Engram {} is installed in {}.",
+        release.version,
+        bin.display()
+    ));
+    Ok(())
+}
+
+/// Copy `found` into `<toolchain>/bin/<exe>` (executable), replacing any
+/// previous one in one step. Returns the bin folder.
+fn place_binary(toolchain: &Path, found: &Path, exe: &str) -> Result<PathBuf, String> {
     let bin = toolchain.join("bin");
     fs::create_dir_all(&bin).map_err(|e| format!("Couldn't create {}: {e}", bin.display()))?;
     let target = bin.join(exe);
     let staged = bin.join(format!(".{exe}.new"));
-    fs::copy(&found, &staged)
+    fs::copy(found, &staged)
         .and_then(|_| {
             #[cfg(unix)]
             {
@@ -428,12 +453,63 @@ pub fn install_engram_release(log: &Log) -> Result<(), String> {
             fs::rename(&staged, &target)
         })
         .map_err(|e| format!("Couldn't install {}: {e}", target.display()))?;
+    Ok(bin)
+}
+
+// ── Mermaid diagram renderer ───────────────────────────────────────────────
+
+/// merman's CLI archive for `os`/`arch` (`std::env::consts`).
+pub fn merman_asset(os: &str, arch: &str) -> Option<&'static str> {
+    Some(match (os, arch) {
+        ("macos", "aarch64") => "merman-cli-aarch64-apple-darwin.tar.xz",
+        ("macos", "x86_64") => "merman-cli-x86_64-apple-darwin.tar.xz",
+        ("linux", "x86_64") => "merman-cli-x86_64-unknown-linux-gnu.tar.xz",
+        ("linux", "aarch64") => "merman-cli-aarch64-unknown-linux-gnu.tar.xz",
+        ("windows", "x86_64") => "merman-cli-x86_64-pc-windows-msvc.zip",
+        _ => return None,
+    })
+}
+
+fn merman_exe() -> &'static str {
+    if cfg!(windows) {
+        "merman-cli.exe"
+    } else {
+        "merman-cli"
+    }
+}
+
+/// The installed diagram renderer, if any.
+pub fn merman_bin() -> Option<PathBuf> {
+    let bin = toolchain_dir()?.join("bin").join(merman_exe());
+    bin.is_file().then_some(bin)
+}
+
+/// merman's CLI into `<toolchain>/bin`, verified against the checksum its
+/// release publishes next to each archive.
+pub fn install_merman(log: &Log) -> Result<PathBuf, String> {
+    let toolchain = toolchain_dir().ok_or("This system has no app data folder.")?;
+    let name = merman_asset(std::env::consts::OS, std::env::consts::ARCH)
+        .ok_or("The diagram renderer has no build for this system.")?;
+    let url = format!("{MERMAN_RELEASES}/v{MERMAN_VERSION}/{name}");
+    let sums = get_text(&format!("{url}.sha256"), false)?;
+    let staging = Staging::new(&toolchain, "merman-download")?;
+    let archive = staging.0.join(name);
     log(format!(
-        "Engram {} is installed in {}.",
-        release.version,
+        "Downloading the diagram renderer (merman {MERMAN_VERSION})…"
+    ));
+    let digest = download(&url, &archive, log)?;
+    verify(name, &digest, &sums)?;
+    log("Checksum verified. Unpacking…".into());
+    let unpacked = staging.0.join("unpacked");
+    extract(&archive, &unpacked)?;
+    let exe = merman_exe();
+    let found = find_file(&unpacked, exe).ok_or_else(|| format!("{name} has no {exe}."))?;
+    let bin = place_binary(&toolchain, &found, exe)?;
+    log(format!(
+        "The diagram renderer is installed in {}.",
         bin.display()
     ));
-    Ok(())
+    Ok(bin.join(exe))
 }
 
 fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {

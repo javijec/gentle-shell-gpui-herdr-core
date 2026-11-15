@@ -1,0 +1,15 @@
+{
+  "name": "Fireflies",
+  "bg": "#0b130e",
+  "text": "#e3eedc",
+  "accent": "#d8e86a",
+  "background": {
+    "scene": "fireflies",
+    "sky": [
+      "#070c09",
+      "#0c1710",
+      "#1b3522"
+    ],
+    "speed": 1
+  }
+}

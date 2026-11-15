@@ -143,7 +143,7 @@ impl SessionView {
             .models
             .current
             .as_ref()
-            .map_or(ui::faint(), |m| provider_color(&m.provider));
+            .map_or(ui::faint(), |m| ui::provider_color(&m.provider));
         let trigger = Button::new("model")
             .ghost()
             .xsmall()
@@ -205,7 +205,7 @@ impl SessionView {
                                     div()
                                         .size(px(6.))
                                         .rounded_full()
-                                        .bg(provider_color(provider)),
+                                        .bg(ui::provider_color(provider)),
                                 )
                                 .child(ui::section_label(provider.to_string())),
                         );

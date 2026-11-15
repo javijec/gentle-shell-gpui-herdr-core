@@ -1030,7 +1030,17 @@ impl RefsView {
                                 .text_color(ui::fg())
                                 .child(title),
                         )
-                        .child(ahead_behind(head.ahead, head.behind)),
+                        .child(ahead_behind(head.ahead, head.behind))
+                        .child(
+                            Button::new("refs-history")
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::GitGraph))
+                                .tooltip("Commit history")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(RefsEvent::OpenHistory(toplevel.clone()))
+                                })),
+                        ),
                 )
                 .child(
                     div()
@@ -1065,7 +1075,7 @@ impl Render for RefsView {
                         .child(error),
                 )
             })
-            .children(self.render_footer())
+            .children(self.render_footer(cx))
     }
 }
 

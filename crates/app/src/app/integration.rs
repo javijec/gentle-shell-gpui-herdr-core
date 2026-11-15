@@ -1,5 +1,5 @@
-//! Registers the terminal and file-viewer panes with the tiling layer, and
-//! wires the file sidebar to the workspace.
+//! Registers the terminal, file-viewer and history panes with the tiling
+//! layer, and wires the file sidebar to the workspace.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -9,6 +9,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
 
 use crate::features::files::FileView;
+use crate::features::history::HistoryView;
 use crate::features::terminal::TerminalView;
 use crate::shared::pane::{PaneFactories, PaneItem, PaneKind};
 
@@ -80,10 +81,24 @@ pub fn register(cx: &mut App) {
                 terminal_address: None,
             }
         });
+    let history: crate::shared::pane::PaneFactory =
+        Rc::new(|cwd: PathBuf, _: &mut Window, cx: &mut App| {
+            let view = cx.new(|cx| HistoryView::new(cwd, cx));
+            let focus = view.focus_handle(cx);
+            let title_view = view.clone();
+            PaneItem {
+                kind: PaneKind::History,
+                view: view.into(),
+                focus,
+                title: Rc::new(move |cx: &App| title_view.read(cx).title()),
+                unsaved: None,
+            }
+        });
     cx.set_global(PaneFactories {
         terminal: Some(terminal),
         file: Some(file),
         diff: Some(diff),
+        history: Some(history),
     });
 }
 
@@ -112,6 +127,7 @@ pub fn attach_sidebar(
         window
             .subscribe(&tree, cx, move |_, event: &FileTreeEvent, window, cx| {
                 let _ = target.update(cx, |workspace, cx| match event {
+                    FileTreeEvent::Peek(path) => workspace.peek_file(path.clone(), window, cx),
                     FileTreeEvent::Open(path) => workspace.open_file(path.clone(), window, cx),
                     FileTreeEvent::OpenToSide(path) => {
                         workspace.open_file_beside(path.clone(), window, cx)
@@ -122,6 +138,9 @@ pub fn attach_sidebar(
                     FileTreeEvent::OpenDiff(path) => workspace.open_diff(path.clone(), window, cx),
                     FileTreeEvent::OpenAgent(folder) => {
                         workspace.open_agent_tab(folder.clone(), window, cx)
+                    }
+                    FileTreeEvent::OpenHistory(repo) => {
+                        workspace.open_history(repo.clone(), window, cx)
                     }
                     FileTreeEvent::InsertPath(text) => {
                         if workspace.active_agent_is_remote(cx) {

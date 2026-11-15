@@ -1,5 +1,6 @@
-//! The player as it shows: the ♪ button in the title bar and the popover it
-//! opens (the piece, a live spectrum, controls, volume and the mood field).
+//! The player as it shows: the ♪ button in the title bar and the island it
+//! opens (the piece over a moving equalizer, controls, volume and the mood
+//! field).
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -12,27 +13,63 @@ use gpui_kit::component::{Disableable as _, Icon, Selectable, Sizable as _, h_fl
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::{BANDS, Job, Music};
+use super::{Job, Music};
 use crate::shared::ui;
 
-/// The spectrum's height.
-const SPECTRUM_H: f32 = 52.;
+/// The equalizer's height and bar count.
+const EQ_H: f32 = 40.;
+const EQ_BARS: usize = 34;
+
+/// A stable 0..1 per bar, so each bar keeps its own pace.
+fn bar_seed(i: usize, salt: u32) -> f32 {
+    let mut x = (i as u32).wrapping_mul(0x9E37_79B9) ^ salt.wrapping_mul(0x85EB_CA6B);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x2C1B_3C6D);
+    x ^= x >> 12;
+    (x & 0xFFFF) as f32 / 65536.
+}
+
+/// Bar `i`'s height (0..1) at time `t`: two slow waves rolling across the
+/// bars and a quicker flicker of its own. gentle-stream's `ctl --json`
+/// reports no levels, so this follows the music's pulse, not its sound.
+fn bar_level(i: usize, t: f32) -> f32 {
+    let x = i as f32 / EQ_BARS as f32;
+    let swell = 0.5 + 0.5 * (t * 1.1 - x * 5.5).sin();
+    let roll = 0.5 + 0.5 * (t * 0.6 + x * 9.0 + 1.3).sin();
+    let own = 0.5 + 0.5 * (t * (2.2 + 2.6 * bar_seed(i, 1)) + 6.3 * bar_seed(i, 2)).sin();
+    // Lower in the middle-low range less, so the shape reads as music.
+    let tilt = 0.75 + 0.25 * (std::f32::consts::PI * x).sin();
+    ((0.15 + 0.45 * swell * roll + 0.4 * own * swell) * tilt).clamp(0.06, 1.)
+}
 
 impl Music {
+    /// The piece: a petal disc with a note, its name and what it is, and the
+    /// stop button; or the invitation to start.
     fn render_header(&self, cx: &mut Context<Self>) -> Div {
+        let (title, details) = match &self.state {
+            Some(state) => {
+                let mut details = state.details();
+                if !state.mood.is_empty() {
+                    details = format!("{details} · \u{201c}{}\u{201d}", state.mood);
+                }
+                (state.name.clone(), details)
+            }
+            None => (
+                "Music".to_string(),
+                "Composed live by gentle-stream".to_string(),
+            ),
+        };
         h_flex()
             .gap_2p5()
             .child(
                 div()
-                    .size(px(26.))
+                    .size(px(36.))
                     .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(ui::border_strong())
-                    .bg(ui::well())
+                    .rounded(px(ui::ISLAND_ROW))
+                    .bg(ui::petal().opacity(0.14))
                     .text_color(ui::petal())
                     .child(Icon::new(IconName::Music).small()),
             )
@@ -42,16 +79,18 @@ impl Music {
                     .min_w_0()
                     .child(
                         div()
-                            .text_size(px(13.))
+                            .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(ui::fg())
-                            .child("Music"),
+                            .truncate()
+                            .child(title),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(ui::faint())
-                            .child("Composed live by gentle-stream"),
+                            .text_color(ui::muted())
+                            .truncate()
+                            .child(details),
                     ),
             )
             .when(self.state.is_some(), |d| {
@@ -66,43 +105,60 @@ impl Music {
             })
     }
 
-    /// One bar per band, rose and taller with the level; flat while paused
-    /// or before the first frame.
-    fn render_spectrum(&self, playing: bool) -> Div {
-        h_flex()
-            .h(px(SPECTRUM_H))
-            .items_end()
-            .gap(px(2.))
-            .children((0..BANDS).map(|i| {
-                let level = if playing {
-                    self.shown.get(i).copied().unwrap_or(0.)
-                } else {
-                    0.
-                };
-                div()
-                    .flex_1()
-                    .h(px(3. + level * (SPECTRUM_H - 3.)))
-                    .rounded_t(px(2.))
-                    .bg(if playing {
-                        ui::petal().opacity(0.35 + 0.65 * level)
-                    } else {
-                        ui::border()
-                    })
-            }))
+    /// The equalizer, in a sunken well: bars moving with the music while it
+    /// plays (at the slow live rate, still with reduced motion), resting low
+    /// when paused.
+    fn render_equalizer(&self, playing: bool, cx: &App) -> Div {
+        let moving = playing && !cx.reduce_motion();
+        let t = ui::live_clock();
+        div()
+            .px_3()
+            .py_2p5()
+            .rounded(px(ui::ISLAND_ROW))
+            .bg(ui::well())
+            .child(
+                h_flex()
+                    .h(px(EQ_H))
+                    .items_center()
+                    .gap(px(3.))
+                    .children((0..EQ_BARS).map(move |i| {
+                        let level = if moving {
+                            bar_level(i, t)
+                        } else if playing {
+                            bar_level(i, 0.)
+                        } else {
+                            0.08
+                        };
+                        // Centered bars, mirrored up and down like a waveform.
+                        div()
+                            .flex_1()
+                            .h(px(3. + level * (EQ_H - 3.)))
+                            .rounded_full()
+                            .bg(if playing {
+                                ui::petal().opacity(0.4 + 0.6 * level)
+                            } else {
+                                ui::faint().opacity(0.5)
+                            })
+                    }))
+                    .when(moving, |d| {
+                        d.child(
+                            canvas(
+                                |_, window, cx| ui::request_slow_frame(window, cx),
+                                |_, _, _, _| {},
+                            )
+                            .size_0(),
+                        )
+                    }),
+            )
     }
 
     fn render_now(&self, cx: &mut Context<Self>) -> Div {
         let Some(state) = &self.state else {
             return v_flex()
-                .py_3()
+                .py_2()
                 .gap_2()
                 .items_center()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(ui::muted())
-                        .child("Nothing is playing."),
-                )
+                .child(self.render_equalizer(false, cx).w_full())
                 .child(
                     Button::new("music-start")
                         .small()
@@ -116,50 +172,38 @@ impl Music {
         let playing = state.playing;
         let volume = self.volume.read(cx).value().start();
         v_flex()
-            .gap_2p5()
-            .child(
-                v_flex()
-                    .gap_0p5()
-                    .child(
-                        div()
-                            .text_base()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(ui::fg())
-                            .truncate()
-                            .child(state.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(ui::muted())
-                            .child(state.details()),
-                    )
-                    .when(!state.mood.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .italic()
-                                .text_color(ui::faint())
-                                .truncate()
-                                .child(format!("“{}”", state.mood)),
-                        )
-                    }),
-            )
-            .child(self.render_spectrum(playing))
+            .gap_3()
+            .child(self.render_equalizer(playing, cx))
             .child(
                 h_flex()
                     .gap_2()
                     .child(
-                        Button::new("music-toggle")
-                            .primary()
-                            .small()
-                            .icon(Icon::new(if playing {
-                                IconName::Pause
-                            } else {
-                                IconName::Play
-                            }))
-                            .tooltip(if playing { "Pause" } else { "Play" })
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle(cx))),
+                        // The main control: a round petal button.
+                        div()
+                            .id("music-toggle")
+                            .size(px(32.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .bg(ui::petal())
+                            .text_color(ui::popover_bg())
+                            .hover(|d| d.bg(ui::petal_active()))
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(if playing { "Pause" } else { "Play" })
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)))
+                            .child(
+                                Icon::new(if playing {
+                                    IconName::Pause
+                                } else {
+                                    IconName::Play
+                                })
+                                .small(),
+                            ),
                     )
                     .child(
                         Button::new("music-next")
@@ -169,7 +213,8 @@ impl Music {
                             .tooltip("Next piece, same mood")
                             .on_click(cx.listener(|this, _, _, cx| this.next(cx))),
                     )
-                    .child(Icon::new(IconName::Volume2).small().text_color(ui::muted()))
+                    .child(div().w(px(1.)).h(px(16.)).mx_1().bg(ui::border()))
+                    .child(Icon::new(IconName::Volume2).small().text_color(ui::faint()))
                     .child(
                         div().flex_1().child(
                             Slider::new(&self.volume)
@@ -179,11 +224,11 @@ impl Music {
                     )
                     .child(
                         div()
-                            .w(px(34.))
+                            .w(px(30.))
                             .text_right()
                             .text_xs()
                             .font_family(ui::MONO)
-                            .text_color(ui::muted())
+                            .text_color(ui::faint())
                             .child(format!("{volume:.0}%")),
                     ),
             )
@@ -271,12 +316,13 @@ pub fn title_button(music: &Entity<Music>, cx: &App) -> Option<AnyElement> {
                         watch.update(cx, |music, cx| music.set_watching(open, cx));
                     })
                     .w(px(340.))
-                    .p_0()
-                    .content(move |_, _, _| {
-                        ui::popover_in(
+                    // The island, as the composer's menus and chip cards.
+                    .appearance(false)
+                    .content(move |_, _, cx| {
+                        ui::island(cx).w_full().child(ui::popover_in(
                             ElementId::Name("music-in".into()),
                             div().child(content.clone()),
-                        )
+                        ))
                     }),
             )
             .into_any_element(),

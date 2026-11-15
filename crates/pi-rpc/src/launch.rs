@@ -304,6 +304,9 @@ pub fn forget_versions() {
     VERSIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
+/// How long `--version` may take: a Node start on a slow, busy machine.
+const VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn run_version(spec: &LaunchSpec) -> Option<String> {
     let mut command = crate::command(&spec.program);
     command
@@ -314,8 +317,68 @@ fn run_version(spec: &LaunchSpec) -> Option<String> {
     for (key, value) in &spec.env {
         command.env(key, value);
     }
-    let out = command.output().ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    output_within(&mut command, VERSION_TIMEOUT).map(|(_, stdout)| stdout)
+}
+
+/// After the child exits, how long to wait for its stdout to close: a
+/// process it left in the background may hold the pipe open for good.
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Run `command` with its stdout piped and return whether it succeeded and
+/// what it printed; `None` when it can't start or outlives `timeout` (it is
+/// killed then). Stdout is read on a thread of its own, so neither a full
+/// pipe nor a background process that inherited it (an ssh-agent started by
+/// a shell's rc file) can keep the caller waiting past the deadline.
+pub fn output_within(
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<(bool, String)> {
+    use std::io::Read as _;
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::Instant;
+
+    let mut child = command.stdout(std::process::Stdio::piped()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        while let Ok(n) = stdout.read(&mut buf) {
+            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + timeout;
+    let mut out = Vec::new();
+    let mut exited: Option<(std::process::ExitStatus, Instant)> = None;
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(20)) {
+            Ok(chunk) => out.extend_from_slice(&chunk),
+            // Stdout closed: everything it printed is in.
+            Err(RecvTimeoutError::Disconnected) if exited.is_some() => break,
+            Err(_) => {}
+        }
+        if exited.is_none()
+            && let Ok(Some(status)) = child.try_wait()
+        {
+            exited = Some((status, Instant::now()));
+        }
+        match exited {
+            Some((_, at)) if at.elapsed() >= DRAIN_GRACE => break,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            _ => {}
+        }
+    }
+    // Late chunks that arrived in the same instant.
+    while let Ok(chunk) = rx.try_recv() {
+        out.extend_from_slice(&chunk);
+    }
+    let (status, _) = exited?;
+    Some((status.success(), String::from_utf8_lossy(&out).into_owned()))
 }
 
 static EXTRA_PATH: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
@@ -361,14 +424,15 @@ fn search_path() -> OsString {
 #[cfg(unix)]
 fn login_shell_path() -> Option<OsString> {
     use std::process::Stdio;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     const START: &str = "__GENTLE_PATH_START__";
     const END: &str = "__GENTLE_PATH_END__";
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     // Interactive login so rc files that set up nvm/fnm/mise run; markers fence
     // the value from anything those files print.
-    let mut child = crate::command(&shell)
+    let mut command = crate::command(&shell);
+    command
         .args([
             "-l",
             "-i",
@@ -376,24 +440,8 @@ fn login_shell_path() -> Option<OsString> {
             &format!("printf '{START}%s{END}' \"$PATH\""),
         ])
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-    let mut out = String::new();
-    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
+        .stderr(Stdio::null());
+    let (_, out) = output_within(&mut command, Duration::from_secs(5))?;
     let start = out.find(START)? + START.len();
     let end = out[start..].find(END)? + start;
     Some(OsString::from(&out[start..end]))
@@ -423,6 +471,30 @@ mod tests {
         assert_eq!(split_args("--home='/a b'"), ["--home=/a b"]);
         assert_eq!(split_args(r#"--x """#), ["--x", ""]);
         assert!(split_args("   ").is_empty());
+    }
+
+    /// A shell rc file that starts a daemon (ssh-agent, keychain) leaves it
+    /// holding stdout: the run still returns once the shell itself exits.
+    #[cfg(unix)]
+    #[test]
+    fn output_within_returns_while_a_background_child_holds_stdout() {
+        let started = std::time::Instant::now();
+        let mut command = crate::command("/bin/sh");
+        command.args(["-c", "printf ready; sleep 30 &"]);
+        let out = output_within(&mut command, std::time::Duration::from_secs(10));
+        assert_eq!(out, Some((true, "ready".to_string())));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_within_kills_a_run_past_its_deadline() {
+        let started = std::time::Instant::now();
+        let mut command = crate::command("/bin/sh");
+        command.args(["-c", "sleep 30"]);
+        let out = output_within(&mut command, std::time::Duration::from_millis(300));
+        assert_eq!(out, None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

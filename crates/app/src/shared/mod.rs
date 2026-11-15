@@ -1,6 +1,7 @@
 //! UI pieces and state shared by several features, with no feature logic of their own.
 
 pub mod assets;
+pub mod backdrop;
 pub mod banner;
 pub mod floating;
 pub mod gentle_state;

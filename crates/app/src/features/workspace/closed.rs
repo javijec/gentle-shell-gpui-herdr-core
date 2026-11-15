@@ -88,7 +88,13 @@ impl Workspace {
         ))
         .id::<Closed>()
         .on_click(move |_, window, cx| {
-            let _ = weak.update(cx, |this, cx| this.reopen_closed(window, cx));
+            // The click runs inside the notice's own update; reopening
+            // removes that notice, which reads it, so wait for the update to
+            // end (reading it now panics and aborts the app).
+            let weak = weak.clone();
+            window.defer(cx, move |window, cx| {
+                let _ = weak.update(cx, |this, cx| this.reopen_closed(window, cx));
+            });
         });
         window.push_notification(note, cx);
     }

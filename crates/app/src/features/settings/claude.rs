@@ -39,14 +39,19 @@ pub fn forget_claude_auth() {
 pub(super) fn claude_auth_status() -> Option<String> {
     let stamp = dirs::home_dir().and_then(|home| Stamp::of(&home.join(".claude.json")));
     reuse_or_run(&CLAUDE_AUTH, Instant::now(), CLAUDE_AUTH_TTL, stamp, || {
-        let mut claude = pi_rpc::command("claude");
+        let Some(program) = pi_rpc::find_program("claude") else {
+            return Some("Claude Code is not installed".into());
+        };
+        let mut claude = pi_rpc::command(program);
         claude
             .args(["auth", "status"])
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         claude.env("PATH", pi_rpc::child_path());
-        match claude.output() {
-            Ok(out) => serde_json::from_slice::<Value>(&out.stdout).ok().map(|v| {
+        // It may refresh its token over the network: bounded, so a slow
+        // answer can't hold the Configuration screen on its loading state.
+        match pi_rpc::output_within(&mut claude, Duration::from_secs(15)) {
+            Some((_, stdout)) => serde_json::from_str::<Value>(&stdout).ok().map(|v| {
                 if v["loggedIn"] == true {
                     format!(
                         "signed in ({})",
@@ -56,7 +61,7 @@ pub(super) fn claude_auth_status() -> Option<String> {
                     "not signed in — run `claude auth login`".to_string()
                 }
             }),
-            Err(_) => Some("Claude Code is not installed".into()),
+            None => Some("Claude Code didn't answer `claude auth status`".into()),
         }
     })
 }

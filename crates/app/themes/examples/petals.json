@@ -1,0 +1,15 @@
+{
+  "name": "Petals",
+  "bg": "#160d16",
+  "text": "#f7edf2",
+  "accent": "#f4a6c6",
+  "background": {
+    "scene": "petals",
+    "sky": [
+      "#2a1630",
+      "#160d16",
+      "#0e080e"
+    ],
+    "speed": 1
+  }
+}

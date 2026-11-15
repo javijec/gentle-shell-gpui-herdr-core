@@ -1,0 +1,15 @@
+{
+  "name": "Jellyfish",
+  "bg": "#0a1830",
+  "text": "#dfe7fb",
+  "accent": "#a58cf0",
+  "background": {
+    "scene": "jellyfish",
+    "sky": [
+      "#174784",
+      "#0c2b58",
+      "#071a3a"
+    ],
+    "speed": 1
+  }
+}

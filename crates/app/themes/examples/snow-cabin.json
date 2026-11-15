@@ -1,0 +1,15 @@
+{
+  "name": "Snow Cabin",
+  "bg": "#0e1628",
+  "text": "#e6edf8",
+  "accent": "#ffb85c",
+  "background": {
+    "scene": "snow-cabin",
+    "sky": [
+      "#060b18",
+      "#101c38",
+      "#1c2a4a"
+    ],
+    "speed": 1
+  }
+}

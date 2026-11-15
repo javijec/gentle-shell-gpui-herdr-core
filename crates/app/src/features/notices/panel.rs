@@ -89,13 +89,17 @@ pub(super) fn panel(
         .when(!notices.is_empty(), |d| {
             let store = store.clone();
             d.child(
-                action("notices-clear", "Clear").on_click(cx.listener(move |_, _, _, cx| {
-                    store.update(cx, |s, cx| {
-                        s.clear();
-                        cx.notify();
-                    });
-                    cx.notify();
-                })),
+                // Nothing is left to read: close the list instead of leaving
+                // an empty card open.
+                action("notices-clear", "Clear").on_click(cx.listener(
+                    move |state: &mut PopoverState, _, window, cx| {
+                        store.update(cx, |s, cx| {
+                            s.clear();
+                            cx.notify();
+                        });
+                        state.dismiss(window, cx);
+                    },
+                )),
             )
         });
 

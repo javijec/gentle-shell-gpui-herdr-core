@@ -23,7 +23,7 @@ mod state;
 mod submit;
 mod view;
 
-pub use agents::AgentsPanel;
+pub use agents::{AgentsPanel, AgentsTab};
 
 actions!(session, [Abort, Stop, ToggleAgents, NewSession]);
 
@@ -77,11 +77,17 @@ struct Chrome {
     needs_you: bool,
     session_file: Option<PathBuf>,
     models: u64,
+    skills: usize,
 }
 
 pub struct SessionView {
     cwd: PathBuf,
     backend: state::Backend,
+    /// Gentle Desktop's RPC channel on this backend (see [`state::desktop`]).
+    desktop: state::desktop::Desktop,
+    /// Gentle Desktop's permission-mode state on this backend (see
+    /// [`state::desktop::permission`]); it borrows `desktop`'s session.
+    permission: state::desktop::permission::Permission,
     transcript: Transcript,
     /// Rendered Markdown per (item, block), with the byte length already pushed.
     markdown: HashMap<(usize, usize), (Entity<TextViewState>, usize)>,
@@ -100,6 +106,9 @@ pub struct SessionView {
     composer_len: usize,
     /// Images waiting to go with the next prompt; `[Image #N]` is the N-th.
     attachments: Vec<attachments::Attachment>,
+    /// Long pastes waiting to go with the next prompt, each sent in place
+    /// of its `[Pasted text #N]` token: the N-th is `pasted[N - 1]`.
+    pasted: Vec<attachments::PastedText>,
     /// Decoded conversation images, by data hash.
     image_cache: attachments::ImageCache,
     extension: state::ExtensionUi,
@@ -116,6 +125,8 @@ pub struct SessionView {
     models: state::Models,
     usage: state::Usage,
     commands: Vec<(String, String)>,
+    /// Each skill's folder, by name (without `skill:`).
+    skill_dirs: Vec<(String, PathBuf)>,
     session_name: Option<String>,
     session_file: Option<PathBuf>,
     /// Exact Herdr address of a previously running agent, awaiting reattach.
@@ -188,6 +199,7 @@ impl SessionView {
                 |this, _, event: &InputEvent, window, cx| match event {
                     InputEvent::PressEnter { shift: false, .. } => this.submit(window, cx),
                     InputEvent::Change => {
+                        this.sync_pasted(window, cx);
                         this.blow_kiss(cx);
                         cx.notify();
                     }
@@ -244,6 +256,8 @@ impl SessionView {
         let mut this = Self {
             cwd,
             backend: state::Backend::new(prompt),
+            desktop: state::desktop::Desktop::default(),
+            permission: state::desktop::permission::Permission::default(),
             transcript: Transcript::default(),
             markdown: HashMap::new(),
             expanded: HashSet::new(),
@@ -254,6 +268,7 @@ impl SessionView {
             kisses_blown: 0,
             composer_len: 0,
             attachments: Vec::new(),
+            pasted: Vec::new(),
             image_cache: attachments::ImageCache::default(),
             extension: state::ExtensionUi::default(),
             dialog_input,
@@ -270,6 +285,7 @@ impl SessionView {
             usage: state::Usage::default(),
             pane_width: std::rc::Rc::new(std::cell::Cell::new(10_000.)),
             commands: Vec::new(),
+            skill_dirs: Vec::new(),
             session_name: None,
             session_file: None,
             restored_herdr: None,
@@ -417,6 +433,14 @@ impl SessionView {
             .collect()
     }
 
+    /// Where skill `name` lives, if this tab's Gentle Shell has it.
+    pub fn skill_dir(&self, name: &str) -> Option<PathBuf> {
+        self.skill_dirs
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, dir)| dir.clone())
+    }
+
     /// The conversation this tab shows: a resume still in flight (or waiting
     /// for the backend to start) wins over the live session file.
     pub fn session_file(&self) -> Option<PathBuf> {
@@ -460,7 +484,9 @@ impl SessionView {
             .collect()
     }
 
-    pub fn open_agents_panel(&mut self, cx: &mut Context<Self>) {
+    /// Opens the Agents window on `tab`.
+    pub fn open_agents_panel(&mut self, tab: AgentsTab, cx: &mut Context<Self>) {
+        self.agents_panel.tab = tab;
         self.open_agents(None, cx);
     }
 
@@ -472,6 +498,7 @@ impl SessionView {
             needs_you: self.needs_you(),
             session_file: self.session_file(),
             models: self.models.rev,
+            skills: self.skill_dirs.len(),
         };
         if self.chrome.as_ref() != Some(&chrome) {
             self.chrome = Some(chrome);
@@ -555,6 +582,60 @@ impl SessionView {
             self.stop(cx);
         } else {
             cx.propagate();
+        }
+    }
+}
+
+/// The wire permission mode for the picker's mode.
+pub(in crate::features::session) fn to_desktop_mode(
+    mode: gentle_core::gentle_state::PermissionMode,
+) -> pi_rpc::desktop_rpc::PermissionMode {
+    match mode {
+        gentle_core::gentle_state::PermissionMode::Normal => {
+            pi_rpc::desktop_rpc::PermissionMode::Normal
+        }
+        gentle_core::gentle_state::PermissionMode::Auto => {
+            pi_rpc::desktop_rpc::PermissionMode::Auto
+        }
+        gentle_core::gentle_state::PermissionMode::Yolo => {
+            pi_rpc::desktop_rpc::PermissionMode::Yolo
+        }
+        gentle_core::gentle_state::PermissionMode::SuperYolo => {
+            pi_rpc::desktop_rpc::PermissionMode::SuperYolo
+        }
+    }
+}
+
+/// The picker's mode for a server-reported wire mode.
+pub(in crate::features::session) fn from_desktop_mode(
+    mode: pi_rpc::desktop_rpc::PermissionMode,
+) -> gentle_core::gentle_state::PermissionMode {
+    match mode {
+        pi_rpc::desktop_rpc::PermissionMode::Normal => {
+            gentle_core::gentle_state::PermissionMode::Normal
+        }
+        pi_rpc::desktop_rpc::PermissionMode::Auto => {
+            gentle_core::gentle_state::PermissionMode::Auto
+        }
+        pi_rpc::desktop_rpc::PermissionMode::Yolo => {
+            gentle_core::gentle_state::PermissionMode::Yolo
+        }
+        pi_rpc::desktop_rpc::PermissionMode::SuperYolo => {
+            gentle_core::gentle_state::PermissionMode::SuperYolo
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gentle_core::gentle_state::PermissionMode;
+
+    use super::{from_desktop_mode, to_desktop_mode};
+
+    #[test]
+    fn desktop_permission_modes_round_trip() {
+        for mode in PermissionMode::ALL {
+            assert_eq!(from_desktop_mode(to_desktop_mode(mode)), mode);
         }
     }
 }

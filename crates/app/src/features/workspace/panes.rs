@@ -15,9 +15,10 @@ struct AgentPaneInit {
 }
 
 impl Workspace {
-    /// Puts a freshly built file/diff pane in the current tab: it replaces the
-    /// tab's existing preview pane, else splits the largest pane along its
-    /// long side, else (no room for two panes) gets its own tab.
+    /// Puts a freshly built file, diff or history pane in the current tab: it
+    /// replaces the tab's existing pane of the same kind, else splits the
+    /// largest pane along its long side, else (no room for two panes) gets
+    /// its own tab.
     pub(super) fn place_preview(
         &mut self,
         new: PaneId,
@@ -28,6 +29,7 @@ impl Workspace {
             self.push_pane_tab(new, window, cx);
             return;
         };
+        let kind = self.panes.get(&new).map(|p| p.item.kind);
         let preview = tab.tree.leaves().into_iter().find(|id| {
             *id != new
                 && self
@@ -164,6 +166,11 @@ impl Workspace {
                         pane.session_file = file;
                         this.schedule_save(cx);
                     }
+                    // An agent that just started may have the docs skill.
+                    if let Some((Overlay::Docs(view), _)) = &this.overlay {
+                        let (view, dir) = (view.clone(), this.docs_skill_dir(cx));
+                        view.update(cx, |view, cx| view.set_skill_dir(dir, cx));
+                    }
                     if changed {
                         // An open switcher lists every workspace's activity.
                         if let Some((Overlay::Palette(view), _)) = &this.overlay {
@@ -247,8 +254,8 @@ impl Workspace {
         id
     }
 
-    /// A terminal (`target` = folder) or file (`target` = file) pane from the
-    /// registered factory; a notice when there is none.
+    /// A terminal or history (`target` = folder) or file (`target` = file)
+    /// pane from the registered factory; a notice when there is none.
     pub(super) fn new_factory_pane(
         &mut self,
         kind: PaneKind,
@@ -279,6 +286,7 @@ impl Workspace {
                     "{} panes are not available in this build.",
                     match kind {
                         PaneKind::File => "File",
+                        PaneKind::History => "History",
                         _ => "Terminal",
                     }
                 )),
@@ -326,6 +334,29 @@ impl Workspace {
         pane.sync_chrome(cx);
         self.panes.insert(id, pane);
         Some(id)
+    }
+
+    /// A pane for an already built file view of `path`.
+    pub(super) fn file_pane(&mut self, item: PaneItem, path: PathBuf, cx: &App) -> PaneId {
+        let id = self.alloc_id();
+        let cwd = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.space().root.clone());
+        let mut pane = Pane {
+            item,
+            session: None,
+            cwd,
+            path: Some(path),
+            session_file: None,
+            title: SharedString::default(),
+            running: false,
+            needs_you: false,
+            _subscriptions: Vec::new(),
+        };
+        pane.sync_chrome(cx);
+        self.panes.insert(id, pane);
+        id
     }
 
     pub(super) fn new_pane(
@@ -385,6 +416,10 @@ impl Workspace {
                 let path = saved.path.clone().filter(|p| p.is_file())?;
                 PaneFactories::get(cx).file.as_ref()?;
                 self.new_factory_pane(PaneKind::File, path, window, cx)
+            }
+            PaneKind::History => {
+                PaneFactories::get(cx).history.as_ref()?;
+                self.new_factory_pane(PaneKind::History, cwd, window, cx)
             }
         }
     }
@@ -564,8 +599,11 @@ impl Workspace {
         }
     }
 
+    /// Focus the quick look while it shows, else the active tab's focused pane.
     pub(super) fn focus_active(&self, window: &mut Window, cx: &mut App) {
-        if let Some(pane) = self.focused_pane().and_then(|id| self.panes.get(&id)) {
+        if let Some(peek) = &self.peek {
+            peek.item.focus.focus(window, cx);
+        } else if let Some(pane) = self.focused_pane().and_then(|id| self.panes.get(&id)) {
             pane.item.focus.focus(window, cx);
         }
     }

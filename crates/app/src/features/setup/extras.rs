@@ -311,6 +311,39 @@ pub fn install_engram(log: &Log) -> Result<(), String> {
     }
 }
 
+/// The version `engram version` reports, as `X.Y.Z`.
+pub fn engram_version() -> Option<String> {
+    let text = engram().and_then(|e| output_of(&e, &["version"]))?;
+    engram_version_of(&text)
+}
+
+fn engram_version_of(text: &str) -> Option<String> {
+    let word = text.lines().next()?.split_whitespace().last()?;
+    let version = word.strip_prefix('v').unwrap_or(word);
+    gentle_core::version::stable_parts(version).map(|_| version.to_string())
+}
+
+/// Update Engram the way it was installed: `brew upgrade` for Homebrew's,
+/// else the latest release binary into the app's toolchain (which comes
+/// first on the app's PATH). The version it runs afterwards.
+pub fn upgrade_engram(log: &Log) -> Result<String, String> {
+    let installed = engram().ok_or("Engram isn't installed.")?;
+    let real = dunce::canonicalize(&installed).unwrap_or(installed);
+    let from_brew = real.components().any(|c| c.as_os_str() == "Cellar");
+    match brew().filter(|_| from_brew && !cfg!(windows)) {
+        Some(brew) => {
+            let _ = output_of(&brew, &["trust", "gentleman-programming/tap"]);
+            let mut command = pi_rpc::command(&brew);
+            command.args(["upgrade", "gentleman-programming/tap/engram"]);
+            log("Updating Engram with Homebrew…".into());
+            run_logged(command, "brew upgrade", log)?;
+        }
+        None => fetch::install_engram_release(log)?,
+    }
+    refresh_paths();
+    engram_version().ok_or_else(|| "Engram was updated, but it doesn't run.".into())
+}
+
 // ── Provider and Claude Code ───────────────────────────────────────────────
 
 fn json_keys(path: &Path, field: Option<&str>) -> Vec<String> {
@@ -483,5 +516,17 @@ mod tests {
         assert_eq!(status("engram 3.0.0"), Status::Ok("engram 3.0.0".into()));
         assert_eq!(status("engram v3.7.0"), Status::Ok("engram v3.7.0".into()));
         assert_eq!(status("engram dev"), Status::Ok("engram dev".into()));
+    }
+
+    #[test]
+    fn engram_version_reads_the_first_line() {
+        let version = |text: &str| engram_version_of(text);
+        assert_eq!(version("engram 3.6.2").as_deref(), Some("3.6.2"));
+        assert_eq!(
+            version("engram v3.6.2\nUpdate available: 3.6.2 -> 3.7.2").as_deref(),
+            Some("3.6.2")
+        );
+        // A development build has no version to compare.
+        assert_eq!(version("engram dev"), None);
     }
 }

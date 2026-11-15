@@ -14,6 +14,7 @@ mod tabs;
 pub use remote::{RemoteFilesEvent, RemoteFilesView};
 pub use remote_git::RemoteGitDiffView;
 mod listing;
+mod mermaid;
 mod ops;
 mod refs;
 mod tree;
@@ -57,6 +58,12 @@ fn source_editor(
 }
 
 /// The icon and tint for a file name in the tree.
+/// Key bindings and the diagram renderer's state.
+pub fn init(cx: &mut App) {
+    tree::init(cx);
+    mermaid::init(cx);
+}
+
 fn file_icon(name: &str) -> (IconName, Hsla) {
     let lower = name.to_lowercase();
     let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");

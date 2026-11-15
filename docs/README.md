@@ -34,5 +34,6 @@ crates/
 | [0001](adr/0001-modular-monolith.md) | One binary organized by feature, with explicit boundaries. |
 | [0002](adr/0002-incremental-pure-core.md) | Pure logic lives in `gentle-core` and grows one complete behavior at a time. |
 | [0003](adr/0003-behavior-preserving-refactors.md) | Refactors don't change behavior; fixes go in separate commits. |
+| [0004](adr/0004-native-mermaid-rendering.md) | Mermaid diagrams are drawn with merman's CLI, downloaded only when someone asks for it. |
 
 For an AI agent or someone new, the short entry point is [`../AGENTS.md`](../AGENTS.md).

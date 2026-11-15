@@ -53,6 +53,12 @@ gpui_kit::assets::icon_assets!(
         Paperclip,
         // Configuration → Water reminder.
         Droplets,
+        // Architecture docs and the diagram renderer.
+        BookOpen,
+        FileText,
+        NotebookPen,
+        Workflow,
+        Download,
         // File tree header and context menu.
         FilePlus,
         FolderPlus,
@@ -72,6 +78,10 @@ gpui_kit::assets::icon_assets!(
         Cloud,
         FolderGit,
         GitCommitHorizontal,
+        // Commit History.
+        GitGraph,
+        // Profiles: routing models to agents.
+        Route,
         // Effort levels (off, minimal, low, high; Brain, Zap and Flame above).
         Moon,
         Feather,
@@ -92,7 +102,10 @@ gpui_kit::assets::icon_assets!(
         // The device panel.
         Apple,
         PanelRight,
-        PictureInPicture2
+        PictureInPicture2,
+        // Configuration → Theme: share a theme, import one from a link.
+        Share2,
+        Link
     ]
 );
 

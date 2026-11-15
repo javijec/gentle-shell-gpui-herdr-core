@@ -106,6 +106,15 @@ pub fn extract_tar_gz(archive: &Path, dest: &Path) -> io::Result<()> {
     tar::Archive::new(flate2::read::GzDecoder::new(fs::File::open(archive)?)).unpack(dest)
 }
 
+/// Extract a `.tar.xz` (the tar crate refuses entries escaping `dest`).
+pub fn extract_tar_xz(archive: &Path, dest: &Path) -> io::Result<()> {
+    let mut tar = Vec::new();
+    lzma_rs::xz_decompress(&mut io::BufReader::new(fs::File::open(archive)?), &mut tar)
+        .map_err(|e| invalid(format!("not a valid .tar.xz: {e}")))?;
+    fs::create_dir_all(dest)?;
+    tar::Archive::new(io::Cursor::new(tar)).unpack(dest)
+}
+
 pub(super) fn extract(archive: &Path, dest: &Path) -> io::Result<()> {
     let name = archive.file_name().unwrap_or_default().to_string_lossy();
     if name.ends_with(".tar.gz") {
@@ -267,6 +276,33 @@ mod tests {
         assert!(extract_zip(&archive, &dir.join("out")).is_err());
         assert!(link_stays_inside(Path::new("a/b/link"), Path::new("../c")));
         assert!(!link_stays_inside(Path::new("a/link"), Path::new("/etc")));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn extracts_tar_xz() {
+        let dir = temp_dir("tar-xz");
+        let archive = dir.join("merman-cli.tar.xz");
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(6);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append_data(&mut header, "merman-cli-x/merman-cli", &b"binary"[..])
+            .unwrap();
+        let tar = tar.into_inner().unwrap();
+        let mut xz = Vec::new();
+        lzma_rs::xz_compress(&mut &tar[..], &mut xz).unwrap();
+        fs::write(&archive, xz).unwrap();
+        let out = dir.join("out");
+        super::extract_tar_xz(&archive, &out).unwrap();
+        assert_eq!(
+            fs::read(out.join("merman-cli-x/merman-cli")).unwrap(),
+            b"binary"
+        );
+        // Not xz at all: an error, nothing unpacked.
+        fs::write(&archive, b"not xz").unwrap();
+        assert!(super::extract_tar_xz(&archive, &dir.join("bad")).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -1,0 +1,16 @@
+{
+  "name": "Neon Rain",
+  "bg": "#0c1020",
+  "text": "#e3e8f6",
+  "accent": "#ff5fa2",
+  "background": {
+    "scene": "neon-rain",
+    "sky": [
+      "#05070f",
+      "#0b1024",
+      "#1e1838",
+      "#34203f"
+    ],
+    "speed": 1
+  }
+}

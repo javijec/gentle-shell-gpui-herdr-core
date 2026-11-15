@@ -8,7 +8,7 @@ use gentle_core::version::stable_parts;
 use serde_json::Value;
 
 /// Same budget as the launcher: a real answer is trusted for a day.
-const TTL_MS: u64 = 24 * 60 * 60 * 1000;
+pub(super) const TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant).
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
@@ -68,8 +68,9 @@ pub(super) fn read_config(path: &Path) -> Value {
         .unwrap_or_else(|| Value::Object(Default::default()))
 }
 
-/// A fresh `startupReleaseCheck` (number or ISO `checkedAt`), as the launcher reads it.
-pub(super) fn cached_latest(config: &Value, now: u64) -> Option<String> {
+/// A fresh `startupReleaseCheck` (number or ISO `checkedAt`), as the
+/// launcher reads it: the latest version and how old the answer is.
+pub(super) fn cached_latest(config: &Value, now: u64) -> Option<(String, u64)> {
     let check = config.get("startupReleaseCheck")?;
     let checked = match check.get("checkedAt")? {
         Value::Number(n) => n.as_u64()?,
@@ -77,8 +78,8 @@ pub(super) fn cached_latest(config: &Value, now: u64) -> Option<String> {
         _ => return None,
     };
     let latest = check.get("latest")?.as_str()?;
-    (stable_parts(latest).is_some() && now.saturating_sub(checked) < TTL_MS)
-        .then(|| latest.to_string())
+    let age = now.saturating_sub(checked);
+    (stable_parts(latest).is_some() && age < TTL_MS).then(|| (latest.to_string(), age))
 }
 
 /// Set `key` in the launcher config, keeping every other key; refuses to
@@ -122,18 +123,17 @@ mod tests {
     #[test]
     fn cache_is_trusted_for_a_day_only() {
         let at = parse_iso_ms("2026-11-06T00:00:00.000Z").unwrap();
+        let latest = |config: &Value, now| cached_latest(config, now).map(|(l, _)| l);
         let config = serde_json::json!({"startupReleaseCheck": {"checkedAt": "2026-11-06T00:00:00.000Z", "latest": "4.7.0"}});
-        assert_eq!(
-            cached_latest(&config, at + TTL_MS - 1).as_deref(),
-            Some("4.7.0")
-        );
-        assert_eq!(cached_latest(&config, at + TTL_MS), None);
+        assert_eq!(latest(&config, at + TTL_MS - 1).as_deref(), Some("4.7.0"));
+        assert_eq!(cached_latest(&config, at + 5), Some(("4.7.0".into(), 5)));
+        assert_eq!(latest(&config, at + TTL_MS), None);
         let numeric =
             serde_json::json!({"startupReleaseCheck": {"checkedAt": at, "latest": "4.7.0"}});
-        assert_eq!(cached_latest(&numeric, at).as_deref(), Some("4.7.0"));
+        assert_eq!(latest(&numeric, at).as_deref(), Some("4.7.0"));
         let bad = serde_json::json!({"startupReleaseCheck": {"checkedAt": at, "latest": "next"}});
         assert_eq!(
-            cached_latest(&bad, at),
+            latest(&bad, at),
             None,
             "a malformed latest never suppresses a check"
         );

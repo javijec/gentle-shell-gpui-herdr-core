@@ -42,6 +42,21 @@ pub fn offer_for(current: &str, latest: &str, skipped: Option<&str>) -> Option<U
     })
 }
 
+/// Whether a cached `latest`, checked `age_ms` ago, can stand in for asking
+/// the registry again. It must be younger than `ttl_ms`; and when it offers
+/// nothing it only holds for `recheck_ms`, so a release published after
+/// the check shows up soon instead of a day later.
+pub fn cached_answer_holds(
+    current: &str,
+    latest: &str,
+    skipped: Option<&str>,
+    age_ms: u64,
+    ttl_ms: u64,
+    recheck_ms: u64,
+) -> bool {
+    age_ms < ttl_ms && (age_ms < recheck_ms || offer_for(current, latest, skipped).is_some())
+}
+
 /// `gentle-shell 4.6.0` (from `--version`) → `4.6.0`.
 pub fn current_from_versions(versions: &[String]) -> Option<&str> {
     versions
@@ -87,5 +102,26 @@ mod tests {
     fn reads_the_version_line() {
         let lines = ["gentle-shell 4.6.0".to_string(), "pi 1.5.0".to_string()];
         assert_eq!(current_from_versions(&lines), Some("4.6.0"));
+    }
+
+    #[test]
+    fn a_cached_no_is_rechecked_sooner_than_a_cached_yes() {
+        const HOUR: u64 = 60 * 60 * 1000;
+        let holds = |latest, age| cached_answer_holds("4.7.0", latest, None, age, 24 * HOUR, HOUR);
+        // "4.7.0 is the latest" from 2 hours ago: ask again (4.8.0 may be out).
+        assert!(holds("4.7.0", HOUR / 2));
+        assert!(!holds("4.7.0", 2 * HOUR));
+        // "4.8.0 is out" stays good for the day.
+        assert!(holds("4.8.0", 20 * HOUR));
+        assert!(!holds("4.8.0", 24 * HOUR));
+        // A skipped release offers nothing, so it's rechecked like a no.
+        assert!(!cached_answer_holds(
+            "4.7.0",
+            "4.8.0",
+            Some("4.8.0"),
+            2 * HOUR,
+            24 * HOUR,
+            HOUR
+        ));
     }
 }

@@ -264,6 +264,60 @@ pub fn run_checks() -> Vec<Check> {
         .collect()
 }
 
+/// Blocking: run `gentle-shell <args>` (e.g. `install <source>`) for the
+/// folder `cwd`, with the launcher's home options; its output either way.
+pub fn run_gentle_shell(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    let spec = pi_rpc::resolve_backend(cwd).map_err(|e| format!("{e:#}"))?;
+    let mut command = pi_rpc::command(&spec.program);
+    // Launcher options (home selectors) precede the subcommand.
+    command
+        .args(spec.args.iter().take_while(|a| *a != "--mode"))
+        .args(args)
+        .current_dir(&spec.cwd)
+        .stdin(std::process::Stdio::null());
+    for (k, v) in &spec.env {
+        command.env(k, v);
+    }
+    let out = command.output().map_err(|e| e.to_string())?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if out.status.success() {
+        Ok(text)
+    } else {
+        Err(text)
+    }
+}
+
+/// The diagram renderer (merman's CLI) the Markdown preview draws Mermaid
+/// with, once installed. Not part of the app: downloaded on demand.
+pub fn diagram_renderer() -> Option<PathBuf> {
+    fetch::merman_bin()
+}
+
+/// Blocking: download and install the diagram renderer; its path.
+pub fn install_diagram_renderer(log: &(dyn Fn(String) + Send + Sync)) -> Result<PathBuf, String> {
+    fetch::install_merman(log)
+}
+
+/// The Engram the app runs, as `X.Y.Z`, when it reports one.
+pub fn engram_version() -> Option<String> {
+    extras::engram_version()
+}
+
+/// Blocking: the latest Engram release's version, from GitHub.
+pub fn engram_latest() -> Result<String, String> {
+    fetch::engram_latest()
+}
+
+/// Blocking: update Engram the way it was installed (Homebrew, or the
+/// release binary in the app's toolchain); the version it runs afterwards.
+pub fn upgrade_engram(log: &(dyn Fn(String) + Send + Sync)) -> Result<String, String> {
+    extras::upgrade_engram(log)
+}
+
 /// Blocking: installs `id` unattended, streaming progress lines to `log`.
 pub fn install(id: CheckId, log: &(dyn Fn(String) + Send + Sync)) -> Result<(), String> {
     let result = match id {

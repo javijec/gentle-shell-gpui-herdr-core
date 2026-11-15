@@ -25,9 +25,10 @@ const BANNER_SCALE: f32 = 2.6;
 /// The banner is ~175 px wide per unit of scale; the rose is its left part.
 const BANNER_W: f32 = 175. * BANNER_SCALE;
 
-/// The slow-motion letters: when they start and how long they take.
+/// The letters written in again: when they start and how long the banner
+/// takes to bloom and write (seconds); it paces itself, so it's fed linearly.
 const LETTERS_AT: f32 = 0.25;
-const LETTERS_FOR: f32 = 2.2;
+const LETTERS_FOR: f32 = 2.6;
 /// The kisses fly from here (seconds), one after another.
 const KISSES_AT: f32 = 2.0;
 const KISS_GAP: f32 = 0.16;
@@ -40,11 +41,6 @@ const WORD: &str = "Sexyyyy";
 
 fn ease_out(t: f32) -> f32 {
     1. - (1. - t.clamp(0., 1.)).powi(3)
-}
-
-fn smoothstep(t: f32) -> f32 {
-    let t = t.clamp(0., 1.);
-    t * t * (3. - 2. * t)
 }
 
 /// The kisses the rose blows: each leaves the rose, floats up swaying,
@@ -119,7 +115,7 @@ fn letters(config: BannerConfig) -> impl IntoElement {
         "finale-letters",
         Animation::new(FINALE),
         move |el, t| {
-            let reveal = smoothstep((t * total - LETTERS_AT) / LETTERS_FOR);
+            let reveal = ((t * total - LETTERS_AT) / LETTERS_FOR).clamp(0., 1.);
             el.child(banner(config, BANNER_SCALE, reveal))
         },
     )

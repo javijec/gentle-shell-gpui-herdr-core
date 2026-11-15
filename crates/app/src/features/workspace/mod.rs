@@ -33,13 +33,15 @@ use crate::features::palette::{
 };
 use crate::features::profiles::{ModelChoice, ProfilesEvent, ProfilesView};
 use crate::features::providers::{ProvidersEvent, ProvidersView};
-use crate::features::session::{SessionEvent, SessionView};
+use crate::features::session::{AgentsTab, SessionEvent, SessionView};
 use crate::features::sessions::{SessionsEvent, SessionsView};
 use crate::features::settings::{SettingsEvent, SettingsView};
 use crate::features::usage::{UsageEvent, UsageView};
 use crate::features::welcome::{WelcomeEvent, WelcomeView};
 use crate::features::workspaces::{self, SavedPane, SavedState, SavedTab, SavedWorkspace};
-use crate::shared::pane::{PaneFactories, PaneId, PaneItem, PaneKind, PaneTree, SplitAxis};
+use crate::shared::pane::{
+    PaneFactories, PaneId, PaneItem, PaneKind, PaneTree, ShowInPane, SplitAxis,
+};
 use crate::shared::ui;
 use gentle_core::commands::Screen;
 
@@ -50,6 +52,7 @@ mod navigator;
 mod remote_files;
 mod overlays;
 mod panes;
+mod peek;
 mod persistence;
 mod render;
 mod spaces;
@@ -110,6 +113,7 @@ enum Overlay {
     Palette(Entity<PaletteView>),
     Usage(Entity<UsageView>),
     Memory(Entity<MemoryView>),
+    Docs(Entity<DocsView>),
     Settings(Entity<SettingsView>),
     Profiles(Entity<ProfilesView>),
     Onboarding(Entity<OnboardingView>),
@@ -360,6 +364,8 @@ pub struct Workspace {
     /// Prevent an automatic Pi spawn before remote agent discovery finishes.
     remote_agent_recovery: RemoteAgentRecovery,
     overlay: Option<(Overlay, Subscription)>,
+    /// The file shown in the quick-look modal over the panes.
+    peek: Option<peek::Peek>,
     sidebar: Option<AnyView>,
     remote_files: Option<Entity<RemoteFilesView>>,
     /// In-memory remote editors tied to individual agents. Switching Machines
@@ -499,6 +505,7 @@ impl Workspace {
                 RemoteAgentRecovery::NotNeeded
             },
             overlay: None,
+            peek: None,
             sidebar: None,
             remote_files: None,
             remote_file_drafts: Vec::new(),
@@ -717,6 +724,11 @@ impl Workspace {
 
     /// Show `path` in the tab's preview pane, or a new split beside the largest pane.
     pub fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // Already in the quick look: move that view (edits included) instead.
+        if self.peek.as_ref().is_some_and(|peek| peek.path == path) {
+            self.pin_peek(window, cx);
+            return;
+        }
         if self.tab().is_none() {
             self.open_tab(PaneKind::File, path, None, None, window, cx);
             return;
@@ -755,6 +767,14 @@ impl Workspace {
         pane.sync_chrome(cx);
         self.panes.insert(id, pane);
         self.place_preview(id, window, cx);
+    }
+
+    /// The Commit History of the repository `cwd` is in, as a pane placed
+    /// like a preview: it takes the place of the tab's history pane, if any.
+    pub fn open_history(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.new_factory_pane(PaneKind::History, cwd, window, cx) {
+            self.place_preview(id, window, cx);
+        }
     }
 
     /// Open `path` in a new split right of the focused pane (its own tab when

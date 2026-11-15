@@ -1,0 +1,15 @@
+{
+  "name": "Star Voyage",
+  "bg": "#0d0a1f",
+  "text": "#e6ecff",
+  "accent": "#ff6fb5",
+  "background": {
+    "scene": "star-voyage",
+    "sky": [
+      "#2a1a52",
+      "#120d2e",
+      "#08061a"
+    ],
+    "speed": 1
+  }
+}

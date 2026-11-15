@@ -145,75 +145,183 @@ impl SettingsView {
         offer: crate::features::updates::UpdateOffer,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let notes = offer.notes_url.clone();
-        let skipped = offer.latest.clone();
         let target = offer.latest.clone();
-        v_flex()
-            .mt_2()
-            .p_3()
-            .gap_2()
-            .rounded_lg()
-            .bg(ui::accent().opacity(0.10))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(Icon::new(IconName::ArrowUp).small().text_color(ui::accent()))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(ui::fg())
-                            .child(format!("Gentle Shell {} is available", offer.latest)),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(ui::muted())
-                            .child(format!("you have {}", offer.current)),
-                    ),
-            )
-            .child(div().text_xs().text_color(ui::muted()).child(
-                "Runs gentle-shell upgrade. Open agent tabs then restart on the new version and keep their conversations; a tab mid-turn switches when the turn ends.",
-            ))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("update-now")
-                            .primary()
-                            .small()
-                            .label(if self.upgrading { "Updating…" } else { "Update now" })
-                            .loading(self.upgrading)
-                            .disabled(self.upgrading)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.run_upgrade(target.clone(), cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("update-notes")
-                            .ghost()
-                            .small()
-                            .icon(Icon::new(IconName::ExternalLink))
-                            .label("Release notes")
-                            .on_click(move |_, _, cx| cx.open_url(&notes)),
-                    )
-                    .child(
-                        Button::new("update-skip")
-                            .ghost()
-                            .small()
-                            .label("Skip this version")
-                            .disabled(self.upgrading)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.skip_update(skipped.clone(), cx)
-                            })),
-                    ),
-            )
-            .children(
-                self.skip_error
-                    .clone()
-                    .map(|error| upgrade_output(vec![error], true)),
-            )
+        let skipped = offer.latest.clone();
+        update_card(
+            "update",
+            "Gentle Shell",
+            "Runs gentle-shell upgrade. Open agent tabs then restart on the new version and keep their conversations; a tab mid-turn switches when the turn ends.",
+            &offer,
+            self.upgrading,
+            cx.listener(move |this, _, _, cx| this.run_upgrade(target.clone(), cx)),
+            cx.listener(move |this, _, _, cx| this.skip_update(skipped.clone(), cx)),
+            self.skip_error.clone(),
+        )
     }
+
+    /// Update Engram the way it was installed, then check what runs.
+    fn run_engram_upgrade(&mut self, cx: &mut Context<Self>) {
+        if self.engram.upgrading {
+            return;
+        }
+        self.engram.upgrading = true;
+        self.engram.result = None;
+        self.engram._job = cx.spawn(async move |this, cx| {
+            let (result, lines) = cx
+                .background_executor()
+                .spawn(async move {
+                    let lines = std::sync::Mutex::new(Vec::new());
+                    let result = crate::features::setup::upgrade_engram(&|line| {
+                        lines.lock().unwrap().push(line);
+                    });
+                    (result, lines.into_inner().unwrap())
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.engram.upgrading = false;
+                let mut shown = lines[lines.len().saturating_sub(8)..].to_vec();
+                let failed = result.is_err();
+                shown.push(match result {
+                    Ok(version) => format!(
+                        "Engram {version} is installed. An Engram server that's already running keeps the old version until it restarts."
+                    ),
+                    Err(error) => error,
+                });
+                this.engram.result = Some((shown, failed));
+                this.reload(cx);
+                cx.notify();
+            });
+        });
+        cx.notify();
+    }
+
+    fn skip_engram(&mut self, version: String, cx: &mut Context<Self>) {
+        if let Err(error) = crate::features::updates::engram::skip(&version) {
+            self.engram.skip_error = Some(format!("Could not remember the skip: {error}"));
+        }
+        self.reload(cx);
+    }
+
+    /// "Engram X is available", with the result of the last update.
+    pub(super) fn render_engram_update(
+        &self,
+        offer: Option<crate::features::updates::UpdateOffer>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let card = offer.map(|offer| {
+            let skipped = offer.latest.clone();
+            update_card(
+                "engram-update",
+                "Engram",
+                "Updates Engram the way it was installed (Homebrew, or the release the app downloaded). Your memories stay.",
+                &offer,
+                self.engram.upgrading,
+                cx.listener(|this, _, _, cx| this.run_engram_upgrade(cx)),
+                cx.listener(move |this, _, _, cx| this.skip_engram(skipped.clone(), cx)),
+                self.engram.skip_error.clone(),
+            )
+        });
+        div().children(card).children(
+            self.engram
+                .result
+                .clone()
+                .map(|(lines, failed)| div().mt_2().child(upgrade_output(lines, failed))),
+        )
+    }
+}
+
+/// Engram's update: running, how it ended, a failed skip.
+pub(super) struct EngramUpdate {
+    upgrading: bool,
+    /// The last lines and whether it failed.
+    result: Option<(Vec<String>, bool)>,
+    skip_error: Option<String>,
+    _job: Task<()>,
+}
+
+impl Default for EngramUpdate {
+    fn default() -> Self {
+        Self {
+            upgrading: false,
+            result: None,
+            skip_error: None,
+            _job: Task::ready(()),
+        }
+    }
+}
+
+/// "<tool> X is available": update now, release notes, skip this version.
+#[allow(clippy::too_many_arguments)]
+fn update_card(
+    id: &'static str,
+    tool: &str,
+    what_it_does: &'static str,
+    offer: &crate::features::updates::UpdateOffer,
+    busy: bool,
+    on_update: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_skip: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    error: Option<String>,
+) -> Div {
+    let notes = offer.notes_url.clone();
+    v_flex()
+        .mt_2()
+        .p_3()
+        .gap_2()
+        .rounded_lg()
+        .bg(ui::accent().opacity(0.10))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    Icon::new(IconName::ArrowUp)
+                        .small()
+                        .text_color(ui::accent()),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(ui::fg())
+                        .child(format!("{tool} {} is available", offer.latest)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(ui::muted())
+                        .child(format!("you have {}", offer.current)),
+                ),
+        )
+        .child(div().text_xs().text_color(ui::muted()).child(what_it_does))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new((id, 0usize))
+                        .primary()
+                        .small()
+                        .label(if busy { "Updating…" } else { "Update now" })
+                        .loading(busy)
+                        .disabled(busy)
+                        .on_click(on_update),
+                )
+                .child(
+                    Button::new((id, 1usize))
+                        .ghost()
+                        .small()
+                        .icon(Icon::new(IconName::ExternalLink))
+                        .label("Release notes")
+                        .on_click(move |_, _, cx| cx.open_url(&notes)),
+                )
+                .child(
+                    Button::new((id, 2usize))
+                        .ghost()
+                        .small()
+                        .label("Skip this version")
+                        .disabled(busy)
+                        .on_click(on_skip),
+                ),
+        )
+        .children(error.map(|error| upgrade_output(vec![error], true)))
 }
 
 /// The upgrade's result: what happened and what's left to do, then

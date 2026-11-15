@@ -1,6 +1,10 @@
 //! `Render` for the workspace window.
 
 use super::*;
+use gpui_kit::component::Selectable as _;
+
+/// The title bar's height; overlay screens open below it.
+const TITLE_BAR_HEIGHT: f32 = 36.;
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -62,6 +66,7 @@ impl Render for Workspace {
                 crate::features::browser::reclaim_keyboard(window)
             })
             .on_action(cx.listener(Self::on_new_tab))
+            .on_action(cx.listener(Self::on_show_in_pane))
             .on_action(cx.listener(Self::on_new_terminal_tab))
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_next_tab))
@@ -85,9 +90,11 @@ impl Render for Workspace {
             .relative()
             .left(px(shake_x))
             .top(px(shake_y))
+            // The theme's backdrop, first so everything draws over it.
+            .children(crate::shared::backdrop::layer(window, cx))
             .child(
                 TitleBar::new()
-                    .h(px(36.))
+                    .h(px(TITLE_BAR_HEIGHT))
                     .bg(gpui_kit::transparent_black())
                     .child(
                         h_flex()
@@ -320,7 +327,7 @@ impl Render for Workspace {
                                                                     },
                                                                 ))
                                                                 .item(entry(
-                                                                    IconName::Layers,
+                                                                    IconName::Route,
                                                                     "Profiles",
                                                                     "Model and effort per agent",
                                                                     |this, window, cx| {
@@ -362,56 +369,72 @@ impl Render for Workspace {
                                         )
                                     })
                                     .when(!narrow, |d| {
-                                        d.child(
-                                            Button::new("open-settings")
+                                        // The screens stay reachable while one is open
+                                        // (they open below the title bar): a button opens
+                                        // its screen in place of the current one, and the
+                                        // open screen's button is lit and closes it.
+                                        type Open = fn(
+                                            &mut Workspace,
+                                            &mut Window,
+                                            &mut Context<Workspace>,
+                                        );
+                                        let button = |id: &'static str,
+                                                      icon: IconName,
+                                                      tip: &'static str,
+                                                      open_now: bool,
+                                                      open: Open| {
+                                            Button::new(id)
                                                 .ghost()
                                                 .xsmall()
-                                                .icon(Icon::new(IconName::Settings))
-                                                .tooltip("Configuration")
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.open_settings(window, cx)
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("open-profiles")
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(Icon::new(IconName::Layers))
-                                                .tooltip("Profiles: model and effort per agent")
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.open_profiles(window, cx)
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("open-memory")
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(Icon::new(IconName::Brain))
-                                                .tooltip("Memory (Engram)")
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.open_memory(window, cx)
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("open-sessions")
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(Icon::new(IconName::RotateCcwClock))
-                                                .tooltip("Sessions")
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.open_sessions(window, cx)
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("open-providers")
-                                                .ghost()
-                                                .xsmall()
-                                                .icon(Icon::new(IconName::KeyRound))
-                                                .tooltip("Providers and sign-in")
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.open_providers(window, cx)
-                                                })),
-                                        )
+                                                .icon(Icon::new(icon))
+                                                .tooltip(tip)
+                                                .selected(open_now)
+                                                .on_click(cx.listener(move |this, _, window, cx| {
+                                                    if open_now {
+                                                        this.close_overlay(window, cx)
+                                                    } else {
+                                                        open(this, window, cx)
+                                                    }
+                                                }))
+                                        };
+                                        let open = |is: fn(&Overlay) -> bool| {
+                                            self.overlay.as_ref().is_some_and(|(o, _)| is(o))
+                                        };
+                                        d.child(button(
+                                            "open-settings",
+                                            IconName::Settings,
+                                            "Configuration",
+                                            open(|o| matches!(o, Overlay::Settings(_))),
+                                            |this, window, cx| this.open_settings(window, cx),
+                                        ))
+                                        .child(button(
+                                            "open-profiles",
+                                            IconName::Route,
+                                            "Profiles: model and effort per agent",
+                                            open(|o| matches!(o, Overlay::Profiles(_))),
+                                            |this, window, cx| this.open_profiles(window, cx),
+                                        ))
+                                        .child(button(
+                                            "open-memory",
+                                            IconName::Brain,
+                                            "Memory (Engram)",
+                                            open(|o| matches!(o, Overlay::Memory(_))),
+                                            |this, window, cx| this.open_memory(window, cx),
+                                        ))
+                                        .child(button(
+                                            "open-sessions",
+                                            IconName::RotateCcwClock,
+                                            "Sessions",
+                                            open(|o| matches!(o, Overlay::Sessions(_))),
+                                            |this, window, cx| this.open_sessions(window, cx),
+                                        ))
+                                        .child(button(
+                                            "open-providers",
+                                            IconName::KeyRound,
+                                            "Providers and sign-in",
+                                            open(|o| matches!(o, Overlay::Providers(_))),
+                                            |this, window, cx| this.open_providers(window, cx),
+                                        ))
                                     })
                                     .when(has_sidebar, |d| {
                                         d.child(
@@ -476,11 +499,13 @@ impl Render for Workspace {
                     })
                     .child(
                         div()
+                            .relative()
                             .flex()
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            .child(self.render_body(window, cx)),
+                            .child(self.render_body(window, cx))
+                            .children(self.render_peek(cx)),
                     )
                     .when(devices_docked, |row| row.child(self.devices.clone()))
                     .children(files.map(|view| {

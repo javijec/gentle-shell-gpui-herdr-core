@@ -46,30 +46,9 @@ impl SettingsView {
         self._job = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    let spec = pi_rpc::resolve_backend(&cwd).map_err(|e| format!("{e:#}"))?;
-                    let mut command = pi_rpc::command(&spec.program);
-                    // Launcher options (home selectors) precede the subcommand.
-                    command
-                        .args(spec.args.iter().take_while(|a| *a != "--mode"))
-                        .args([verb, &source])
-                        .current_dir(&spec.cwd)
-                        .stdin(std::process::Stdio::null());
-                    for (k, v) in &spec.env {
-                        command.env(k, v);
-                    }
-                    let out = command.output().map_err(|e| e.to_string())?;
-                    let text = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                    if out.status.success() {
-                        Ok(text)
-                    } else {
-                        Err(text)
-                    }
-                })
+                .spawn(
+                    async move { crate::features::setup::run_gentle_shell(&cwd, &[verb, &source]) },
+                )
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.running = None;

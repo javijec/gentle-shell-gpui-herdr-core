@@ -58,6 +58,11 @@ fn fold_key(ix: usize, sub: usize, slot: usize) -> usize {
 const INPUT_LINES: usize = 6;
 const DIFF_LINES: usize = 12;
 const OUTPUT_LINES: usize = 8;
+/// Lines a long message you sent shows folded. It folds only when that
+/// hides more than `USER_SLACK` lines: hiding fewer would save less room
+/// than its toggle takes.
+const USER_LINES: usize = 8;
+const USER_SLACK: usize = 2;
 /// Pane widths below which the composer sheds secondary chrome.
 const NARROW: f32 = 520.;
 const TINY: f32 = 420.;
@@ -545,7 +550,10 @@ impl SessionView {
                         &computed
                     }
                 };
-                let bubble = user_bubble(shown, images);
+                let key = fold_key(ix, 0, OUTPUT);
+                let open = self.expanded.contains(&key);
+                let toggle = self.bubble_toggle(shown, key, open, cx);
+                let bubble = user_bubble(shown, images, open, toggle);
                 if text.trim().is_empty() {
                     return bubble.into_any_element();
                 }
@@ -1222,6 +1230,23 @@ impl SessionView {
             )
     }
 
+    /// A folded message's "N more lines" / "Show less", if it folds.
+    fn bubble_toggle(
+        &self,
+        shown: &BubbleText,
+        key: usize,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let (_, hidden) = shown.folded.as_ref()?;
+        let label = if open {
+            "Show less".into()
+        } else {
+            format!("{hidden} more lines")
+        };
+        Some(self.fold_toggle(key, label, open, cx))
+    }
+
     fn fold_toggle(
         &self,
         key: usize,
@@ -1295,9 +1320,16 @@ impl SessionView {
                 let Some(pending) = &self.live.pending else {
                     return div().into_any_element();
                 };
+                let shown = BubbleText::new(&pending.text);
+                // Keyed like the item its echo becomes, so it opens the same.
+                let key = fold_key(base, 0, OUTPUT);
+                let open = self.expanded.contains(&key);
+                let toggle = self.bubble_toggle(&shown, key, open, cx);
                 let bubble = user_bubble(
-                    &BubbleText::new(&pending.text),
+                    &shown,
                     pending.images.iter().cloned().map(Some).collect(),
+                    open,
+                    toggle,
                 );
                 self.list
                     .appear(("item", base), now, div().w_full().child(bubble))
@@ -1501,19 +1533,39 @@ impl CodeLine {
 }
 
 /// A message's text as its bubble shows it: image tokens as `🖼 #N` chips,
-/// with their ranges.
+/// with their ranges, and a long one's folded start.
 struct BubbleText {
     text: SharedString,
     chips: Vec<Range<usize>>,
+    /// The first [`USER_LINES`] lines of `text` and how many more it has,
+    /// when it is long enough to fold.
+    folded: Option<(SharedString, usize)>,
 }
 
 impl BubbleText {
     fn new(text: &str) -> Self {
         let (shown, chips) = attachments::chip_text(text);
+        let lines = line_count(&shown);
+        let folded = (lines > USER_LINES + USER_SLACK).then(|| {
+            let (head, hidden) = head_slice(&shown, lines, USER_LINES);
+            (SharedString::from(head.to_string()), hidden)
+        });
         Self {
             text: shown.into(),
             chips,
+            folded,
         }
+    }
+
+    /// What the bubble shows, `open` or not, and its chips.
+    fn visible(&self, open: bool) -> (SharedString, impl Iterator<Item = Range<usize>> + '_) {
+        let text = match &self.folded {
+            Some((head, _)) if !open => head.clone(),
+            _ => self.text.clone(),
+        };
+        let end = text.len();
+        let chips = self.chips.iter().filter(move |r| r.end <= end).cloned();
+        (text, chips)
     }
 }
 
@@ -1845,15 +1897,21 @@ fn status_footer(status: ToolStatus, duration: Option<Duration>) -> Div {
 }
 
 /// A user message: its images (numbered like their `[Image #N]` tokens)
-/// over the text, tokens shown as `🖼 #N` chips. `None` is an image that
-/// could not be decoded.
-fn user_bubble(shown: &BubbleText, images: Vec<Option<Arc<Image>>>) -> Div {
+/// over the text, tokens shown as `🖼 #N` chips, a long text folded unless
+/// `open`, with its `toggle`. `None` is an image that could not be decoded.
+fn user_bubble(
+    shown: &BubbleText,
+    images: Vec<Option<Arc<Image>>>,
+    open: bool,
+    toggle: Option<Stateful<Div>>,
+) -> Div {
     let chip = HighlightStyle {
         color: Some(ui::info()),
         font_weight: Some(FontWeight::SEMIBOLD),
         background_color: Some(ui::info().opacity(0.14)),
         ..Default::default()
     };
+    let (text, chips) = shown.visible(open);
     // min_w_0 on both levels: without it the bubble's minimum width is its
     // unwrapped text, so in a narrow pane it overflows (clipped on the left).
     h_flex().w_full().min_w_0().justify_end().child(
@@ -1876,12 +1934,11 @@ fn user_bubble(shown: &BubbleText, images: Vec<Option<Arc<Image>>>) -> Div {
                     }),
                 ))
             })
-            .when(!shown.text.trim().is_empty(), |this| {
-                this.child(
-                    StyledText::new(shown.text.clone())
-                        .with_highlights(shown.chips.iter().map(|r| (r.clone(), chip))),
-                )
-            }),
+            .when(!text.trim().is_empty(), |this| {
+                this.child(StyledText::new(text).with_highlights(chips.map(|r| (r, chip))))
+            })
+            // The toggle's own padding, undone so its label lines up with the text.
+            .children(toggle.map(|toggle| div().ml(px(-12.)).mt(px(-4.)).child(toggle))),
     )
 }
 
@@ -1990,8 +2047,52 @@ fn working_indicator(label: &'static str, elapsed: Option<Duration>) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_language, head_slice, language_for_path, line_count, parse_diff_line, tail_slice,
+        BubbleText, USER_LINES, USER_SLACK, command_language, head_slice, language_for_path,
+        line_count, parse_diff_line, tail_slice,
     };
+
+    #[test]
+    fn long_messages_fold_to_their_first_lines() {
+        let message = |n: usize, end: &str| {
+            (1..=n)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join(end)
+        };
+        // Folding would hide only USER_SLACK lines: it doesn't.
+        assert!(
+            BubbleText::new(&message(USER_LINES + USER_SLACK, "\n"))
+                .folded
+                .is_none()
+        );
+        // Trailing blank lines are not lines to hide.
+        let padded = format!("{}\n\n\n\n", message(USER_LINES + USER_SLACK, "\n"));
+        assert!(BubbleText::new(&padded).folded.is_none());
+
+        let long = message(USER_LINES + USER_SLACK + 1, "\r\n");
+        let bubble = BubbleText::new(&long);
+        let (head, hidden) = bubble.folded.clone().unwrap();
+        assert_eq!(hidden, USER_SLACK + 1);
+        assert_eq!(head.as_ref(), message(USER_LINES, "\r\n"));
+        assert!(!head.ends_with('\r'));
+        // Open, the whole text shows; folded, the head.
+        assert_eq!(bubble.visible(true).0, bubble.text);
+        assert_eq!(bubble.visible(false).0, head);
+    }
+
+    #[test]
+    fn folded_messages_keep_only_the_chips_they_show() {
+        let mut lines: Vec<String> = (1..=20).map(|i| format!("line {i}")).collect();
+        lines[0] = "see [Image #1]".into();
+        lines[15] = "and [Image #2]".into();
+        let bubble = BubbleText::new(&lines.join("\n"));
+        let (text, chips) = bubble.visible(false);
+        let shown: Vec<_> = chips.map(|r| text[r].to_string()).collect();
+        assert_eq!(shown, vec!["🖼 #1"]);
+        let (text, chips) = bubble.visible(true);
+        let shown: Vec<_> = chips.map(|r| text[r].to_string()).collect();
+        assert_eq!(shown, vec!["🖼 #1", "🖼 #2"]);
+    }
 
     #[test]
     fn diff_lines_split_sign_number_and_text() {
