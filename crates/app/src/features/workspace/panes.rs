@@ -462,6 +462,10 @@ impl Workspace {
             self.tab().map(|tab| (tab.id, tab.focused, axis))
         });
         let local_cwd = self.active_cwd(cx);
+        let owner = session.clone();
+        let agent_target = Some(pi_rpc::AgentTarget::Remote {
+            machine: machine.clone(), cwd: root.clone(),
+        });
         let task = cx.background_executor().spawn(async move {
             machine_model::create_shell_in(Some(&machine), Some(&root))
         });
@@ -484,6 +488,10 @@ impl Workspace {
                                 Some(address.clone()), window, cx,
                             )
                         {
+                            if let Some(created) = this.panes.get_mut(&pane) {
+                                created.linked_session = Some(owner.clone());
+                                created.agent_target = agent_target.clone();
+                            }
                             if let Some(tab) = this.tab_mut() {
                                 tab.tree.split(&focused, pane, axis);
                             }
@@ -492,6 +500,14 @@ impl Workspace {
                             return;
                         }
                         this.open_herdr_terminal(address, window, cx);
+                        if let Some(id) = this.focused_pane()
+                            && let Some(created) = this.panes.get_mut(&id)
+                            && created.item.kind == PaneKind::Terminal
+                        {
+                            created.linked_session = Some(owner.clone());
+                            created.agent_target = agent_target.clone();
+                            this.schedule_save(cx);
+                        }
                     }
                     Err(error) => window.push_notification(Notification::error(error), cx),
                 }
@@ -691,6 +707,77 @@ impl Workspace {
         }
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    /// Chat ⇄ Terminal for an agent on Windows or another Herdr machine.
+    /// The companion terminal is a separate shell in the same project, not
+    /// the underlying Pi RPC process. Switching never restarts the agent.
+    pub(super) fn toggle_agent_terminal(
+        &mut self, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        let Some(current) = self.focused_pane() else { return };
+        let Some(current_pane) = self.panes.get(&current) else { return };
+        let in_terminal = current_pane.item.kind == PaneKind::Terminal;
+        let Some(owner) = current_pane.session.clone()
+            .or_else(|| current_pane.linked_session.clone())
+            .or_else(|| self.active_session())
+        else {
+            window.push_notification(Notification::info(
+                "Select an agent chat before opening its terminal.",
+            ), cx);
+            return;
+        };
+        if in_terminal {
+            let chat = self.panes.iter().find_map(|(id, pane)| {
+                (pane.session.as_ref() == Some(&owner)).then_some(*id)
+            });
+            if let Some(chat) = chat {
+                self.reveal_pane(chat, window, cx);
+            } else {
+                window.push_notification(Notification::info(
+                    "The originating agent chat is no longer open.",
+                ), cx);
+            }
+            return;
+        }
+        let companion = self.panes.iter().find_map(|(id, pane)| {
+            (pane.item.kind == PaneKind::Terminal
+                && pane.linked_session.as_ref() == Some(&owner)).then_some(*id)
+        });
+        if let Some(companion) = companion {
+            self.reveal_pane(companion, window, cx);
+            return;
+        }
+        if owner.read(cx).is_remote_herdr() {
+            self.open_shell_on_selected_machine(Some(SplitAxis::Horizontal), window, cx);
+            return;
+        }
+        let cwd = owner.read(cx).cwd().clone();
+        let Some(created) = self.new_factory_pane(
+            PaneKind::Terminal, cwd, window, cx,
+        ) else {
+            window.push_notification(Notification::error(
+                "The local terminal backend is unavailable.",
+            ), cx);
+            return;
+        };
+        if let Some(pane) = self.panes.get_mut(&created) {
+            pane.linked_session = Some(owner);
+        }
+        let can_split = self.pane_sizes(window).into_iter()
+            .find(|(id, ..)| *id == current)
+            .is_some_and(|(_, width, height)| fits_split(
+                SplitAxis::Horizontal, width, height,
+            ));
+        if can_split {
+            if let Some(tab) = self.tab_mut() {
+                tab.tree.split(&current, created, SplitAxis::Horizontal);
+            }
+            self.focus_pane(created, window, cx);
+            self.schedule_save(cx);
+        } else {
+            self.push_pane_tab(created, window, cx);
+        }
     }
 
     /// Show the pane wherever it lives: its workspace, its tab, then focus.
