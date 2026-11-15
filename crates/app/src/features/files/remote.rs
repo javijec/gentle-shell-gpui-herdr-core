@@ -29,6 +29,7 @@ use super::backend::{
 use gentle_core::git::status::{BranchStatus, StatusEntry as RemoteGitFile};
 use super::dock_ui::{file_entry_row, panel_header, panel_shell};
 use super::remote_tree::{RemoteTreeRow, visible_rows};
+use super::transfers;
 use super::tabs::FilePanelTab as RemoteTab;
 use super::viewer::MdMode;
 use crate::shared::ui;
@@ -39,6 +40,8 @@ pub enum RemoteFilesEvent {
     OpenFile(String),
     /// Request a native central diff for a changed Linux file.
     OpenDiff(String),
+    /// Copy a regular remote file directly to another selected Herdr agent.
+    RelayFile { path: String, target_terminal: String },
     Close,
 }
 
@@ -507,6 +510,10 @@ pub struct RemoteFilesView {
     file_clipboard: Option<(String, bool)>,
     entry_name: Entity<InputState>,
     entry_busy: bool,
+    transfer_busy: bool,
+    transfer_feedback: Option<String>,
+    /// Human-readable destination and exact Herdr terminal address.
+    transfer_targets: Vec<(String, String)>,
     trash_confirm: Option<String>,
     last_trash: Option<(String, String)>,
     create_name: Entity<InputState>,
@@ -780,6 +787,9 @@ impl RemoteFilesView {
             file_clipboard: None,
             entry_name,
             entry_busy: false,
+            transfer_busy: false,
+            transfer_feedback: None,
+            transfer_targets: Vec::new(),
             trash_confirm: None,
             last_trash: None,
             create_name,
@@ -877,7 +887,16 @@ impl RemoteFilesView {
     /// A draft is private to this view and can only save through its own
     /// original SessionView. Unchanged editor mode is retained as well.
     pub fn has_draft(&self) -> bool {
-        self.editor.is_some() || self.saving
+        self.editor.is_some() || self.saving || self.transfer_busy
+    }
+
+    pub fn set_transfer_targets(
+        &mut self, targets: Vec<(String, String)>, cx: &mut Context<Self>,
+    ) {
+        if self.transfer_targets != targets {
+            self.transfer_targets = targets;
+            cx.notify();
+        }
     }
 
     /// Navigation must not silently discard a typed edit.
@@ -1154,6 +1173,117 @@ impl RemoteFilesView {
             });
         }).detach();
         cx.notify();
+    }
+
+    /// Upload a user-selected Windows/macOS/Linux regular file to the
+    /// selected agent's directory. No OS path is ever sent to the remote Pi.
+    fn upload_local_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.transfer_busy || self.root == "/" { return; }
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: true, directories: false, multiple: false,
+            prompt: Some("Upload to remote project".into()),
+        });
+        let root = self.root.clone();
+        let parent = self.tree_selected_directory.clone()
+            .unwrap_or_else(|| root.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = picker.await else { return };
+            let Some(local) = paths.pop() else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.transfer_busy { return; }
+                let Some(process) = this.session.read(cx).remote_fs_process() else {
+                    this.error = Some("Remote agent is disconnected; upload cancelled.".into());
+                    cx.notify();
+                    return;
+                };
+                this.transfer_busy = true;
+                this.transfer_feedback = None;
+                this.error = None;
+                let task = cx.background_executor().spawn(
+                    transfers::upload(root, process, parent.clone(), local),
+                );
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.transfer_busy = false;
+                        match result {
+                            Ok(path) => {
+                                this.transfer_feedback = Some(format!(
+                                    "Uploaded to remote agent: {path}"
+                                ));
+                                this.refresh_tree_folder(parent, cx);
+                            }
+                            Err(error) => this.error = Some(error),
+                        }
+                        cx.notify();
+                    });
+                }).detach();
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Choose a local directory explicitly. The downloader verifies every
+    /// block and uses create_new: it never overwrites local work.
+    fn download_remote_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.transfer_busy { return; }
+        let path = self.pane_path.clone().or_else(|| {
+            self.tree_selected_entry.as_ref()
+                .and_then(|(path, is_directory)| (!*is_directory).then(|| path.clone()))
+        });
+        let Some(path) = path else {
+            self.error = Some("Select a regular remote file to download.".into());
+            cx.notify();
+            return;
+        };
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: false, directories: true, multiple: false,
+            prompt: Some("Download remote file to local directory".into()),
+        });
+        let root = self.root.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut dirs))) = picker.await else { return };
+            let Some(destination) = dirs.pop() else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.transfer_busy { return; }
+                let Some(process) = this.session.read(cx).remote_fs_process() else {
+                    this.error = Some("Remote agent is disconnected; download cancelled.".into());
+                    cx.notify();
+                    return;
+                };
+                this.transfer_busy = true;
+                this.transfer_feedback = None;
+                this.error = None;
+                let task = cx.background_executor().spawn(
+                    transfers::download(root, process, path, destination),
+                );
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.transfer_busy = false;
+                        match result {
+                            Ok(path) => this.transfer_feedback = Some(format!(
+                                "Downloaded to {}", path.display()
+                            )),
+                            Err(error) => this.error = Some(error),
+                        }
+                        cx.notify();
+                    });
+                }).detach();
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn relay_selected_file(&mut self, target_terminal: String, cx: &mut Context<Self>) {
+        if self.transfer_busy { return; }
+        let Some((path, false)) = self.tree_selected_entry.clone() else { return };
+        if !self.transfer_targets.iter().any(|(_, terminal)| terminal == &target_terminal) {
+            self.error = Some("Target agent is no longer available.".into());
+            cx.notify();
+            return;
+        }
+        cx.emit(RemoteFilesEvent::RelayFile { path, target_terminal });
     }
 
     fn create_remote_entry(
@@ -2447,6 +2577,21 @@ impl Render for RemoteFilesView {
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.create_remote_entry(true, window, cx)
                         }))),
+                    .child(Button::new("remote-transfer-upload")
+                        .ghost().xsmall().label("Upload")
+                        .tooltip("Upload a local file (binary-safe, 16 MiB maximum)")
+                        .disabled(self.transfer_busy || self.root == "/")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.upload_local_file(window, cx)
+                        })))
+                    .child(Button::new("remote-transfer-download")
+                        .ghost().xsmall().label("Download")
+                        .tooltip("Download selected remote file to a local folder")
+                        .disabled(self.transfer_busy || self.tree_selected_entry.as_ref()
+                            .is_none_or(|(_, directory)| *directory))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.download_remote_file(window, cx)
+                        }))),
             ))
             .when(!central, |panel| panel.child(
                 v_flex().px_2().pb_1().gap_1()
@@ -2536,6 +2681,31 @@ impl Render for RemoteFilesView {
                                 .child(self.tree_selected_directory.as_ref()
                                     .unwrap_or(&self.root).clone())),
                     ),
+            ))
+            .when(!central && !self.transfer_targets.is_empty(), |panel| {
+                panel.child(
+                    h_flex().px_2().pb_1().gap_1().flex_wrap().children(
+                        self.transfer_targets.iter().enumerate().map(|(index, (label, address))| {
+                            let address = address.clone();
+                            Button::new(("remote-relay", index))
+                                .ghost().xsmall().label(format!("Send to {label}"))
+                                .tooltip("Copy selected remote file to another live agent; never overwrite")
+                                .disabled(self.transfer_busy || self.tree_selected_entry.as_ref()
+                                    .is_none_or(|(_, directory)| *directory))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.relay_selected_file(address.clone(), cx)
+                                }))
+                        })
+                    ),
+                )
+            })
+            .when(self.transfer_busy, |panel| panel.child(
+                div().px_3().py_1().text_xs().text_color(ui::muted())
+                    .child("Transferring file over Herdr…"),
+            ))
+            .when_some(self.transfer_feedback.clone(), |panel, feedback| panel.child(
+                div().px_3().py_1().text_xs().text_color(ui::muted())
+                    .child(feedback),
             ))
             .when(self.loading, |panel| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
