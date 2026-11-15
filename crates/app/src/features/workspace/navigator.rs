@@ -372,8 +372,8 @@ impl Workspace {
         window: &mut Window, cx: &mut Context<Self>,
     ) {
         if let Some(address) = address {
-            if !self.terminating_herdr_sessions.insert(address.clone())
-                || self.terminated_herdr_sessions.contains(&address)
+            if self.terminated_herdr_sessions.contains(&address)
+                || !self.terminating_herdr_sessions.insert(address.clone())
             {
                 return;
             }
