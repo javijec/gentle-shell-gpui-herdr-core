@@ -68,8 +68,7 @@ impl Workspace {
             }
             return;
         }
-        let cwd = self.active_cwd(cx);
-        self.open_tab(PaneKind::Agent, cwd, None, None, window, cx);
+        self.pick_local_agent_folder(window, cx);
     }
 
     pub(super) fn on_new_terminal_tab(
