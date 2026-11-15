@@ -22,7 +22,7 @@ impl MachinesView {
     ) -> AnyElement {
         let active = terminal.live();
         let address = terminal.address.clone();
-        let agent = self.known_agents.contains(&address);
+        let agent = terminal.gentle_shell || self.known_agents.contains(&address);
         let kind = if agent { "Gentle Shell" } else { "Terminal" };
         let title = format!("{kind} · {}", terminal.display_title());
         let subtitle = if terminal.cwd.is_empty() {
