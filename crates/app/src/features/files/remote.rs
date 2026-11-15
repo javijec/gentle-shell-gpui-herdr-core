@@ -461,7 +461,7 @@ mod remote_git_snapshot_tests {
     }
 }
 
-const MAX_EDIT_BYTES: usize = 128 * 1024;
+const MAX_EDIT_BYTES: usize = 2 * 1024 * 1024;
 const CONTEXT: &str = "GentleRemoteFileView";
 const TREE_CONTEXT: &str = "GentleRemoteFilesTree";
 const SAVE_HINT: &str = if cfg!(target_os = "macos") { "⌘S" } else { "Ctrl+S" };
@@ -1685,7 +1685,7 @@ impl RemoteFilesView {
             .or_else(|| preview.revision.clone()) else { return };
         let text = editor.read(cx).text().to_string();
         if text.len() > MAX_EDIT_BYTES || text.contains('\0') {
-            self.error = Some("Only UTF-8 text up to 128 KiB can be saved.".into());
+            self.error = Some("Only UTF-8 text up to 2 MiB can be saved.".into());
             cx.notify();
             return;
         }
@@ -2814,9 +2814,9 @@ impl Render for RemoteFilesView {
                     .px_3().text_size(px(10.))
                     .text_color(ui::muted())
                     .child(if self.editor.is_some() {
-                        "Editing · SHA-256 conflict protection · 128 KiB"
+                        "Editing · SHA-256 conflict protection · 2 MiB"
                     } else {
-                        "Files · preview first · 128 KiB maximum"
+                        "Files · edit ≤2 MiB · transfer ≤16 MiB"
                     }),
             )
             .into_any_element()
