@@ -680,6 +680,32 @@ impl Workspace {
         }
     }
 
+    /// Create a local agent only after the user has selected its actual
+    /// working directory. The explicit Local target prevents inheriting the
+    /// previously focused (possibly remote) agent's machine.
+    pub(super) fn open_local_agent_in_directory(
+        &mut self,
+        directory: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if crate::features::terminal::herdr_enabled() {
+            let pane = self.new_agent_pane(
+                directory,
+                AgentPaneInit {
+                    agent_target: Some(pi_rpc::AgentTarget::Local),
+                    start_now: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            self.push_pane_tab(pane, window, cx);
+        } else {
+            self.open_tab(PaneKind::Agent, directory, None, None, window, cx);
+        }
+    }
+
     /// Explicitly create a NEW agent under a single chosen Herdr machine.
     /// Unlike workspace restore, this is a deliberate terminal.run action.
     pub(super) fn open_agent_on_machine(
