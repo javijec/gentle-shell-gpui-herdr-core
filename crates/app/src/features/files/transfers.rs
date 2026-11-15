@@ -23,7 +23,7 @@ fn valid_name(name: &str) -> bool {
         && name != "." && name != ".." && name != ".git"
         && !name.starts_with(".herdr-upload-")
         && !name.starts_with(".herdr-save-")
-        && !name.contains(['/', '\\'])
+        && !name.contains('/') && !name.contains('\\')
         && !name.chars().any(char::is_control)
 }
 
