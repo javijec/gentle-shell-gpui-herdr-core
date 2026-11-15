@@ -337,12 +337,19 @@ impl Workspace {
         }) {
             return;
         }
+        if address.is_some() && !crate::features::terminal::herdr_enabled() {
+            window.push_notification(Notification::info(
+                "Switch to the Herdr backend to permanently terminate an existing Herdr session.",
+            ), cx);
+            return;
+        }
         let kind = if agent { "Gentle Shell agent" } else { "terminal" };
         let title = format!("Terminate {kind} permanently?");
         let description = format!(
             "This stops the {kind} on its computer and removes it from Machines. \
              It will not be restored on the next launch. This action cannot be undone. \
-             Saved conversation files are not deleted."
+             Saved conversation files are not deleted. Unsaved edits in attached \
+             file panes may be lost."
         );
         let weak = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _, _| {
