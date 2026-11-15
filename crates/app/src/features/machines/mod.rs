@@ -15,6 +15,9 @@ pub enum MachinesEvent {
     Close,
     /// Attach the existing Herdr terminal address in a new GPUI tab.
     OpenTerminal(String),
+    /// Reattach the selected terminal.list record according to its Herdr
+    /// RPC-agent label. Does not create a new Herdr terminal.
+    OpenExisting { address: String, agent: bool },
     /// Explicitly launch a Pi agent on the local computer (None) or a
     /// connected registered remote machine (Some). Nothing auto-spawns.
     NewAgent(Option<String>),
