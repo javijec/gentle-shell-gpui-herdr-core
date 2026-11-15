@@ -694,6 +694,79 @@ test("private Git HEAD query never reaches Pi or invokes a visible Shell tool", 
   }
 });
 
+test("Stage 6 Git History uses private bounded RPC and returns native log records", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-history-"));
+  try {
+    const git = gitInit(root);
+    git("branch", "feature/history");
+    const h = harness(root);
+    const before = h.childWrites.length;
+    rpcInput(h, {
+      type: "herdr_git_history", id: "history-1",
+      root, branch: null, limit: 200,
+    });
+    const result = await fsReply(h, "history-1");
+    assert.equal(result.success, true, result.error);
+    assert.equal(result.data.toplevel, root);
+    assert.equal(result.data.current, "feature/history");
+    assert.ok(result.data.branches.includes("feature/history"));
+    assert.ok(result.data.total >= 1);
+    assert.match(result.data.log, /\x1e[a-f0-9]{40}/);
+    assert.equal(h.childWrites.length, before);
+    assert.equal(h.calls.length, 1);
+
+    rpcInput(h, {
+      type: "herdr_git_history", id: "history-injection",
+      root, branch: "--all", limit: 200,
+    });
+    assert.equal((await fsReply(h, "history-injection")).success, false);
+    rpcInput(h, {
+      type: "herdr_git_history", id: "history-limit",
+      root, branch: null, limit: 900,
+    });
+    assert.equal((await fsReply(h, "history-limit")).success, false);
+    assert.equal(h.childWrites.length, before);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Stage 6 palette indexes only remote workspace files and local branches", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-palette-"));
+  try {
+    const git = gitInit(root);
+    git("branch", "feature/palette");
+    fs.writeFileSync(path.join(root, ".gitignore"), "secret.txt\n");
+    fs.writeFileSync(path.join(root, "secret.txt"), "secret\n");
+    fs.mkdirSync(path.join(root, "src"));
+    fs.writeFileSync(path.join(root, "src", "remote.rs"), "// test\n");
+    const h = harness(root);
+    const before = h.childWrites.length;
+    rpcInput(h, { type: "herdr_palette_snapshot", id: "palette-1", root });
+    const result = await fsReply(h, "palette-1");
+    assert.equal(result.success, true, result.error);
+    assert.ok(result.data.files.includes("src/remote.rs"));
+    assert.ok(!result.data.files.includes("secret.txt"));
+    assert.ok(result.data.branches.some(x => x.name === "feature/palette" && x.current));
+    assert.equal(h.childWrites.length, before);
+
+    rpcInput(h, {
+      type: "herdr_palette_snapshot", id: "palette-outside",
+      root: "/etc",
+    });
+    assert.equal((await fsReply(h, "palette-outside")).success, false);
+    assert.equal(h.childWrites.length, before);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("5E.6 includes bounded tag and stash metadata without Pi RPC writes", {
   skip: process.platform === "win32",
 }, async () => {
