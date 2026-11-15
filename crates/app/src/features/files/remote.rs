@@ -16,6 +16,7 @@ use gpui_kit::*;
 use serde_json::json;
 
 use crate::features::session::SessionView;
+use crate::features::workspaces::SavedRemoteDraft;
 use crate::features::git::{RefEntry, RefsSnapshot, WorkTree, StashAction};
 use gentle_core::git::refs::{HeadInfo, RefKind, Stash, Submodule, parse_refs, parse_submodules};
 use super::refs::{RefsEvent, RefsView, RemoteWorktreeDisplay, RemoteWorktreeAction};
@@ -520,6 +521,10 @@ pub struct RemoteFilesView {
     creating: bool,
     preview: Option<RemotePreview>,
     editor: Option<Entity<EditorState>>,
+    /// A persisted unsaved buffer is applied only to its original path and
+    /// always retains the original server revision for conflict detection.
+    pending_draft: Option<SavedRemoteDraft>,
+    restored_revision: Option<String>,
     /// Markdown uses the same Edit / Split / Preview mode as FileView.
     markdown: Option<(MdMode, Entity<TextViewState>)>,
     _markdown_debounce: Task<()>,
@@ -796,6 +801,8 @@ impl RemoteFilesView {
             creating: false,
             preview: None,
             editor: None,
+            pending_draft: None,
+            restored_revision: None,
             markdown: None,
             _markdown_debounce: Task::ready(()),
             _editor_events: None,
@@ -864,6 +871,75 @@ impl RemoteFilesView {
         view
     }
 
+    pub fn remote_path(&self) -> Option<&str> {
+        self.pane_path.as_deref()
+    }
+
+    pub fn draft_snapshot(&self, cx: &App) -> Option<SavedRemoteDraft> {
+        let path = self.pane_path.as_deref()?;
+        if let Some(saved) = self.pending_draft.as_ref() {
+            return (saved.path == path).then(|| saved.clone());
+        }
+        let (Some(preview), Some(editor)) = (&self.preview, &self.editor) else {
+            return None;
+        };
+        let content = editor.read(cx).text().to_string();
+        let revision = self.restored_revision.as_deref()
+            .or(preview.revision.as_deref())?;
+        if content == preview.content && self.restored_revision.is_none() {
+            return None;
+        }
+        if content.len() > MAX_EDIT_BYTES || content.contains('\0') ||
+            revision.len() != 64 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        Some(SavedRemoteDraft {
+            path: path.to_owned(), content, revision: revision.to_owned(),
+        })
+    }
+
+    /// Called only for the original recovered remote pane; the draft stays
+    /// local until the owning Herdr process has returned the real file.
+    pub fn restore_draft(&mut self, draft: SavedRemoteDraft, cx: &mut Context<Self>) {
+        if self.pane_path.as_deref() != Some(draft.path.as_str())
+            || draft.content.len() > MAX_EDIT_BYTES
+            || draft.content.contains('\0')
+            || draft.revision.len() != 64
+            || !draft.revision.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            self.error = Some("Skipped an invalid recovered remote draft.".into());
+            cx.notify();
+            return;
+        }
+        self.pending_draft = Some(draft);
+        cx.notify();
+    }
+
+    fn apply_pending_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(draft) = self.pending_draft.take() else { return };
+        let (Some(preview), Some(editor)) = (&self.preview, &self.editor) else {
+            self.pending_draft = Some(draft);
+            return;
+        };
+        if preview.path != draft.path {
+            self.pending_draft = Some(draft);
+            return;
+        }
+        let changed_while_closed =
+            preview.revision.as_deref() != Some(draft.revision.as_str());
+        self.restored_revision = Some(draft.revision);
+        editor.update(cx, |editor, cx| {
+            editor.set_value(draft.content, window, cx);
+        });
+        if changed_while_closed {
+            self.error = Some(
+                "Remote file changed while GPUI was closed. Your local draft is restored,                  but saving requires its original revision. Copy or reconcile your edits first."
+                    .into(),
+            );
+        }
+    }
+
     pub fn file_title(&self, cx: &App) -> SharedString {
         let Some(path) = self.pane_path.as_ref() else {
             return "Remote Files".into();
@@ -874,7 +950,8 @@ impl RemoteFilesView {
     }
 
     pub fn has_unsaved(&self, cx: &App) -> bool {
-        self.saving || self.editor.as_ref().zip(self.preview.as_ref()).is_some_and(
+        self.pending_draft.is_some() || self.saving
+            || self.editor.as_ref().zip(self.preview.as_ref()).is_some_and(
             |(editor, preview)| *editor.read(cx).text() != preview.content
         )
     }
@@ -888,6 +965,7 @@ impl RemoteFilesView {
     /// original SessionView. Unchanged editor mode is retained as well.
     pub fn has_draft(&self) -> bool {
         self.editor.is_some() || self.saving || self.transfer_busy
+            || self.pending_draft.is_some()
     }
 
     pub fn set_transfer_targets(
@@ -1548,10 +1626,11 @@ impl RemoteFilesView {
                 }
             }));
         self.editor = Some(editor);
+        self.error = None;
+        self.apply_pending_draft(window, cx);
         if self.markdown.as_ref().is_some_and(|(mode, _)| *mode == MdMode::Preview) {
             self.focus.focus(window, cx);
         }
-        self.error = None;
         cx.notify();
     }
 
@@ -1591,6 +1670,8 @@ impl RemoteFilesView {
 
     fn cancel_edit(&mut self, cx: &mut Context<Self>) {
         if self.saving { return; }
+        self.pending_draft = None;
+        self.restored_revision = None;
         self.editor = None;
         self._editor_events = None;
         self.error = None;
@@ -1600,7 +1681,8 @@ impl RemoteFilesView {
     fn save_edit(&mut self, cx: &mut Context<Self>) {
         if self.saving || self.loading { return; }
         let (Some(preview), Some(editor)) = (&self.preview, &self.editor) else { return };
-        let Some(revision) = preview.revision.clone() else { return };
+        let Some(revision) = self.restored_revision.clone()
+            .or_else(|| preview.revision.clone()) else { return };
         let text = editor.read(cx).text().to_string();
         if text.len() > MAX_EDIT_BYTES || text.contains('\0') {
             self.error = Some("Only UTF-8 text up to 128 KiB can be saved.".into());
@@ -1635,6 +1717,7 @@ impl RemoteFilesView {
                 this.saving = false;
                 match result {
                     Ok(new_revision) => {
+                        this.restored_revision = None;
                         this.preview = Some(RemotePreview {
                             path, content: text, revision: Some(new_revision),
                         });
