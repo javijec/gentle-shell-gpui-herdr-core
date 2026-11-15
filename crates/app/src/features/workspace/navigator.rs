@@ -235,13 +235,25 @@ impl Workspace {
                             .child("Machines"),
                     )
                     .child(
-                        Button::new("navigator-new-local")
+                        Button::new("navigator-add-machine")
                             .ghost()
                             .xsmall()
-                            .icon(Icon::new(IconName::Plus))
-                            .tooltip("New agent on this computer")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.new_agent_in_group(None, window, cx)
+                            .icon(Icon::new(if herdr {
+                                IconName::Plus
+                            } else {
+                                IconName::Bot
+                            }))
+                            .tooltip(if herdr {
+                                "Add SSH machine to Herdr Core"
+                            } else {
+                                "New local agent"
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if herdr {
+                                    this.open_machine_registration(window, cx);
+                                } else {
+                                    this.new_agent_in_group(None, window, cx);
+                                }
                             })),
                     )
                     .when(herdr, |row| {
@@ -336,7 +348,7 @@ impl Workspace {
                                                 Button::new(("navigator-add-machine", group_index))
                                                     .ghost()
                                                     .xsmall()
-                                                    .icon(Icon::new(IconName::Plus))
+                                                    .icon(Icon::new(IconName::Bot))
                                                     .tooltip(if available {
                                                         "New agent on this machine"
                                                     } else {
