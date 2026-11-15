@@ -1142,6 +1142,7 @@ const GIT_MUTATIONS = [
   "herdr_git_stage_all", "herdr_git_unstage_all",
   "herdr_git_stash_push", "herdr_git_stash_apply",
   "herdr_git_stash_pop", "herdr_git_stash_drop",
+  "herdr_git_fetch", "herdr_git_pull", "herdr_git_push",
 ];
 
 async function checkGitIndexRequest(req, toplevel) {
@@ -1342,6 +1343,77 @@ async function verifySelectedStash(req, toplevel) {
   }
 }
 
+// Never execute Git remote helpers such as ext::, local file transports,
+// hooks, forced updates or a user-defined shell. Only a single explicit
+// configured remote is contacted for each command.
+async function gitNetworkDestination(toplevel, branch, requireTracking) {
+  const remoteConfig = await runGit(toplevel, [
+    "config", "--get", "branch." + branch + ".remote",
+  ]).then((bytes) => strictUtf8(bytes).trim()).catch(() => "");
+  const remotes = strictUtf8(await runGit(toplevel, ["remote"]))
+    .split("\n").map((name) => name.trim()).filter(Boolean);
+  const remote = remoteConfig || (remotes.includes("origin") ? "origin" : remotes[0]);
+  if (!remote || !remotes.includes(remote) ||
+      !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,119}$/.test(remote)) {
+    throw new Error("No safe configured Git remote");
+  }
+  const url = strictUtf8(await runGit(toplevel, [
+    "remote", "get-url", remote,
+  ])).trim();
+  if (!(url.startsWith("https://") ||
+        url.startsWith("ssh://") ||
+        /^git@[a-zA-Z0-9.-]+:[a-zA-Z0-9._/-]+$/.test(url))) {
+    throw new Error("Remote URL uses an unsupported or unsafe transport");
+  }
+  let mergeRef = await runGit(toplevel, [
+    "config", "--get", "branch." + branch + ".merge",
+  ]).then((bytes) => strictUtf8(bytes).trim()).catch(() => "");
+  if (!mergeRef) {
+    if (requireTracking) throw new Error("Pull requires an upstream tracking branch");
+    mergeRef = "refs/heads/" + branch;
+  }
+  if (!/^refs\/heads\/[a-zA-Z0-9][a-zA-Z0-9._/-]{0,119}$/.test(mergeRef) ||
+      mergeRef.includes("..") || mergeRef.includes("//")) {
+    throw new Error("Invalid configured upstream branch");
+  }
+  return { remote, mergeRef, tracking: Boolean(remoteConfig) };
+}
+
+async function guardedNetworkAction(req, toplevel) {
+  if (!req.expectedBranch || !req.expectedHead) {
+    throw new Error("Git network actions require a checked out branch");
+  }
+  if (!["herdr_git_fetch", "herdr_git_pull", "herdr_git_push"].includes(req.type)) {
+    throw new Error("Unsupported Git network operation");
+  }
+  const branch = validatedBranchName(req.expectedBranch);
+  const destination = await gitNetworkDestination(
+    toplevel, branch, req.type === "herdr_git_pull",
+  );
+  const base = [
+    "-c", "protocol.ext.allow=never",
+    "-c", "protocol.file.allow=never",
+    "-c", "credential.helper=",
+  ];
+  if (req.type === "herdr_git_fetch") {
+    await runGitMutation(toplevel, [
+      ...base, "fetch", "--no-tags", destination.remote,
+    ]);
+  } else if (req.type === "herdr_git_pull") {
+    await ensureCleanForStash(toplevel);
+    await runGitMutation(toplevel, [
+      ...base, "pull", "--ff-only", "--no-rebase",
+      destination.remote, destination.mergeRef,
+    ]);
+  } else {
+    await runGitMutation(toplevel, [
+      ...base, "push", "--porcelain",
+      ...(destination.tracking ? [] : ["--set-upstream"]),
+      destination.remote, "HEAD:" + destination.mergeRef,
+    ]);
+  }
+}
+
 async function remoteGitWrite(req) {
   const { toplevel } = await gitRepository(req.root);
   validateGitRefRequest(req, toplevel);
@@ -1403,6 +1475,9 @@ async function remoteGitWrite(req) {
         await ensureCleanForStash(toplevel);
       }
       await runGitMutation(toplevel, ["stash", verb, "-q", req.stash]);
+    } else if (["herdr_git_fetch", "herdr_git_pull",
+                "herdr_git_push"].includes(req.type)) {
+      await guardedNetworkAction(req, toplevel);
     } else if (req.type === "herdr_git_commit") {
       if (!req.expectedBranch) {
         throw new Error("Cannot commit from a detached HEAD");
