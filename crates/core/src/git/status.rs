@@ -119,6 +119,18 @@ pub struct StatusEntry {
 }
 
 impl StatusEntry {
+    /// Normalize a remote porcelain-v1 XY state into the same data type
+    /// used by local porcelain-v2 Changes, without translating Linux paths.
+    pub fn from_porcelain_v1(path: String, index: char, worktree: char) -> Self {
+        let kind = match (index, worktree) {
+            ('?', '?') => EntryKind::Untracked,
+            ('A', 'A' | 'U') | ('D', 'D' | 'U')
+            | ('U', 'A' | 'D' | 'U') => EntryKind::Conflict,
+            _ => EntryKind::Tracked,
+        };
+        Self { path, orig: None, index, worktree, kind }
+    }
+
     /// The Staged section's badge (A, M, D, R); `None` when nothing is staged.
     pub fn staged(&self) -> Option<char> {
         match self.kind {
@@ -310,4 +322,22 @@ mod tests {
         assert_eq!(tree.branch.upstream, None);
         assert_eq!((tree.branch.ahead, tree.branch.behind), (0, 0));
     }
+    #[test]
+    fn remote_porcelain_v1_and_local_changes_have_same_state_semantics() {
+        let cases = [
+            ((' ', 'M'), (None, Some('M'))),
+            (('M', ' '), (Some('M'), None)),
+            (('M', 'M'), (Some('M'), Some('M'))),
+            (('?', '?'), (None, Some('?'))),
+            (('A', ' '), (Some('A'), None)),
+            (('U', 'U'), (None, Some('U'))),
+        ];
+        for ((index, worktree), expected) in cases {
+            let entry = StatusEntry::from_porcelain_v1(
+                "src/example.rs".to_owned(), index, worktree,
+            );
+            assert_eq!((entry.staged(), entry.unstaged()), expected);
+        }
+    }
+
 }
