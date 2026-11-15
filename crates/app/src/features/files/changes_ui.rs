@@ -24,7 +24,6 @@ impl ChangeSide {
             Self::Staged => "Staged",
         }
     }
-
 }
 
 pub(super) fn side_entries(entries: &[StatusEntry], side: ChangeSide) -> Vec<(usize, char)> {
@@ -132,6 +131,6 @@ mod tests {
         assert_eq!(side_entries(&entries, ChangeSide::Unstaged), vec![(0, 'M'), (1, '?')]);
         assert_eq!(side_entries(&entries, ChangeSide::Staged), vec![(0, 'M'), (2, 'A')]);
         assert_eq!(ChangeSide::Unstaged.label(), "Unstaged");
-        assert_eq!(ChangeSide::Staged.action_label(), "Unstage all");
+        assert_eq!(ChangeSide::Staged.label(), "Staged");
     }
 }
