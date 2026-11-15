@@ -997,11 +997,12 @@ function parseGitStashes(output) {
   const rows = strictUtf8(output).split("\n").filter(Boolean);
   const stashes = rows.map((row) => {
     const parts = row.split("\0");
-    if (parts.length !== 2 || !/^stash@\{\d+\}$/.test(parts[0]) ||
-        parts[1].length > 2048 || /[\x00-\x1f\x7f]/.test(parts[1])) {
+    if (parts.length !== 3 || !/^stash@\{\d+\}$/.test(parts[0]) ||
+        !/^[a-f0-9]{40,64}$/.test(parts[1]) ||
+        parts[2].length > 2048 || /[\x00-\x1f\x7f]/.test(parts[2])) {
       throw new Error("Invalid Git stash record");
     }
-    return { name: parts[0], message: parts[1] };
+    return { name: parts[0], oid: parts[1], message: parts[2] };
   });
   return { stashes };
 }
@@ -1030,7 +1031,7 @@ async function remoteGit(req) {
       runGitListing(toplevel, ["for-each-ref",
         "--format=%(refname:short)", "refs/tags"], 10, MAX_GIT_TAGS),
       runGitListing(toplevel, ["stash", "list",
-        "--format=%gd%x00%gs"], 10, MAX_GIT_STASHES),
+        "--format=%gd%x00%H%x00%gs"], 10, MAX_GIT_STASHES),
       runGitListing(toplevel, ["for-each-ref",
         "--format=%(HEAD)%00%(refname)%00%(upstream:short)%00%(upstream:track)%00%(objectname:short)%00%(subject)",
         "refs/heads", "refs/remotes", "refs/tags"], 10, MAX_GIT_REF_DETAILS),
@@ -1139,6 +1140,8 @@ const GIT_MUTATIONS = [
   "herdr_git_stage", "herdr_git_unstage", "herdr_git_commit",
   "herdr_git_create_branch", "herdr_git_switch_branch",
   "herdr_git_stage_all", "herdr_git_unstage_all",
+  "herdr_git_stash_push", "herdr_git_stash_apply",
+  "herdr_git_stash_pop", "herdr_git_stash_drop",
 ];
 
 async function checkGitIndexRequest(req, toplevel) {
@@ -1294,6 +1297,51 @@ async function checkedBulkPaths(req, toplevel, stage) {
   return entries.map((entry) => ":(literal)" + entry.path);
 }
 
+async function assertExactReviewedStatus(req, toplevel) {
+  if (!Array.isArray(req.expectedFiles) || req.expectedFiles.length === 0 ||
+      req.expectedFiles.length > MAX_GIT_LIST) {
+    throw new Error("Action requires a complete, nonempty reviewed Git status");
+  }
+  const listing = await runGitListing(toplevel, [
+    "status", "--porcelain=v1", "-z", "--no-renames",
+    "--untracked-files=all", "--ignore-submodules=all",
+  ], 0, MAX_GIT_LIST);
+  const actual = parseGitEntries(listing.output);
+  if (listing.truncated || actual.truncated ||
+      actual.entries.length !== req.expectedFiles.length) {
+    throw new Error("Conflict: Git status changed. Refresh before writing");
+  }
+  for (let i = 0; i < actual.entries.length; i++) {
+    const a = actual.entries[i], e = req.expectedFiles[i];
+    if (!e || e.path !== a.path ||
+        e.index !== a.index || e.worktree !== a.worktree) {
+      throw new Error("Conflict: Git status changed. Refresh before writing");
+    }
+  }
+}
+async function ensureCleanForStash(toplevel) {
+  const status = await runGitListing(toplevel, [
+    "status", "--porcelain=v1", "-z", "--no-renames",
+    "--untracked-files=all",
+  ], 0, 1);
+  if (status.output.length > 0 || status.truncated) {
+    throw new Error("Apply/Pop requires a clean worktree and index");
+  }
+}
+async function verifySelectedStash(req, toplevel) {
+  if (typeof req.stash !== "string" ||
+      !/^stash@\{(?:0|[1-9][0-9]{0,2})\}$/.test(req.stash) ||
+      !/^[a-f0-9]{40,64}$/.test(req.expectedStashOid || "")) {
+    throw new Error("Missing or invalid stash revision; refresh first");
+  }
+  const actual = strictUtf8(await runGit(toplevel, [
+    "rev-parse", "--verify", req.stash + "^{commit}",
+  ])).trim();
+  if (actual !== req.expectedStashOid) {
+    throw new Error("Conflict: stash changed. Refresh before writing");
+  }
+}
+
 async function remoteGitWrite(req) {
   const { toplevel } = await gitRepository(req.root);
   validateGitRefRequest(req, toplevel);
@@ -1333,6 +1381,28 @@ async function remoteGitWrite(req) {
       } else {
         await runGitMutation(toplevel, ["restore", "--staged", "--", ...paths]);
       }
+    } else if (req.type === "herdr_git_stash_push") {
+      if (req.expectedHead === null) {
+        throw new Error("Stashing requires an existing commit");
+      }
+      if (typeof req.message !== "string" ||
+          req.message.trim() !== req.message ||
+          req.message.length < 1 || req.message.length > 120 ||
+          /[\x00-\x1f\x7f]/.test(req.message)) {
+        throw new Error("Invalid stash message");
+      }
+      await assertExactReviewedStatus(req, toplevel);
+      await runGitMutation(toplevel, [
+        "stash", "push", "--include-untracked", "-m", req.message,
+      ]);
+    } else if (["herdr_git_stash_apply", "herdr_git_stash_pop",
+                "herdr_git_stash_drop"].includes(req.type)) {
+      await verifySelectedStash(req, toplevel);
+      const verb = req.type.replace("herdr_git_stash_", "");
+      if (verb !== "drop") {
+        await ensureCleanForStash(toplevel);
+      }
+      await runGitMutation(toplevel, ["stash", verb, "-q", req.stash]);
     } else if (req.type === "herdr_git_commit") {
       if (!req.expectedBranch) {
         throw new Error("Cannot commit from a detached HEAD");
