@@ -10,7 +10,7 @@ enum NavigatorSessionSource {
     /// One visible pane, which may be an agent or a terminal in a split.
     Open { space: usize, tab: usize, pane: PaneId },
     /// A session saved in a workspace that has not been restored yet.
-    Saved { space: usize, tab: usize },
+    Saved { space: usize, tab: usize, pane_index: usize },
     /// A Herdr terminal not yet represented by any GPUI pane.
     Herdr { address: String, live: bool, agent: bool },
 }
@@ -229,7 +229,7 @@ impl Workspace {
                     };
                     add(key, NavigatorSession {
                         source: NavigatorSessionSource::Saved {
-                            space: space_index, tab: tab_index,
+                            space: space_index, tab: tab_index, pane_index,
                         },
                         row_id: format!("saved-{space_index}-{tab_index}-{pane_index}"),
                         title: format!("{kind} (saved)"),
@@ -645,7 +645,7 @@ impl Workspace {
                                                                         this.start_tab_rename(*tab, window, cx);
                                                                     }
                                                                 }
-                                                                NavigatorSessionSource::Saved { space, tab } => {
+                                                                NavigatorSessionSource::Saved { space, tab, .. } => {
                                                                     this.switch_workspace(*space, window, cx);
                                                                     this.activate(*tab, window, cx);
                                                                 }
