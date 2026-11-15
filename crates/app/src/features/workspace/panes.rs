@@ -771,7 +771,9 @@ impl Workspace {
         let in_terminal = current_pane.item.kind == PaneKind::Terminal;
         let Some(owner) = current_pane.session.clone()
             .or_else(|| current_pane.linked_session.clone())
-            .or_else(|| self.active_session())
+            // A standalone Machines shell has no agent owner. Never guess
+            // which chat it belongs to from a different focused tab.
+            .or_else(|| if in_terminal { None } else { self.active_session() })
         else {
             window.push_notification(Notification::info(
                 "Select an agent chat before opening its terminal.",
