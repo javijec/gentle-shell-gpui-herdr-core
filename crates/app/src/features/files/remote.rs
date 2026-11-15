@@ -1073,12 +1073,11 @@ impl RemoteFilesView {
     }
 
     fn toggle_ignored(&mut self, cx: &mut Context<Self>) {
+        if !self.can_leave_preview(cx) {
+            return;
+        }
         self.show_ignored = !self.show_ignored;
-        self.tree_children.clear();
-        self.tree_expanded.clear();
-        self.tree_loading.clear();
-        self.rebuild_remote_rows();
-        self.toggle_remote_directory(self.root.clone(), cx);
+        self.load_directory(self.current.clone(), cx);
     }
 
     fn refresh_tree_folder(&mut self, folder: String, cx: &mut Context<Self>) {
