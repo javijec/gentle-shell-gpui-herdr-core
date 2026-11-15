@@ -383,6 +383,7 @@ async function transferRead(req) {
 async function transferClean(transfer) {
   try { await transfer.handle.close(); } catch {}
   try { await fs.unlink(transfer.temp); } catch {}
+  if (transfer.original) writeInFlight.delete(transfer.destination);
 }
 
 async function transferBegin(req) {
@@ -415,20 +416,47 @@ async function transferBegin(req) {
   if (!within(actualRoot, destination) || protectedGitPath(actualRoot, destination)) {
     throw new Error("Destination is outside the agent project");
   }
-  // No clobber, even if a file appears between begin and commit.
-  try {
-    await fs.lstat(destination);
-    throw new Error("Destination already exists");
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
+  const replace = req.replace === true;
+  let original = null;
+  if (replace) {
+    if (!validRevision(req.expectedRevision) || writeInFlight.has(destination)) {
+      throw new Error("Replacement requires an exclusive SHA-256 revision");
+    }
+    const source = await safeRemotePath(req.root, destination);
+    const handle = await fs.open(source,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.nlink !== 1 ||
+          stat.size > MAX_TRANSFER_BYTES ||
+          (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+        throw new Error("Replacement requires a regular file owned by this agent");
+      }
+      const oldBytes = await handle.readFile();
+      if (sha256(oldBytes) !== req.expectedRevision) {
+        throw new Error("Conflict: remote file changed since it was opened");
+      }
+      original = { stat, revision: req.expectedRevision };
+    } finally {
+      await handle.close();
+    }
+  } else {
+    // Uploads never overwrite an existing file, even if created mid-transfer.
+    try {
+      await fs.lstat(destination);
+      throw new Error("Destination already exists");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
   }
   const id = randomBytes(16).toString("hex");
   const temp = path.posix.join(parent, ".herdr-upload-" + id + ".tmp");
   const handle = await fs.open(temp,
     fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY |
     fsConstants.O_NOFOLLOW, 0o600);
+  if (replace) writeInFlight.add(destination);
   uploads.set(id, { handle, temp, destination, parent, root: actualRoot,
-    sha256: req.sha256, size, offset: 0, busy: false,
+    sha256: req.sha256, size, offset: 0, busy: false, original,
     deadline: Date.now() + 10 * 60 * 1000 });
   return { transfer: id, chunkBytes: TRANSFER_CHUNK_BYTES, size };
 }
@@ -473,7 +501,8 @@ async function transferFinish(req) {
   transfer.busy = true;
   uploads.delete(req.transfer);
   try {
-    if (transfer.offset !== transfer.size || req.root !== transfer.root) {
+    if (transfer.offset !== transfer.size ||
+        await fs.realpath(req.root) !== transfer.root) {
       throw new Error("Upload is incomplete or belongs to another root");
     }
     await transfer.handle.sync();
@@ -486,10 +515,33 @@ async function transferFinish(req) {
     if (actualParent !== transfer.parent) {
       throw new Error("Upload destination moved");
     }
-    // Hard linking is atomic and refuses a destination that already exists.
-    // rename() would overwrite an unrelated file and is not used here.
-    await fs.link(transfer.temp, transfer.destination);
-    await fs.unlink(transfer.temp);
+    if (transfer.original) {
+      // Existing-file editing: validate identity, timestamps and SHA-256
+      // again immediately before rename, preserving mode bits. This is an
+      // optimistic conflict check against other editors, not an OS-level CAS.
+      const handle = await fs.open(transfer.destination,
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      try {
+        const current = await handle.stat();
+        const old = transfer.original.stat;
+        if (!current.isFile() || current.nlink !== 1 ||
+            current.dev !== old.dev || current.ino !== old.ino ||
+            current.size !== old.size ||
+            current.mtimeMs !== old.mtimeMs || current.ctimeMs !== old.ctimeMs ||
+            sha256(await handle.readFile()) !== transfer.original.revision) {
+          throw new Error("Conflict: original file changed while editing");
+        }
+        await fs.chmod(transfer.temp, old.mode & 0o777);
+      } finally {
+        await handle.close();
+      }
+      await fs.rename(transfer.temp, transfer.destination);
+      writeInFlight.delete(transfer.destination);
+    } else {
+      // Atomic, no-clobber initial upload; never replace unrelated work.
+      await fs.link(transfer.temp, transfer.destination);
+      await fs.unlink(transfer.temp);
+    }
     return { path: transfer.destination, size: transfer.size,
       revision: transfer.sha256 };
   } catch (error) {
