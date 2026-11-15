@@ -152,6 +152,12 @@ impl Workspace {
             sidebar: self.sidebar_visible,
             machines_dock_width: self.machines_dock_width,
             files_dock_width: self.files_dock_width,
+            terminated_herdr_sessions: {
+                let mut addresses: Vec<_> = self.terminated_herdr_sessions.iter()
+                    .cloned().collect();
+                addresses.sort();
+                addresses
+            },
         }
     }
 
