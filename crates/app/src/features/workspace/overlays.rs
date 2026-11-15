@@ -404,9 +404,7 @@ impl Workspace {
                         Some(machine) => {
                             this.open_remote_directory_picker(machine, window, cx)
                         }
-                        None => this.open_agent_on_machine(
-                            pi_rpc::AgentTarget::Local, window, cx,
-                        ),
+                        None => this.pick_local_agent_folder(window, cx),
                     }
                 }
             },
