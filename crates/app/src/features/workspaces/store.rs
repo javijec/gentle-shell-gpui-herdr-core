@@ -22,6 +22,11 @@ pub fn load() -> SavedState {
 /// file that still doesn't read is copied aside before the list starts
 /// empty, since the next save replaces it.
 pub(super) fn load_from(path: &Path) -> Option<SavedState> {
+    // Bound persisted state before deserializing potentially large drafts.
+    // A corrupted workspaces file cannot allocate an arbitrary amount of memory.
+    if std::fs::metadata(path).ok()?.len() > 32 * 1024 * 1024 {
+        return None;
+    }
     let text = std::fs::read_to_string(path).ok()?;
     if let Ok(state) = serde_json::from_str(&text) {
         return Some(state);
@@ -105,5 +110,12 @@ pub(super) fn save_to(path: &Path, state: &SavedState) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json)?;
+    // Recovery drafts may contain source code or secrets; keep this snapshot
+    // user-private on Unix. Windows inherits the per-user data ACL.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
     std::fs::rename(&tmp, path)
 }
