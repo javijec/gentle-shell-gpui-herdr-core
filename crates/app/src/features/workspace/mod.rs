@@ -376,6 +376,10 @@ pub struct Workspace {
     sidebar_visible: bool,
     /// Independent right-side Windows Files / Changes / Branches dock.
     files_sidebar_open: bool,
+    /// Last user-selected width of the Machines dock in logical pixels.
+    machines_dock_width: f32,
+    /// Explicit width shared by local and remote Files once resized.
+    files_dock_width: Option<f32>,
     /// Registered remote machines; discovered off the GPUI render thread.
     machine_snapshot: Option<machine_model::Snapshot>,
     machine_error: Option<String>,
@@ -515,6 +519,8 @@ impl Workspace {
             // Default to showing both without restoring the old tab strip.
             sidebar_visible: true,
             files_sidebar_open: true,
+            machines_dock_width: saved.machines_dock_width,
+            files_dock_width: saved.files_dock_width,
             machine_snapshot: None,
             machine_error: None,
             collapsed_machines: std::collections::HashSet::new(),
