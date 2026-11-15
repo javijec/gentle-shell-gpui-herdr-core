@@ -7,6 +7,8 @@ mod view;
 
 pub use directory_picker::{RemoteDirectoryEvent, RemoteDirectoryPicker};
 
+use std::time::Duration;
+
 use gpui_kit::*;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::input::InputState;
@@ -32,6 +34,8 @@ pub struct MachinesView {
     add_name: Entity<InputState>,
     _load: Task<()>,
     _action: Task<()>,
+    /// Only polls machine.list while this modal is alive.
+    _poll: Task<()>,
 }
 
 impl EventEmitter<MachinesEvent> for MachinesView {}
@@ -57,9 +61,22 @@ impl MachinesView {
             add_name,
             _load: Task::ready(()),
             _action: Task::ready(()),
+            _poll: Task::ready(()),
         };
         if crate::features::terminal::herdr_enabled() {
             view.refresh(cx);
+            view._poll = cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(10)).await;
+                    let Ok(()) = this.update(cx, |this, cx| {
+                        if !this.busy && !this.loading {
+                            this.start_load(false, cx);
+                        }
+                    }) else {
+                        break;
+                    };
+                }
+            });
         }
         view
     }
@@ -151,20 +168,79 @@ impl MachinesView {
         cx.notify();
     }
 
-    /// List only machine profiles, not the potentially large terminal list.
+    /// List only registered profiles, never terminal lists. Explicit refresh
+    /// clears an old error; polling preserves any actionable operation error.
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.start_load(true, cx);
+    }
+
+    fn start_load(&mut self, explicit: bool, cx: &mut Context<Self>) {
         if !crate::features::terminal::herdr_enabled() || self.busy {
             return;
         }
         self.loading = true;
-        self.error = None;
+        if explicit {
+            self.error = None;
+        }
         let job = cx.background_executor().spawn(async { model::discover_registered_machines() });
         self._load = cx.spawn(async move |this, cx| {
             let result = job.await;
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
-                    Ok(snapshot) => this.snapshot = Some(snapshot),
+                    Ok(snapshot) => {
+                        // Only real profile or health changes trigger the
+                        // workspace's existing navigator refresh path.
+                        let changed = this.snapshot.as_ref().is_some_and(|old| {
+                            old.local_name != snapshot.local_name
+                                || old.machines != snapshot.machines
+                        });
+                        this.snapshot = Some(snapshot);
+                        if changed {
+                            cx.emit(MachinesEvent::Changed);
+                        }
+                    }
+                    Err(error) => {
+                        if explicit || this.snapshot.is_none() {
+                            this.error = Some(error);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        });
+        cx.notify();
+    }
+
+    /// An immediate retry, not a new connection profile or a fresh terminal.
+    /// Herdr Core continues retrying automatically if this attempt fails.
+    fn reconnect_machine(&mut self, name: String, cx: &mut Context<Self>) {
+        if !crate::features::terminal::herdr_enabled() || self.busy
+            || self.snapshot.as_ref().is_none_or(|snapshot| {
+                !snapshot.machines.iter().any(|machine| machine.name == name)
+            })
+        {
+            return;
+        }
+        self.busy = true;
+        self.error = None;
+        self.info = Some(format!("Requesting connection to {name}..."));
+        let job = cx.background_executor().spawn(async move {
+            model::reconnect_machine(&name)
+        });
+        self._action = cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |this, cx| {
+                this.busy = false;
+                this.info = None;
+                match result {
+                    Ok(machine) => {
+                        this.info = Some(format!(
+                            "Herdr connection to {}: {}. Its automatic retry remains active.",
+                            machine.name, machine.state,
+                        ));
+                        this.refresh(cx);
+                    }
                     Err(error) => this.error = Some(error),
                 }
                 cx.notify();
