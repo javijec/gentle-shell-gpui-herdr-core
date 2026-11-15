@@ -792,8 +792,8 @@ impl Workspace {
                                     )
                                     // Session rows remain visible even if the
                                     // corresponding full-width group is closed.
-                                    .children(group.sessions.into_iter().enumerate().map(
-                                        |(_session_index, session)| {
+                                    .children(group.sessions.into_iter().map(
+                                        |session| {
                                             let source = session.source.clone();
                                             let active = matches!(
                                                 &source,
