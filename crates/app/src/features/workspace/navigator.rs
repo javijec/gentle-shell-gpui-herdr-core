@@ -8,7 +8,7 @@ use gpui_kit::component::Disableable as _;
 #[derive(Clone)]
 enum NavigatorSessionSource {
     /// One visible pane, which may be an agent or a terminal in a split.
-    Open { space: usize, tab: usize, pane: PaneId, tab_id: usize },
+    Open { space: usize, tab: usize, pane: PaneId },
     /// A session saved in a workspace that has not been restored yet.
     Saved { space: usize, tab: usize },
     /// A Herdr terminal not yet represented by any GPUI pane.
@@ -170,7 +170,7 @@ impl Workspace {
             for (tab_index, tab) in space.tabs.iter().enumerate() {
                 // Render EACH agent and terminal pane, not only the first
                 // agent of a multi-pane tab.
-                for pane_id in tab.tree.leaves() {
+                for (pane_index, pane_id) in tab.tree.leaves().into_iter().enumerate() {
                     let Some(pane) = self.panes.get(&pane_id) else { continue };
                     let kind = match pane.item.kind {
                         PaneKind::Agent => "Gentle Shell",
@@ -195,9 +195,9 @@ impl Workspace {
                     add(key, NavigatorSession {
                         source: NavigatorSessionSource::Open {
                             space: space_index, tab: tab_index,
-                            pane: pane_id, tab_id: tab.id,
+                            pane: pane_id,
                         },
-                        row_id: format!("open-{space_index}-{}-{pane_id:?}", tab.id),
+                        row_id: format!("open-{space_index}-{}-{pane_index}", tab.id),
                         title: if title.is_empty() { kind.into() } else { title },
                         address,
                         directory,
