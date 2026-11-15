@@ -172,7 +172,12 @@ impl MachinesView {
         if self.snapshot.as_ref().is_some_and(|snapshot| {
             snapshot.terminals.iter().any(|t| t.address == address && t.live())
         }) {
-            cx.emit(MachinesEvent::OpenTerminal(address));
+            let agent = self.snapshot.as_ref()
+                .and_then(|snapshot| snapshot.terminals.iter()
+                    .find(|terminal| terminal.address == address))
+                .is_some_and(|terminal| terminal.gentle_shell)
+                || self.known_agents.contains(&address);
+            cx.emit(MachinesEvent::OpenExisting { address, agent });
         }
     }
 
