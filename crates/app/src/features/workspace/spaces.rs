@@ -18,12 +18,11 @@ impl Workspace {
         self.spaces.len() - 1
     }
 
-    /// Build a restored workspace's panes; with `fill`, give an empty one an
-    /// agent tab.
+    /// Restore saved panes without creating a new agent. Only an explicit
+    /// user action (Machines + or an explicit new-session command) may launch.
     pub(super) fn ensure_open(
         &mut self,
         index: usize,
-        fill: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -68,12 +67,6 @@ impl Workspace {
             let space = &mut self.spaces[index];
             space.active = active.min(space.tabs.len().saturating_sub(1));
         }
-        if fill && self.spaces[index].tabs.is_empty()
-            && self.remote_agent_recovery.may_create_default_agent()
-        {
-            let root = self.spaces[index].root.clone();
-            self.open_tab(PaneKind::Agent, root, None, None, window, cx);
-        }
         self.current = previous;
     }
 
@@ -86,7 +79,7 @@ impl Workspace {
         if index >= self.spaces.len() {
             return;
         }
-        self.ensure_open(index, true, window, cx);
+        self.ensure_open(index, window, cx);
         let changed = index != self.current;
         self.current = index;
         self.space_mut().last_active = workspaces::now();
