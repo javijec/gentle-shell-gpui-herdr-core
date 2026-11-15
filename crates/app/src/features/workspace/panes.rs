@@ -457,6 +457,18 @@ impl Workspace {
                 self.new_factory_pane(PaneKind::File, path, window, cx)
             }
             PaneKind::History => {
+                if let Some(pi_rpc::AgentTarget::Remote { machine, cwd: root }) =
+                    saved.agent_target.as_ref()
+                {
+                    let owner = saved.remote_owner.as_deref()?;
+                    let session = self.panes.values().find_map(|pane| {
+                        (pane.herdr_address.as_deref() == Some(owner))
+                            .then(|| pane.session.clone()).flatten()
+                    })?;
+                    return Some(self.build_remote_history_pane(
+                        session, machine.clone(), root.clone(), cx,
+                    ));
+                }
                 PaneFactories::get(cx).history.as_ref()?;
                 self.new_factory_pane(PaneKind::History, cwd, window, cx)
             }
