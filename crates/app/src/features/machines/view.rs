@@ -19,13 +19,27 @@ impl MachinesView {
     ) -> AnyElement {
         let connected = machine.connected();
         let name = machine.name.clone();
-        let subtitle = if !machine.host.trim().is_empty() {
-            format!("{} · {}", machine.host, machine.target)
-        } else if machine.target.trim().is_empty() {
-            "Registered in Herdr Core".into()
-        } else {
-            machine.target.clone()
+        let (state_label, state_color) = match machine.state.as_str() {
+            "connected" => ("Connected", ui::accent()),
+            "connecting" => ("Connecting", ui::muted()),
+            "needs_login" => ("Needs login", ui::warning()),
+            "needs_update" => ("Needs update", ui::warning()),
+            "unreachable" => ("Unreachable", ui::warning()),
+            _ => ("Disconnected", ui::warning()),
         };
+        // Custom commands may contain private arguments. Do not echo them
+        // back into the machine list; Herdr Core retains the connection.
+        let transport = if machine.via { "Custom transport" } else { "SSH transport" };
+        let subtitle = if !machine.host.trim().is_empty() {
+            format!("{transport} · {}", machine.host)
+        } else if machine.via {
+            transport.to_string()
+        } else if machine.target.trim().is_empty() {
+            "Registered in Herdr Core".to_string()
+        } else {
+            format!("SSH · {}", machine.target)
+        };
+        let can_retry = !matches!(machine.state.as_str(), "connected" | "connecting" | "needs_update");
         h_flex()
             .id(("machines-registered", index))
             .min_w_0()
@@ -53,21 +67,53 @@ impl MachinesView {
                                 div().text_sm().font_weight(FontWeight::SEMIBOLD)
                                     .truncate().child(name.clone()),
                             )
-                            .child(ui::chip(
-                                if connected { "Connected" } else { "Disconnected" },
-                                if connected { ui::accent() } else { ui::warning() },
-                            )),
+                            .child(ui::chip(state_label, state_color)),
                     )
                     .child(
                         div().text_xs().text_color(ui::muted())
                             .truncate().child(subtitle),
                     )
+                    .when(!machine.version.is_empty(), |col| {
+                        col.child(div().text_xs().text_color(ui::faint())
+                            .child(format!("Herdr Core {}", machine.version)))
+                    })
+                    .when(machine.temporary, |col| {
+                        col.child(div().text_xs().text_color(ui::muted())
+                            .child("Temporary machine profile"))
+                    })
+                    .when(machine.keeps_running_after_logout == Some(false), |col| {
+                        col.child(div().text_xs().text_color(ui::warning())
+                            .child("Remote Core may stop at logout; enable systemd lingering on that machine."))
+                    })
+                    .when(machine.state == "needs_login", |col| {
+                        col.child(div().text_xs().text_color(ui::warning())
+                            .child("Authentication needed. Configure access or run hc machine login from an interactive terminal."))
+                    })
+                    .when(machine.state == "needs_update", |col| {
+                        col.child(div().text_xs().text_color(ui::warning())
+                            .child("The remote Core is incompatible. Run hc machine update from an interactive terminal."))
+                    })
                     .when_some(machine.why.clone(), |col, why| {
                         col.child(
                             div().text_xs().text_color(ui::warning()).child(why),
                         )
                     }),
             )
+            .when(can_retry, |row| {
+                row.child(
+                    Button::new(("machines-reconnect", index))
+                        .ghost()
+                        .small()
+                        .icon(Icon::new(IconName::RefreshCw))
+                        .label("Retry")
+                        .disabled(self.busy)
+                        .tooltip("Ask Herdr Core to reconnect now; remote sessions are not changed")
+                        .on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, _, cx| this.reconnect_machine(name.clone(), cx)
+                        })),
+                )
+            })
             .child(
                 Button::new(("machines-remove", index))
                     .ghost()
@@ -175,7 +221,7 @@ impl Render for MachinesView {
                                 h_flex().gap_2()
                                     .child(
                                         Button::new("machines-via")
-                                            .small().label("Herdr connection command")
+                                            .small().label("Custom transport (no SSH)")
                                             .when(self.add_via, |button| button.primary())
                                             .when(!self.add_via, |button| button.ghost())
                                             .disabled(self.busy)
@@ -185,7 +231,7 @@ impl Render for MachinesView {
                                     )
                                     .child(
                                         Button::new("machines-host")
-                                            .small().label("Host")
+                                            .small().label("SSH host")
                                             .when(!self.add_via, |button| button.primary())
                                             .when(self.add_via, |button| button.ghost())
                                             .disabled(self.busy)
@@ -233,9 +279,9 @@ impl Render for MachinesView {
                             .child(
                                 div().text_xs().text_color(ui::muted())
                                     .child(if self.add_via {
-                                        "Herdr runs its remote Core through this command, passing the remote command as the last argument. It must support bidirectional I/O without prompts (for example a configured WSL or provider CLI)."
+                                        "The command must run the remote shell line supplied by Herdr, using bidirectional stdin/stdout without prompts. Example: wsl.exe -d Ubuntu -e sh -c. This does not use SSH."
                                     } else {
-                                        "Herdr Core uses its host transport for this address (SSH by default). No agent or terminal is created."
+                                        "Herdr Core connects over SSH using this host. Configure SSH keys first; passwords and host-key prompts cannot be answered in this dialog."
                                     }),
                             )
                             .child(
