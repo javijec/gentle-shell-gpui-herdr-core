@@ -922,13 +922,9 @@ impl RemoteFilesView {
     }
 
     fn clipboard_remote_entry(&mut self, cut: bool, cx: &mut Context<Self>) {
-        if let Some((path, directory)) = &self.tree_selected_entry {
-            if !cut && *directory {
-                self.error = Some("Recursive directory copying is not supported yet".into());
-            } else {
-                self.file_clipboard = Some((path.clone(), cut));
-                self.error = None;
-            }
+        if let Some((path, _directory)) = &self.tree_selected_entry {
+            self.file_clipboard = Some((path.clone(), cut));
+            self.error = None;
             cx.notify();
         }
     }
@@ -2056,10 +2052,9 @@ impl Render for RemoteFilesView {
                             .child(Button::new("remote-entry-duplicate")
                                 .ghost().xsmall()
                                 .icon(Icon::new(IconName::CopyPlus))
-                                .tooltip("Duplicate selected remote file (up to 16 MiB)")
+                                .tooltip("Duplicate selected file or folder (bounded copy)")
                                 .disabled(self.entry_busy
-                                    || !self.tree_selected_entry.as_ref()
-                                        .is_some_and(|(_, directory)| !directory))
+                                    || self.tree_selected_entry.is_none())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.run_remote_entry(
                                         WorkspaceEntryAction::Duplicate, cx,
@@ -2080,10 +2075,9 @@ impl Render for RemoteFilesView {
                             .child(Button::new("remote-entry-copy")
                                 .ghost().xsmall()
                                 .icon(Icon::new(IconName::Copy))
-                                .tooltip("Copy selected remote file")
+                                .tooltip("Copy selected file or folder")
                                 .disabled(self.entry_busy
-                                    || !self.tree_selected_entry.as_ref()
-                                        .is_some_and(|(_, directory)| !directory))
+                                    || self.tree_selected_entry.is_none())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.clipboard_remote_entry(false, cx)
                                 })))
