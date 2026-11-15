@@ -599,6 +599,53 @@ impl Workspace {
         }
     }
 
+    /// Request an immediate reconnect for a registered machine without
+    /// creating a terminal or altering any agent viewer. Herdr Core owns the
+    /// transport, retry policy and authentication.
+    fn retry_machine_from_navigator(
+        &mut self, name: String, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if !crate::features::terminal::herdr_enabled()
+            || !self.machine_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.machines.iter().any(|machine| machine.name == name)
+            })
+        {
+            window.push_notification(Notification::info(
+                "This machine is not registered with the active Herdr Core.",
+            ), cx);
+            return;
+        }
+        let task = cx.background_executor().spawn({
+            let name = name.clone();
+            async move { machine_model::reconnect_machine(&name) }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(machine) => {
+                        if let Some(snapshot) = &mut this.machine_snapshot
+                            && let Some(saved) = snapshot.machines.iter_mut()
+                                .find(|saved| saved.name == machine.name)
+                        {
+                            *saved = machine.clone();
+                        }
+                        window.push_notification(Notification::info(format!(
+                            "Herdr {}: {}. Its automatic reconnect remains enabled.",
+                            machine.name, navigator_machine_status(&machine.state),
+                        )), cx);
+                    }
+                    Err(error) => window.push_notification(
+                        Notification::error(format!(
+                            "Could not reconnect {name} through Herdr: {error}",
+                        )), cx,
+                    ),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
     /// Herdr-style compact Machines rail: always visible, icon-only.
     /// A click expands the full tree with its previous width intact. No
     /// session is created, restored or terminated by this navigation.
@@ -842,6 +889,7 @@ impl Workspace {
                                 let machine_for_add = if local { None } else {
                                     Some(group.key.clone())
                                 };
+                                let machine_for_actions = group.key.clone();
                                 v_flex()
                                     .id(("navigator-machine", group_index))
                                     .gap(px(1.))
@@ -899,6 +947,58 @@ impl Workspace {
                                                     .text_color(ui::muted())
                                                     .child(group.sessions.len().to_string()),
                                             )
+                                            .when(herdr && !local, |row| {
+                                                let weak = cx.entity().downgrade();
+                                                row.child(
+                                                    div()
+                                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                            cx.stop_propagation();
+                                                        })
+                                                        .child(
+                                                            Button::new(("navigator-machine-actions", group_index))
+                                                                .ghost()
+                                                                .xsmall()
+                                                                .icon(Icon::new(IconName::Ellipsis))
+                                                                .tooltip("Machine actions")
+                                                                .dropdown_menu(move |menu, _, _| {
+                                                                    let menu = menu.min_w(px(220.));
+                                                                    let menu = if available {
+                                                                        menu
+                                                                    } else {
+                                                                        let weak_retry = weak.clone();
+                                                                        let name = machine_for_actions.clone();
+                                                                        menu.item(
+                                                                            PopupMenuItem::element(|_, _| {
+                                                                                h_flex().gap_2().px_2().py_1p5()
+                                                                                    .child(Icon::new(IconName::RefreshCw).small())
+                                                                                    .child("Retry connection")
+                                                                            })
+                                                                            .on_click(move |_, window, cx| {
+                                                                                let _ = weak_retry.update(cx, |this, cx| {
+                                                                                    this.retry_machine_from_navigator(
+                                                                                        name.clone(), window, cx,
+                                                                                    );
+                                                                                });
+                                                                            }),
+                                                                        )
+                                                                    };
+                                                                    let weak_manage = weak.clone();
+                                                                    menu.item(
+                                                                        PopupMenuItem::element(|_, _| {
+                                                                            h_flex().gap_2().px_2().py_1p5()
+                                                                                .child(Icon::new(IconName::Settings).small())
+                                                                                .child("Manage machines")
+                                                                        })
+                                                                        .on_click(move |_, window, cx| {
+                                                                            let _ = weak_manage.update(cx, |this, cx| {
+                                                                                this.open_machines(window, cx);
+                                                                            });
+                                                                        }),
+                                                                    )
+                                                                }),
+                                                        ),
+                                                )
+                                            })
                                             .child({
                                                 // Do not bubble the + click into the
                                                 // machine row's expand/collapse handler.
