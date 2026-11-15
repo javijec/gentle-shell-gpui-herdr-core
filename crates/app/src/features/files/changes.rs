@@ -43,6 +43,8 @@ pub enum ChangesEvent {
     /// Routed by the owning Herdr controller, not native Git.
     RemoteStage { path: String, index: char, worktree: char, stage: bool },
     RemoteOpenDiff(String),
+    /// File navigation stays bound to the active Herdr agent, not Windows.
+    RemoteOpenFile(String),
     RemoteCommit(String),
     RemoteBulkStage { stage: bool },
     RemoteStashPush(String),
@@ -474,7 +476,24 @@ impl ChangesView {
                     let entry = entry.clone();
                     let staged = side == Side::Staged;
                     let _ = this.update(cx, |this, cx| {
-                        this.git_op(move |top| git::discard(top, &entry, staged), cx)
+                        if this.remote {
+                            let matching_snapshot = this.remote_writable && !this.remote_busy
+                                && this.tree().is_some_and(|tree| tree.entries.iter().any(|item| {
+                                    item.path == entry.path
+                                        && item.index == entry.index
+                                        && item.worktree == entry.worktree
+                                }));
+                            if matching_snapshot {
+                                cx.emit(ChangesEvent::RemoteDiscard {
+                                    path: entry.path.clone(),
+                                    index: entry.index,
+                                    worktree: entry.worktree,
+                                    staged,
+                                });
+                            }
+                        } else {
+                            this.git_op(move |top| git::discard(top, &entry, staged), cx);
+                        }
                     });
                     true
                 })
@@ -921,7 +940,7 @@ impl ChangesView {
                 );
             let path = entry.path.clone();
             let menu_entry = entry.clone();
-            let discard_weak = cx.entity().downgrade();
+            let weak = cx.entity().downgrade();
             let writable = self.remote_writable && !self.remote_busy;
             return change_row(
                 SharedString::from(id), &entry.path, badge, selected, indent, control,
@@ -931,18 +950,57 @@ impl ChangesView {
             }))
             .context_menu(move |menu, _, _| {
                 let entry = menu_entry.clone();
-                let weak = discard_weak.clone();
-                menu.item(PopupMenuItem::new("Discard changes…")
-                    .icon(Icon::new(IconName::Undo2))
-                    .disabled(!writable || entry.kind == EntryKind::Conflict)
-                    .on_click(move |_, _, cx| {
+                let deleted = side == Side::Unstaged && entry.worktree == 'D'
+                    || side == Side::Staged && entry.index == 'D';
+                let open = {
+                    let (weak, path) = (weak.clone(), entry.path.clone());
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                         let _ = weak.update(cx, |_, cx| {
-                            cx.emit(ChangesEvent::RemoteDiscard {
-                                path: entry.path.clone(), index: entry.index,
-                                worktree: entry.worktree, staged: side == Side::Staged,
-                            });
+                            cx.emit(ChangesEvent::RemoteOpenFile(path.clone()));
                         });
+                    }
+                };
+                let toggle = {
+                    let (weak, entry) = (weak.clone(), entry.clone());
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.toggle(&entry, side, cx);
+                        });
+                    }
+                };
+                let discard = {
+                    let (weak, entry) = (weak.clone(), entry.clone());
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.confirm_discard(entry.clone(), side, window, cx);
+                        });
+                    }
+                };
+                menu.item(
+                    PopupMenuItem::new("Open file")
+                        .icon(Icon::new(IconName::File))
+                        .disabled(deleted)
+                        .on_click(open),
+                )
+                .item(
+                    PopupMenuItem::new(match side {
+                        Side::Unstaged => "Stage",
+                        Side::Staged => "Unstage",
+                    })
+                    .icon(Icon::new(match side {
+                        Side::Unstaged => IconName::Plus,
+                        Side::Staged => IconName::Minus,
                     }))
+                    .disabled(!writable || entry.kind == EntryKind::Conflict)
+                    .on_click(toggle),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Discard changes…")
+                        .icon(Icon::new(IconName::Undo2))
+                        .disabled(!writable || entry.kind == EntryKind::Conflict)
+                        .on_click(discard),
+                )
             })
             .into_any_element();
         }
