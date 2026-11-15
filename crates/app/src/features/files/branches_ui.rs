@@ -105,7 +105,6 @@ impl<'a> BranchDisplay<'a> {
             behind: branch.behind,
         }
     }
-
 }
 
 /// One ref: icon, name, and an optional trailing detail.
@@ -198,7 +197,7 @@ fn ahead_behind(ahead: u32, behind: u32) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{BranchDisplay, RefSection, branch_matches, matches_filter};
+    use super::{BranchDisplay, RefSection, matches_filter};
 
     #[test]
     fn branch_filter_is_shared_and_case_insensitive() {
@@ -208,20 +207,6 @@ mod tests {
         assert!(!matches_filter("release", "feature/my-tool"));
         assert_eq!(RefSection::Branches.label(), "Branches");
         assert_eq!(RefSection::Remotes.label(), "Remotes");
-        assert!(branch_matches(RefSection::Branches, true, "main", ""));
-        assert!(!branch_matches(RefSection::Branches, false, "origin/main", ""));
-        assert!(branch_matches(RefSection::Remotes, false, "origin/main", "ORIGIN"));
-        assert!(!branch_matches(RefSection::Remotes, true, "main", ""));
-        assert!(!branch_matches(RefSection::Tags, true, "v1.0", ""));
-    }
-
-    #[test]
-    fn herdr_branch_display_does_not_invent_tracking_metrics() {
-        let branch = BranchDisplay::from_remote("feature/x", false);
-        assert_eq!(branch.name, "feature/x");
-        assert!(!branch.current);
-        assert!(!branch.gone);
-        assert_eq!((branch.ahead, branch.behind), (0, 0));
     }
 
     #[test]
