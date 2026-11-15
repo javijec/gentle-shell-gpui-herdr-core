@@ -45,6 +45,7 @@ pub enum ChangesEvent {
     RemoteOpenDiff(String),
     RemoteCommit(String),
     RemoteBulkStage { stage: bool },
+    RemoteStashPush(String),
 }
 
 #[derive(Clone, PartialEq)]
@@ -501,7 +502,11 @@ impl ChangesView {
                 .on_ok(move |_, _, cx| {
                     let message = message.read(cx).value().to_string();
                     let _ = this.update(cx, |this, cx| {
-                        this.git_op(move |top| git::stash_push(top, &message), cx)
+                        if this.remote {
+                            cx.emit(ChangesEvent::RemoteStashPush(message));
+                        } else {
+                            this.git_op(move |top| git::stash_push(top, &message), cx)
+                        }
                     });
                     true
                 })
@@ -718,7 +723,8 @@ impl ChangesView {
                     .xsmall()
                     .icon(Icon::new(IconName::Archive))
                     .tooltip("Stash all changes")
-                    .disabled(!has_changes || self.remote)
+                    .disabled(!has_changes || (self.remote
+                        && (!self.remote_writable || self.remote_busy)))
                     .on_click(cx.listener(|this, _, window, cx| this.open_stash(window, cx))),
             )
     }

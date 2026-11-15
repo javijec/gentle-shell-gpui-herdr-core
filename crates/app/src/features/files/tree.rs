@@ -213,13 +213,15 @@ impl FileTreeView {
                 ChangesEvent::RemoteStage { .. }
                 | ChangesEvent::RemoteOpenDiff(_)
                 | ChangesEvent::RemoteCommit(_)
-                | ChangesEvent::RemoteBulkStage { .. } => {},
+                | ChangesEvent::RemoteBulkStage { .. }
+                | ChangesEvent::RemoteStashPush(_) => {},
             }),
             cx.subscribe(&refs, |_, _, event: &RefsEvent, cx| match event {
                 RefsEvent::OpenAgent(path) => cx.emit(FileTreeEvent::OpenAgent(path.clone())),
                 RefsEvent::Changed => cx.notify(),
                 // A remote action cannot originate in the local RefsView.
-                RefsEvent::SwitchRemoteBranch(_) => {},
+                RefsEvent::SwitchRemoteBranch(_)
+                | RefsEvent::RemoteStash { .. } => {},
             }),
         ];
         let mut this = Self {

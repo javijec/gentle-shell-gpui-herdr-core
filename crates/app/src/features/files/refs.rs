@@ -34,6 +34,7 @@ pub enum RefsEvent {
     OpenAgent(PathBuf),
     /// Herdr uses the same Branches UI; its owner executes the guarded switch.
     SwitchRemoteBranch(String),
+    RemoteStash { name: String, action: StashAction },
 }
 
 #[derive(Clone, PartialEq)]
@@ -86,6 +87,7 @@ pub struct RefsView {
     remote_refs: Option<RefsSnapshot>,
     remote_worktrees: Vec<RemoteWorktreeDisplay>,
     remote_pending_branch: Option<String>,
+    remote_pending_stash: Option<(String, StashAction)>,
     filter: Entity<InputState>,
     collapsed: HashSet<Section>,
     /// The list's rows, rebuilt when the refs, filter or collapsed sections change.
@@ -116,6 +118,7 @@ impl RefsView {
             remote_refs: None,
             remote_worktrees: Vec::new(),
             remote_pending_branch: None,
+            remote_pending_stash: None,
             filter,
             collapsed: HashSet::new(),
             lines: Rc::new(Vec::new()),
@@ -164,6 +167,7 @@ impl RefsView {
         self.remote_refs = refs;
         self.remote_worktrees = worktrees;
         self.remote_pending_branch = None;
+        self.remote_pending_stash = None;
         self.relayout(cx);
         cx.notify();
     }
@@ -173,6 +177,15 @@ impl RefsView {
     ) {
         if self.remote {
             self.remote_pending_branch = name;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn mark_remote_stash(
+        &mut self, action: Option<(String, StashAction)>, cx: &mut Context<Self>,
+    ) {
+        if self.remote {
+            self.remote_pending_stash = action;
             cx.notify();
         }
     }
@@ -592,11 +605,39 @@ impl RefsView {
 
     fn render_stash(&self, stash: &str, stash_message: &str, cx: &mut Context<Self>) -> AnyElement {
         if self.remote {
+            let name = stash.to_owned();
+            let weak = cx.entity().downgrade();
+            let pending = self.remote_pending_stash.as_ref()
+                .is_some_and(|(candidate, _)| candidate == stash);
             return row(
                 SharedString::from(format!("refs-stash-{stash}")),
                 IconName::Archive, ui::muted(), stash_message.to_owned(), ui::fg(),
-                Some(detail(stash.to_owned())),
-            ).into_any_element();
+                Some(if pending {
+                    ui::chip("Repeat action to confirm", ui::warning())
+                        .into_any_element()
+                } else {
+                    detail(stash.to_owned()).into_any_element()
+                }),
+            )
+            .context_menu(move |menu, _, _| {
+                let action_item = |label: &'static str, icon: IconName, action: StashAction| {
+                    let weak = weak.clone();
+                    let name = name.clone();
+                    PopupMenuItem::new(label)
+                        .icon(Icon::new(icon))
+                        .on_click(move |_, _, cx| {
+                            let _ = weak.update(cx, |_, cx| {
+                                cx.emit(RefsEvent::RemoteStash {
+                                    name: name.clone(), action,
+                                });
+                            });
+                        })
+                };
+                menu.item(action_item("Apply", IconName::Download, StashAction::Apply))
+                    .item(action_item("Pop", IconName::Download, StashAction::Pop))
+                    .item(action_item("Drop", IconName::Trash, StashAction::Drop))
+            })
+            .into_any_element();
         }
         let (name, message) = (stash.to_string(), stash_message.to_string());
         let weak = cx.entity().downgrade();
