@@ -372,8 +372,11 @@ mod tests {
         let remote = parse_terminal(&json!({
             "address":"javipi/t10","state":"live","title":"bash"
         })).unwrap();
-        assert!(!local.address.contains('/'));
-        assert_eq!(remote.address.split_once('/').map(|(host, _)| host), Some("javipi"));
+        assert!(local.belongs_to(None));
+        assert!(!local.belongs_to(Some("javipi")));
+        assert!(remote.belongs_to(Some("javipi")));
+        assert!(!remote.belongs_to(None));
+        assert!(!remote.belongs_to(Some("vps")));
         assert_eq!(remote.display_title(), "bash");
         assert!(remote.live());
         assert!(!remote.gentle_shell);
