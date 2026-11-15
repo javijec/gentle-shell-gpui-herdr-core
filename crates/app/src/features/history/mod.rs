@@ -32,7 +32,7 @@ struct RemoteHistory {
 fn parse_remote_history(data: &Value, root: &str) -> Option<History> {
     let toplevel = data["toplevel"].as_str()?;
     if !toplevel.starts_with('/') || toplevel.contains('\\')
-        || (toplevel != root && !root.starts_with(&(toplevel.to_owned() + "/")))
+        || (toplevel != root && !toplevel.starts_with(&(root.to_owned() + "/")))
     {
         return None;
     }
@@ -63,6 +63,53 @@ fn parse_remote_history(data: &Value, root: &str) -> Option<History> {
         commits, total, current, branch, branches,
         dirty: data["dirty"].as_bool()?,
     })
+}
+
+#[cfg(test)]
+mod remote_history_tests {
+    use super::parse_remote_history;
+    use serde_json::json;
+
+    #[test]
+    fn remote_history_is_root_scoped_and_uses_the_native_model() {
+        let data = json!({
+            "toplevel": "/srv/workspaces/project/repo",
+            "log": "",
+            "total": 0,
+            "current": "main",
+            "branch": "main",
+            "branches": ["main", "feature/test"],
+            "dirty": false
+        });
+        let parsed = parse_remote_history(&data, "/srv/workspaces/project").unwrap();
+        assert_eq!(parsed.branch.as_deref(), Some("main"));
+        assert_eq!(parsed.branches.len(), 2);
+        assert_eq!(parsed.total, 0);
+        assert!(parse_remote_history(&data, "/srv/workspaces/other").is_none());
+        let mut escaped = data.clone();
+        escaped["toplevel"] = json!("/srv/workspaces/project2");
+        assert!(parse_remote_history(&escaped, "/srv/workspaces/project").is_none());
+        escaped["toplevel"] = json!("C:\\Programacion\\repo");
+        assert!(parse_remote_history(&escaped, "/srv/workspaces/project").is_none());
+    }
+
+    #[test]
+    fn remote_history_rejects_invalid_refs_and_overlong_records() {
+        let mut data = json!({
+            "toplevel": "/srv/p",
+            "log": "",
+            "total": 0,
+            "current": null,
+            "branch": null,
+            "branches": ["main"],
+            "dirty": false
+        });
+        data["branches"] = json!(["bad\nbranch"]);
+        assert!(parse_remote_history(&data, "/srv/p").is_none());
+        data["branches"] = json!(["main"]);
+        data["log"] = json!("x".repeat(384 * 1024 + 1));
+        assert!(parse_remote_history(&data, "/srv/p").is_none());
+    }
 }
 
 /// Commits read at first, and how many more "Earlier history" adds.
