@@ -283,6 +283,72 @@ impl Workspace {
         self.place_preview(id, window, cx);
     }
 
+    /// Relay a file directly through two existing Herdr RPC processes.
+    /// Source and destination addresses are exact, not selected machine names.
+    pub(super) fn relay_remote_file(
+        &mut self,
+        source: Entity<SessionView>,
+        path: String,
+        destination_terminal: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((active, _, root)) = self.selected_remote_files(cx) else {
+            return;
+        };
+        if active != source || !remote_file_in_root(&root, &path) {
+            window.push_notification(Notification::info(
+                "The source agent changed. Select its remote file again.",
+            ), cx);
+            return;
+        }
+        let Some(source_process) = source.read(cx).remote_fs_process() else {
+            window.push_notification(Notification::info(
+                "The source remote agent is disconnected.",
+            ), cx);
+            return;
+        };
+        let target = self.sessions().into_iter().find(|candidate| {
+            candidate != &source && candidate.read(cx).is_remote_herdr()
+                && candidate.read(cx).herdr_terminal().as_deref()
+                    == Some(destination_terminal.as_str())
+        });
+        let Some(target) = target else {
+            window.push_notification(Notification::info(
+                "The destination agent is no longer connected.",
+            ), cx);
+            return;
+        };
+        let (Some((_, destination_root)), Some(destination_process)) = (
+            target.read(cx).remote_fs_target(),
+            target.read(cx).remote_fs_process(),
+        ) else {
+            window.push_notification(Notification::info(
+                "Destination agent has no connected project directory.",
+            ), cx);
+            return;
+        };
+        let transfer = cx.background_executor().spawn(
+            crate::features::files::transfers::relay(
+                root, source_process, path,
+                destination_root.clone(), destination_process, destination_root,
+            ),
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let result = transfer.await;
+            let _ = this.update_in(cx, |_, window, cx| {
+                match result {
+                    Ok(path) => window.push_notification(Notification::success(
+                        format!("Copied to destination agent: {path}"),
+                    ), cx),
+                    Err(error) => window.push_notification(Notification::error(
+                        format!("Remote transfer failed: {error}"),
+                    ), cx),
+                }
+            });
+        }).detach();
+    }
+
     /// Remote filesystem root is the agent's launch directory, never the
     /// locally saved Windows workspace root.
     pub(super) fn selected_remote_files(&self, cx: &App) -> Option<(Entity<SessionView>, String, String)> {
@@ -312,11 +378,27 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let selected = self.selected_remote_files(cx);
+        // Copy targets are other live remote agents, identified by their
+        // exact Herdr terminal, never a stale machine label.
+        let targets: Vec<(String, String)> = self.sessions().into_iter()
+            .filter_map(|candidate| {
+                if selected.as_ref().is_some_and(|(session, _, _)| session == &candidate) {
+                    return None;
+                }
+                let agent = candidate.read(cx);
+                let (machine, _) = agent.remote_fs_target()?;
+                agent.remote_fs_process()?;
+                let terminal = agent.herdr_terminal()?;
+                Some((machine, terminal))
+            })
+            .take(12)
+            .collect();
         if let Some((session, _, root)) = &selected
-            && self.remote_files.as_ref().is_some_and(|view| {
+            && let Some(view) = self.remote_files.as_ref().filter(|view| {
                 view.read(cx).matches(session, root)
             })
         {
+            view.update(cx, |view, cx| view.set_transfer_targets(targets, cx));
             return;
         }
         // Retain unsaved editors, including an in-flight save. Dropping an
@@ -339,12 +421,19 @@ impl Workspace {
         } else {
             cx.new(|cx| RemoteFilesView::new(session, machine, root, window, cx))
         };
+        view.update(cx, |view, cx| view.set_transfer_targets(targets, cx));
         let sub = cx.subscribe_in(
             &view,
             window,
             |this, source, event: &RemoteFilesEvent, window, cx| {
                 match event {
                     RemoteFilesEvent::Close => this.toggle_files_panel(cx),
+                    RemoteFilesEvent::RelayFile { path, target_terminal } => {
+                        let origin = source.read(cx).session().clone();
+                        this.relay_remote_file(
+                            origin, path.clone(), target_terminal.clone(), window, cx,
+                        );
+                    },
                     RemoteFilesEvent::OpenDiff(path) => {
                         if this.active_session().as_ref()
                             != Some(source.read(cx).session())
