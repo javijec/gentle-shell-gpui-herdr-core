@@ -2,12 +2,13 @@
 //! the route table.
 
 use gentle_core::profiles::{
-    ORCHESTRATOR, PinRead, format_selection, is_review_role, pin_notes, unmatched_notes,
+    ORCHESTRATOR, OrchestratorMode, PinRead, format_selection, is_review_role, pin_notes,
+    unmatched_notes,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -103,9 +104,50 @@ impl ProfilesView {
         ui::appear(SharedString::from(format!("route-{key}")), row).into_any_element()
     }
 
-    fn render_scope(&self) -> impl IntoElement {
+    /// The shown profile's orchestrator mode (gentle-pi's per-profile
+    /// `workflow`), edited in the draft like a route.
+    fn render_mode(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let edited = self.draft_mode != self.stored_mode;
+        let option = |mode: OrchestratorMode, label: &'static str, tooltip: &'static str| {
+            let on = self.draft_mode == mode;
+            Button::new(SharedString::from(format!("mode-{}", mode.as_str())))
+                .xsmall()
+                .when(on, |b| b.outline().selected(true))
+                .when(!on, |b| b.ghost())
+                .when(on && edited, |b| b.text_color(ui::warning()))
+                .label(label)
+                .tooltip(tooltip)
+                .disabled(self.busy)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.draft_mode = mode;
+                    cx.notify();
+                }))
+        };
+        let organic = option(
+            OrchestratorMode::Organic,
+            "Organic",
+            "The orchestrator may implement small changes itself",
+        );
+        let delegation = option(
+            OrchestratorMode::FullDelegation,
+            "Full delegation",
+            "The orchestrator never implements: every change goes to a bounded writer",
+        );
+        h_flex()
+            .gap_2()
+            .text_xs()
+            .text_color(ui::muted())
+            .child("Orchestrator")
+            .child(organic)
+            .child(delegation)
+    }
+
+    fn render_scope(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let name = self.selected.clone().unwrap_or_default();
         let mut parts: Vec<(&str, Hsla)> = Vec::new();
+        if self.in_session.as_deref() == Some(name.as_str()) {
+            parts.push(("Used in this session", ui::success()));
+        }
         if self.file.active.as_deref() == Some(name.as_str()) {
             parts.push(("Default for new sessions", ui::accent()));
         }
@@ -167,6 +209,7 @@ impl ProfilesView {
                     .child(default_line)
                     .child(pin_line),
             )
+            .child(self.render_mode(cx))
     }
 
     pub(super) fn render_table(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -180,7 +223,7 @@ impl ProfilesView {
         let orchestrator_now = self.pi_default.clone();
         v_flex()
             .gap_3()
-            .child(self.render_scope())
+            .child(self.render_scope(cx))
             .children(notes.into_iter().map(|note| {
                 h_flex()
                     .gap_2()
