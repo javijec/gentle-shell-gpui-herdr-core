@@ -387,6 +387,9 @@ impl Workspace {
                 MachinesView::new(window, cx)
             }
         });
+        view.update(cx, |view, cx| {
+            view.set_known_agent_addresses(self.known_herdr_agent_addresses(cx), cx)
+        });
         let subscription = cx.subscribe_in(
             &view,
             window,
@@ -395,7 +398,7 @@ impl Workspace {
                 MachinesEvent::OpenTerminal(address) => {
                     let address = address.clone();
                     this.close_overlay(window, cx);
-                    this.open_herdr_terminal(address, window, cx);
+                    this.show_or_attach_herdr_terminal(address, window, cx);
                 }
                 MachinesEvent::NewAgent(machine) => {
                     let machine = machine.clone();
