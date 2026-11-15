@@ -28,6 +28,8 @@ pub struct Terminal {
     pub title: String,
     pub cwd: String,
     pub state: String,
+    /// Herdr's authoritative RPC-agent label. Never guess from the title.
+    pub gentle_shell: bool,
 }
 
 impl Terminal {
@@ -92,6 +94,7 @@ pub fn parse_terminal(value: &Value) -> Option<Terminal> {
         title: str_field(value, "title").to_string(),
         cwd: str_field(value, "cwd").to_string(),
         state: str_field(value, "state").to_string(),
+        gentle_shell: value["labels"]["gentle-shell"] == "rpc-agent",
     })
 }
 
@@ -252,6 +255,22 @@ mod tests {
         assert!(!remote.belongs_to(Some("vps")));
         assert_eq!(remote.display_title(), "bash");
         assert!(remote.live());
+        assert!(!remote.gentle_shell);
+    }
+
+    #[test]
+    fn detects_gentle_shell_by_authoritative_herdr_label() {
+        let agent = parse_terminal(&json!({
+            "address":"javipi/t17", "state":"live",
+            "title":"Custom title",
+            "labels":{"gentle-shell":"rpc-agent"}
+        })).unwrap();
+        assert!(agent.gentle_shell);
+        let shell = parse_terminal(&json!({
+            "address":"javipi/t18", "state":"live",
+            "title":"Gentle Shell", "labels":{"gentle-shell":"other"}
+        })).unwrap();
+        assert!(!shell.gentle_shell);
     }
 
     #[test]
