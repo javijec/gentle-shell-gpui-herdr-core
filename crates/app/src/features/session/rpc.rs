@@ -316,7 +316,7 @@ impl SessionView {
         if self.process().is_none() {
             self.transcript.notice(
                 NoticeLevel::Warning,
-                "The owning agent is offline; the background job was not cancelled.",
+                "The owning agent is offline; the background job was not cancelled.".to_string(),
             );
             cx.notify();
             return;
