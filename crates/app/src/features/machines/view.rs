@@ -113,10 +113,17 @@ impl MachinesView {
                         col.child(div().text_xs().text_color(ui::warning())
                             .child("The remote Core is incompatible. Run hc machine update from an interactive terminal."))
                     })
-                    .when_some(machine.why.clone(), |col, why| {
+                    // Error strings from custom transport programs may echo
+                    // their arguments (including tokens). Avoid displaying
+                    // those command details to the GUI.
+                    .when_some(machine.why.clone().filter(|_| !machine.via), |col, why| {
                         col.child(
                             div().text_xs().text_color(ui::warning()).child(why),
                         )
+                    })
+                    .when(machine.via && machine.why.is_some(), |col| {
+                        col.child(div().text_xs().text_color(ui::warning())
+                            .child("Custom transport failed. Check credentials and the connection command."))
                     }),
             )
             .when(can_retry, |row| {
@@ -187,7 +194,14 @@ impl Render for MachinesView {
                                 .text_xs().text_color(ui::muted())
                                 .child("Herdr Core · registered computers"),
                         )
-                        .child(ui::chip(format!("{connected_count}/{remote_count} connected"), ui::muted()))
+                        .child(ui::chip(
+                            if self.status_error.is_some() {
+                                "Status unavailable".to_string()
+                            } else {
+                                format!("{connected_count}/{remote_count} connected")
+                            },
+                            if self.status_error.is_some() { ui::warning() } else { ui::muted() },
+                        ))
                         .child(
                             Button::new("machines-register")
                                 .ghost().xsmall()
@@ -335,6 +349,11 @@ impl Render for MachinesView {
                             .text_xs().text_color(ui::danger())
                             .child(format!("Herdr: {error}")),
                     )
+                })
+                .when(self.status_error.is_some() && self.snapshot.is_some(), |panel| {
+                    panel.child(div().mx_4().mb_2().text_xs()
+                        .text_color(ui::warning())
+                        .child("Herdr Core is unavailable. Machine states below are the last known values."))
                 })
                 .child(
                     div()
