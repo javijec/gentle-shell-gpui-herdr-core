@@ -67,7 +67,6 @@ impl Render for Workspace {
         // The top Machines button collapses to an icon rail instead of
         // hiding navigation entirely. The expanded width is kept separately.
         let navigator_expanded = self.sidebar_visible;
-        let navigator_visible = true;
         let files_visible = files.is_some();
         let (machines_dock_width, files_dock_width) = self.dock_widths(
             f32::from(window.viewport_size().width),
@@ -586,8 +585,7 @@ impl Render for Workspace {
                             cx.notify();
                         },
                     ))
-                    .when(navigator_visible, |row| {
-                        row.child(
+                    .child(
                             ui::appear(
                                 "machine-navigator-in",
                                 div()
@@ -605,8 +603,7 @@ impl Render for Workspace {
                                         self.render_machine_rail(cx).into_any_element()
                                     }),
                             ),
-                        )
-                    })
+                    )
                     // A 48px rail is not resizable; the expanded tree retains
                     // its last manually selected width for the next toggle.
                     .when(navigator_expanded, |row| {
