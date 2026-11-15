@@ -2,6 +2,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::Input;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -255,6 +256,16 @@ impl Render for MachinesView {
                         )
                         .child(ui::chip(format!("{count} remote"), ui::muted()))
                         .child(
+                            Button::new("machines-register")
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Plus))
+                                .tooltip("Add an SSH machine to Herdr Core")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.begin_add_machine(window, cx)
+                                })),
+                        )
+                        .child(
                             Button::new("machines-close")
                                 .ghost()
                                 .xsmall()
@@ -289,6 +300,58 @@ impl Render for MachinesView {
                                 .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                         ),
                 )
+                .when(self.show_add_form, |panel| {
+                    panel.child(
+                        v_flex()
+                            .mx_4()
+                            .mb_3()
+                            .p_3()
+                            .gap_2()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(ui::border())
+                            .bg(ui::panel())
+                            .child(h_flex()
+                                .gap_2()
+                                .child(Icon::new(IconName::Plus)
+                                    .small().text_color(ui::petal()))
+                                .child(div().text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Add SSH machine")))
+                            .child(div().text_xs().text_color(ui::muted())
+                                .child("SSH target · alias from ~/.ssh/config, user@host or user@host:port"))
+                            .child(ui::field()
+                                .child(Icon::new(IconName::SquareTerminal)
+                                    .small().text_color(ui::faint()))
+                                .child(Input::new(&self.add_target)
+                                    .appearance(false).small()))
+                            .child(div().text_xs().text_color(ui::muted())
+                                .child("Machine name (optional; Herdr chooses one if empty)"))
+                            .child(ui::field()
+                                .child(Icon::new(IconName::Layers)
+                                    .small().text_color(ui::faint()))
+                                .child(Input::new(&self.add_name)
+                                    .appearance(false).small()))
+                            .child(div().text_xs().text_color(ui::muted())
+                                .child("Registers in Herdr Core using machine.add. No agent or shell is started; SSH access and hc on the remote host are required."))
+                            .child(h_flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(Button::new("machines-add-cancel")
+                                    .ghost().small().label("Cancel")
+                                    .disabled(self.busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cancel_add_machine(cx)
+                                    })))
+                                .child(Button::new("machines-add-confirm")
+                                    .primary().small().label("Add machine")
+                                    .loading(self.busy)
+                                    .disabled(self.busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.submit_add_machine(cx)
+                                    }))),
+                    )
+                })
                 .when_some(self.info.clone(), |panel, info| {
                     panel.child(
                         div()
