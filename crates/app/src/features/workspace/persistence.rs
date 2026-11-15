@@ -77,6 +77,13 @@ impl Workspace {
         if remote_file.is_some() && (remote_path.is_none() || remote_owner.is_none()) {
             return None;
         }
+        if pane.item.kind == PaneKind::History
+            && matches!(pane.agent_target.as_ref(),
+                Some(pi_rpc::AgentTarget::Remote { .. }))
+            && remote_owner.is_none()
+        {
+            return None;
+        }
         Some(SavedPane {
             kind: pane.item.kind,
             cwd: self.pane_cwd(pane, cx),
