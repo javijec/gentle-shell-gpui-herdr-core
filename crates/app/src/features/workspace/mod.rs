@@ -583,7 +583,7 @@ impl Workspace {
                         Ok(addresses) if addresses.is_empty() => {
                             this.remote_agent_recovery = RemoteAgentRecovery::Empty;
                         }
-                        Ok(addresses) => {
+                        Ok(_) => {
                             this.remote_agent_recovery = RemoteAgentRecovery::Existing;
                         }
                         Err(error) => {
