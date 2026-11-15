@@ -64,12 +64,15 @@ impl Render for Workspace {
         } else {
             None
         };
-        let navigator_visible = self.sidebar_visible;
+        // The top Machines button collapses to an icon rail instead of
+        // hiding navigation entirely. The expanded width is kept separately.
+        let navigator_expanded = self.sidebar_visible;
+        let navigator_visible = true;
         let files_visible = files.is_some();
         let (machines_dock_width, files_dock_width) = self.dock_widths(
             f32::from(window.viewport_size().width),
             selected_remote,
-            navigator_visible,
+            navigator_expanded,
             files_visible,
         );
         let has_sidebar = true;
@@ -514,7 +517,11 @@ impl Render for Workspace {
                                                 } else {
                                                     IconName::PanelLeftOpen
                                                 }))
-                                                .tooltip("Toggle Machines (Ctrl+B)")
+                                                .tooltip(if self.sidebar_visible {
+                                                    "Collapse Machines to a slim rail (Ctrl+B)"
+                                                } else {
+                                                    "Expand Machines (Ctrl+B)"
+                                                })
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.toggle_sidebar(cx)
                                                 })),
@@ -592,11 +599,17 @@ impl Render for Workspace {
                                     .border_1()
                                     .border_color(gpui_kit::transparent_black())
                                     .overflow_hidden()
-                                    .child(self.render_machine_navigator(cx)),
+                                    .child(if navigator_expanded {
+                                        self.render_machine_navigator(cx).into_any_element()
+                                    } else {
+                                        self.render_machine_rail(cx).into_any_element()
+                                    }),
                             ),
                         )
                     })
-                    .when(navigator_visible, |row| {
+                    // A 48px rail is not resizable; the expanded tree retains
+                    // its last manually selected width for the next toggle.
+                    .when(navigator_expanded, |row| {
                         row.child(dock_resize_handle(DockSide::Machines))
                     })
                     .child(
