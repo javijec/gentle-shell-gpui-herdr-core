@@ -591,15 +591,28 @@ impl SessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(dialog) = self.extension.dialogs.pop_front() else {
+        let Some(dialog) = self.extension.dialogs.front() else {
             return;
         };
-        if let Some(process) = self.process()
-            && let Err(error) = process.respond_ui(&dialog.id, answer)
-        {
-            self.transcript
-                .notice(NoticeLevel::Error, format!("{error:#}"));
+        // 7B: an offline remote agent must retain the unanswered question.
+        // A user's click is not an acknowledgment from the originating Pi.
+        let Some(process) = self.process() else {
+            self.transcript.notice(
+                NoticeLevel::Warning,
+                "Agent disconnected. Your answer was not sent; reconnect and retry.",
+            );
+            cx.notify();
+            return;
+        };
+        if let Err(error) = process.respond_ui(&dialog.id, answer) {
+            self.transcript.notice(
+                NoticeLevel::Error,
+                format!("Answer was not delivered; retry after reconnect: {error:#}"),
+            );
+            cx.notify();
+            return;
         }
+        self.extension.dialogs.pop_front();
         self.prepare_dialog(window, cx);
         self.sync_chrome(cx);
         cx.notify();
