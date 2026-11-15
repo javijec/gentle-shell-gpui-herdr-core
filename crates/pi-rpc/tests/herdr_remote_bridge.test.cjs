@@ -694,6 +694,187 @@ test("private Git HEAD query never reaches Pi or invokes a visible Shell tool", 
   }
 });
 
+// Stage 7 transfer protocol regressions. These tests run against temporary
+// Linux directories and never start an actual Pi agent or OS shell.
+async function transferCall(h, type, id, args) {
+  rpcInput(h, { type, id, ...args });
+  return fsReply(h, id);
+}
+
+test("Stage 7 transfers a 200 KiB binary file with bounded SHA-256 chunks", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const crypto = require("node:crypto");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-stage7-bin-"));
+  try {
+    const h = harness(root);
+    const before = h.childWrites.length;
+    const original = crypto.randomBytes(200 * 1024);
+    const digest = crypto.createHash("sha256").update(original).digest("hex");
+    const begin = await transferCall(h, "herdr_fs_transfer_begin", "up-start", {
+      root, path: root, name: "binary.bin",
+      size: original.length, sha256: digest,
+    });
+    assert.equal(begin.success, true, begin.error);
+    assert.equal(begin.data.chunkBytes, 24 * 1024);
+    const transfer = begin.data.transfer;
+    let i = 0;
+    for (let offset = 0; offset < original.length; offset += 24 * 1024) {
+      const bytes = original.subarray(offset, offset + 24 * 1024);
+      const chunkHash = crypto.createHash("sha256").update(bytes).digest("hex");
+      const reply = await transferCall(h, "herdr_fs_transfer_chunk", "up-" + i++, {
+        transfer, offset, content: bytes.toString("base64"), chunkHash,
+      });
+      assert.equal(reply.success, true, reply.error);
+      assert.equal(reply.data.offset, offset + bytes.length);
+    }
+    const committed = await transferCall(h, "herdr_fs_transfer_commit", "up-done", {
+      root, transfer,
+    });
+    assert.equal(committed.success, true, committed.error);
+    assert.equal(committed.data.revision, digest);
+    assert.deepEqual(fs.readFileSync(path.join(root, "binary.bin")), original);
+
+    let epoch = null;
+    const chunks = [];
+    for (let offset = 0; offset < original.length; offset += 24 * 1024) {
+      const reply = await transferCall(h, "herdr_fs_transfer_read", "down-" + offset, {
+        root, path: path.join(root, "binary.bin"), offset, epoch,
+      });
+      assert.equal(reply.success, true, reply.error);
+      epoch = reply.data.epoch;
+      const chunk = Buffer.from(reply.data.content, "base64");
+      assert.equal(crypto.createHash("sha256").update(chunk).digest("hex"),
+        reply.data.chunkHash);
+      chunks.push(chunk);
+    }
+    assert.deepEqual(Buffer.concat(chunks), original);
+    assert.equal(h.childWrites.length, before, "no private transfer reaches Pi");
+    assert.equal(h.calls.length, 1, "no new agent or shell");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Stage 7 upload never clobbers and rejects stale or invalid chunks", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const crypto = require("node:crypto");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-stage7-guard-"));
+  try {
+    fs.writeFileSync(path.join(root, "existing.bin"), "original");
+    const h = harness(root);
+    const hash = crypto.createHash("sha256").update("abc").digest("hex");
+    for (const [id, name] of [["bad-name", "../escape"],
+                              ["existing", "existing.bin"]]) {
+      const reply = await transferCall(h, "herdr_fs_transfer_begin", id, {
+        root, path: root, name, size: 3, sha256: hash,
+      });
+      assert.equal(reply.success, false);
+    }
+    assert.equal(fs.readFileSync(path.join(root, "existing.bin"), "utf8"), "original");
+    const started = await transferCall(h, "herdr_fs_transfer_begin", "guard-start", {
+      root, path: root, name: "safe.bin", size: 3, sha256: hash,
+    });
+    assert.equal(started.success, true, started.error);
+    const transfer = started.data.transfer;
+    assert.equal((await transferCall(h, "herdr_fs_transfer_chunk", "wrong-offset", {
+      transfer, offset: 1, content: "YWJj", chunkHash: hash,
+    })).success, false);
+    assert.equal((await transferCall(h, "herdr_fs_transfer_chunk", "wrong-hash", {
+      transfer, offset: 0, content: "YWJj", chunkHash: "0".repeat(64),
+    })).success, false);
+    assert.equal((await transferCall(h, "herdr_fs_transfer_abort", "abort", {
+      root, transfer,
+    })).success, true);
+    assert.ok(!fs.existsSync(path.join(root, "safe.bin")));
+    assert.equal(fs.readdirSync(root).filter(x => x.startsWith(".herdr-upload-")).length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Stage 7 remote text replacement is SHA-256 fenced and atomic", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const crypto = require("node:crypto");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-stage7-replace-"));
+  const sha = (value) => crypto.createHash("sha256").update(value).digest("hex");
+  const file = path.join(root, "notes.txt");
+  try {
+    const old = Buffer.alloc(200 * 1024, "a");
+    const next = Buffer.alloc(210 * 1024, "b");
+    fs.writeFileSync(file, old);
+    const h = harness(root);
+    const begin = await transferCall(h, "herdr_fs_transfer_begin", "replace-start", {
+      root, path: root, name: "notes.txt", size: next.length,
+      sha256: sha(next), replace: true, expectedRevision: sha(old),
+    });
+    assert.equal(begin.success, true, begin.error);
+    const transfer = begin.data.transfer;
+    let i = 0;
+    for (let offset = 0; offset < next.length; offset += 24 * 1024) {
+      const bytes = next.subarray(offset, offset + 24 * 1024);
+      const reply = await transferCall(h, "herdr_fs_transfer_chunk", "rep-" + i++, {
+        transfer, offset, content: bytes.toString("base64"), chunkHash: sha(bytes),
+      });
+      assert.equal(reply.success, true, reply.error);
+    }
+    fs.writeFileSync(file, "changed externally");
+    const conflict = await transferCall(h, "herdr_fs_transfer_commit", "replace-conflict", {
+      root, transfer,
+    });
+    assert.equal(conflict.success, false);
+    assert.equal(fs.readFileSync(file, "utf8"), "changed externally");
+
+    const oldNow = fs.readFileSync(file);
+    const nextBegin = await transferCall(h, "herdr_fs_transfer_begin", "replace-retry", {
+      root, path: root, name: "notes.txt", size: 3, sha256: sha("xyz"),
+      replace: true, expectedRevision: sha(oldNow),
+    });
+    assert.equal(nextBegin.success, true, nextBegin.error);
+    const nextId = nextBegin.data.transfer;
+    assert.equal((await transferCall(h, "herdr_fs_transfer_chunk", "replace-write", {
+      transfer: nextId, offset: 0, content: Buffer.from("xyz").toString("base64"),
+      chunkHash: sha("xyz"),
+    })).success, true);
+    assert.equal((await transferCall(h, "herdr_fs_transfer_commit", "replace-done", {
+      root, transfer: nextId,
+    })).success, true);
+    assert.equal(fs.readFileSync(file, "utf8"), "xyz");
+    assert.equal(h.childWrites.length, 1, "no transfer may be forwarded to Pi RPC");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Stage 7 download epoch rejects changed files between blocks", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-stage7-epoch-"));
+  try {
+    const file = path.join(root, "blob.bin");
+    fs.writeFileSync(file, Buffer.alloc(80 * 1024, 12));
+    const h = harness(root);
+    const first = await transferCall(h, "herdr_fs_transfer_read", "epoch-0", {
+      root, path: file, offset: 0, epoch: null,
+    });
+    assert.equal(first.success, true, first.error);
+    fs.appendFileSync(file, Buffer.from([20]));
+    const changed = await transferCall(h, "herdr_fs_transfer_read", "epoch-1", {
+      root, path: file, offset: 24 * 1024, epoch: first.data.epoch,
+    });
+    assert.equal(changed.success, false);
+    assert.match(changed.error, /changed during download/i);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Stage 6 Git History uses private bounded RPC and returns native log records", {
   skip: process.platform === "win32",
 }, async () => {
