@@ -437,6 +437,40 @@ impl Workspace {
         }
     }
 
+    /// Start a terminal on the selected remote machine, not on Windows.
+    /// Shell creation is asynchronous; the returned Herdr address is attached
+    /// exactly once. No replacement Pi agent is created.
+    pub(super) fn open_shell_on_selected_machine(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((session, machine, root)) = self.selected_remote_files(cx) else {
+            window.push_notification(Notification::info(
+                "Select a connected remote agent to open its terminal.",
+            ), cx);
+            return;
+        };
+        if session.read(cx).remote_fs_process().is_none() {
+            window.push_notification(Notification::info(
+                "The selected remote agent is not connected.",
+            ), cx);
+            return;
+        }
+        let task = cx.background_executor().spawn(async move {
+            machine_model::create_shell_in(Some(&machine), Some(&root))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(address) => this.open_herdr_terminal(address, window, cx),
+                    Err(error) => window.push_notification(Notification::error(error), cx),
+                }
+            });
+        }).detach();
+    }
+
     /// Attach an existing Herdr address as a new GPUI tab without running a
     /// replacement shell. Only available when Herdr is the selected backend.
     pub(super) fn open_herdr_terminal(
@@ -681,7 +715,32 @@ impl Workspace {
                 (kind, target)
             }
         };
-        let Some(pane) = self.new_pane(kind, target, None, None, window, cx) else {
+        if kind == PaneKind::Terminal && self.active_agent_is_remote(cx) {
+            // A remote terminal needs a Herdr terminal.run on its machine;
+            // never silently launch a Windows/local PTY.
+            self.open_shell_on_selected_machine(window, cx);
+            return;
+        }
+        let created = if kind == PaneKind::Agent && self.active_agent_is_remote(cx) {
+            self.selected_remote_files(cx).map(|(_, machine, root)| {
+                self.new_agent_pane(
+                    target,
+                    AgentPaneInit {
+                        agent_target: Some(pi_rpc::AgentTarget::Remote {
+                            machine,
+                            cwd: root,
+                        }),
+                        start_now: true,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                )
+            })
+        } else {
+            self.new_pane(kind, target, None, None, window, cx)
+        };
+        let Some(pane) = created else {
             return;
         };
         let room = self
