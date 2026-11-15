@@ -1064,6 +1064,10 @@ async function gitRefState(toplevel) {
 
 async function remoteGit(req) {
   const { toplevel } = await gitRepository(req.root);
+  // Private metadata request: never create a visible Pi bash tool call.
+  if (req.type === "herdr_git_head") {
+    return await gitRefState(toplevel);
+  }
   if (req.type === "herdr_git_snapshot") {
     const [status, branches, index, tags, stashes, details, worktrees, submodules] = await Promise.all([
       runGitListing(toplevel, ["status", "--porcelain=v1", "-z",
@@ -1696,7 +1700,7 @@ async function remoteGitRequest(req) {
     if (typeof req.id !== "string" || req.id.length > 128) {
       throw new Error("Missing request identifier");
     }
-    if (!["herdr_git_snapshot", "herdr_git_diff",
+    if (!["herdr_git_head", "herdr_git_snapshot", "herdr_git_diff",
           ...GIT_MUTATIONS].includes(command)) {
       throw new Error("Unsupported remote Git operation");
     }
@@ -1748,7 +1752,8 @@ function inputLine() {
                         request.type === "herdr_fs_trash" ||
                         request.type === "herdr_fs_restore")) {
           void remoteFilesRequest(request);
-        } else if (request && (request.type === "herdr_git_snapshot" ||
+        } else if (request && (request.type === "herdr_git_head" ||
+                               request.type === "herdr_git_snapshot" ||
                                request.type === "herdr_git_diff" ||
                                GIT_MUTATIONS.includes(request.type))) {
           void remoteGitRequest(request);
