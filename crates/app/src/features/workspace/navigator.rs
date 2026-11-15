@@ -142,12 +142,11 @@ impl Workspace {
 
         let mut shown = std::collections::HashSet::new();
         let mut add = |key: String, entry: NavigatorSession| {
-            if let Some(address) = &entry.address {
-                if self.terminated_herdr_sessions.contains(address)
-                    || !shown.insert(address.clone())
-                {
-                    return;
-                }
+            if let Some(address) = &entry.address
+                && (self.terminated_herdr_sessions.contains(address)
+                    || !shown.insert(address.clone()))
+            {
+                return;
             }
             let index = match groups.iter().position(|group| group.key == key) {
                 Some(index) => index,
