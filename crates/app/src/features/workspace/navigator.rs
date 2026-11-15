@@ -3,6 +3,7 @@
 //! there is deliberately no visual tab strip.
 
 use super::*;
+use gpui_kit::component::Disableable as _;
 
 struct NavigatorSession {
     tab_index: usize,
@@ -401,8 +402,8 @@ impl Workspace {
                                                             } else {
                                                                 "Machine disconnected"
                                                             })
-                                                            .when(available, |button| {
-                                                                button.dropdown_menu(move |menu, _, _| {
+                                                            .disabled(!available)
+                                                            .dropdown_menu(move |menu, _, _| {
                                                                     let weak_agent = weak.clone();
                                                                     let weak_terminal = weak.clone();
                                                                     let agent_machine = machine_for_add.clone();
@@ -436,8 +437,7 @@ impl Workspace {
                                                                                 });
                                                                             }),
                                                                         )
-                                                                })
-                                                            }),
+                                                                }),
                                                     )
                                             }),
                                     )
