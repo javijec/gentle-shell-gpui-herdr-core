@@ -241,6 +241,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Slash commands belong to their originating Pi session. A screen
+        // event arriving late from another tab must not open the Windows
+        // or JaviPi resources belonging to the newly focused tab.
+        if let Some(origin) = session.as_ref()
+            && self.active_session().as_ref() != Some(origin)
+        {
+            window.push_notification(Notification::info(
+                "Select the agent that requested this screen before opening it.",
+            ), cx);
+            return;
+        }
         match screen {
             Screen::Usage => self.open_usage(window, cx),
             Screen::Stats => {
