@@ -22,6 +22,7 @@ use crate::features::docs::{DocsEvent, DocsView};
 use crate::features::files::{
     FileTreeView, RemoteFilesEvent, RemoteFilesView, RemoteGitDiffView,
 };
+use crate::features::history::HistoryView;
 use crate::features::machines::{
     model as machine_model, MachinesEvent, MachinesView,
     RemoteDirectoryEvent, RemoteDirectoryPicker,
