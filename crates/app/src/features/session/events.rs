@@ -28,7 +28,12 @@ const STDERR_LINES: usize = 40;
 /// Shell tool event. Prefer the branch and use short HEAD when detached.
 fn remote_git_branch(data: &Value) -> Option<String> {
     let branch = data["currentBranch"].as_str().filter(|name| !name.is_empty())
-        .or_else(|| data["headOid"].as_str().map(|oid| &oid[..oid.len().min(7)]))?;
+        .or_else(|| {
+            data["headOid"].as_str()
+                .filter(|oid| oid.len() >= 7 && oid.len() <= 64
+                    && oid.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .map(|oid| &oid[..7])
+        })?;
     (branch.len() <= 256 && !branch.chars().any(char::is_control))
         .then(|| branch.to_owned())
 }
@@ -613,8 +618,8 @@ impl SessionView {
             // Use the bridge's private, read-only Git query instead of Pi
             // bash: the latter generates a visible Shell tool card at startup.
             // Never fall back to Windows Git or a visible agent tool call.
-            if let (Some(process), Some((_, root))) =
-                (self.remote_fs_process(), self.remote_fs_target())
+            if let Some((_, root)) = self.remote_fs_target()
+                && self.remote_fs_process().is_some()
             {
                 self.request(
                     json!({"type": "herdr_git_head", "root": root}),
@@ -625,9 +630,33 @@ impl SessionView {
                         if this.git.seq != seq || !this.is_remote_herdr() {
                             return;
                         }
-                        this.git.remote_branch = result.ok()
-                            .and_then(|data| remote_git_branch(&data));
-                        cx.notify();
+                        match result {
+                            Ok(data) => {
+                                this.git.remote_branch = remote_git_branch(&data);
+                                cx.notify();
+                            }
+                            Err(_) => {
+                                // An already-running 5D bridge predates the
+                                // dedicated HEAD query. Its private Git
+                                // snapshot is the safe compatibility path;
+                                // never run a user-visible Pi bash command.
+                                if this.remote_fs_process().is_none() {
+                                    return;
+                                }
+                                this.request(
+                                    json!({"type": "herdr_git_snapshot", "root": root}),
+                                    cx,
+                                    move |this, snapshot, cx| {
+                                        if this.git.seq != seq || !this.is_remote_herdr() {
+                                            return;
+                                        }
+                                        this.git.remote_branch = snapshot.ok()
+                                            .and_then(|data| remote_git_branch(&data));
+                                        cx.notify();
+                                    },
+                                );
+                            }
+                        }
                     },
                 );
             }
