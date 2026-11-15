@@ -269,12 +269,14 @@ fn shared_remote_worktree(source: &RemoteGitSnapshot) -> WorkTree {
 /// Project a bounded Herdr Git read into the same native RefsSnapshot
 /// consumed by RefsView. Linux paths never become native PathBuf objects.
 fn shared_remote_refs(source: &RemoteGitSnapshot) -> RefsSnapshot {
-    let mut refs = RefsSnapshot::default();
-    refs.head = HeadInfo {
-        branch: source.current_branch.clone(),
-        sha: source.head_oid.as_ref().map(|oid| oid.chars().take(7).collect()),
-        dirty: !source.files.is_empty(),
-        ..HeadInfo::default()
+    let mut refs = RefsSnapshot {
+        head: HeadInfo {
+            branch: source.current_branch.clone(),
+            sha: source.head_oid.as_ref().map(|oid| oid.chars().take(7).collect()),
+            dirty: !source.files.is_empty(),
+            ..HeadInfo::default()
+        },
+        ..RefsSnapshot::default()
     };
     for branch in &source.branches {
         let kind = if branch.local { RefKind::Branch } else { RefKind::Remote };
@@ -2095,6 +2097,18 @@ impl RemoteFilesView {
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child(feedback),
             ))
+            .when(
+                self.tab == RemoteTab::Branches
+                    && self.git.as_ref().is_some_and(|snapshot| {
+                        snapshot.branches_truncated || snapshot.tags_truncated
+                    }),
+                |panel| {
+                    panel.child(
+                        div().px_3().py_2().text_xs().text_color(ui::warning())
+                            .child("Remote branches or tags were truncated; this reference list is incomplete."),
+                    )
+                },
+            )
             .when(self.tab == RemoteTab::Changes, |panel| {
                 panel.child(
                     div().flex_1().min_h_0().child(self.changes.clone()),
