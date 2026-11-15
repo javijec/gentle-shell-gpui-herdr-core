@@ -47,7 +47,7 @@ pub enum ChangesEvent {
     RemoteBulkStage { stage: bool },
     RemoteStashPush(String),
     RemoteDiscard { path: String, index: char, worktree: char, staged: bool },
-
+}
 
 #[derive(Clone, PartialEq)]
 struct Repo {
