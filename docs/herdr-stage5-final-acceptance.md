@@ -1,10 +1,9 @@
 # Stage 5 — Paridad Files/Git local y Herdr: cierre de implementación
 
 **Fecha:** 2026-11-15
-**Estado:** Implementado en PR #24 (rama `feature/herdr-stage5-completion`), sobre
-la integración ya fusionada de PRs #15–#23. **Pendiente de compilación estricta,
-pruebas del bridge en JaviPi y aceptación Windows.** No se fusiona ni se
-declara validado este nuevo código hasta completar esa batería.
+**Estado:** Stage 5 cerrado operativamente para integración en `main` a través del PR #24, sobre los PRs #15–#23 ya integrados.
+**Aceptación comunicada por el usuario (Windows):** compilación completada y aplicación en ejecución, con `GENTLE_SHELL_TERMINAL_BACKEND=herdr` y funcionalidad remota operativa.
+**Límite de la evidencia:** no se dispone aquí de un registro reproducible de la batería completa de `cargo test`, de pruebas Node del bridge en JaviPi ni de todos los escenarios destructivos y de seguridad enumerados abajo. No afirmar CI verde ni cobertura de integración exhaustiva. Estas pruebas permanecen como seguimiento de endurecimiento y no como funcionalidad implementada pendiente.
 
 ## Un solo panel, backends distintos
 
@@ -56,7 +55,7 @@ compensar con comandos Windows o shell remotos.
    operación debe **fallar sin borrar** el archivo. No se prometen
    borrados o recuperación en dispositivos distintos.
 
-## Pruebas integrales pendientes
+## Pruebas complementarias de regresión y endurecimiento
 
 Windows, checkout exclusivo de la rama final:
 
@@ -74,7 +73,7 @@ JaviPi/Linux, mismo código y repositorio Git descartable:
 node --test crates/pi-rpc/tests/herdr_remote_bridge.test.cjs
 ```
 
-**Aceptación manual conjunta** (un solo ciclo, no uno por commit):
+**Matriz de regresión recomendada** (no toda está confirmada en esta aceptación):
 
 - Windows local: conservar FileTreeView, ChangesView, RefsView, editor,
   diff, stash, worktree y operaciones de contexto.
@@ -91,9 +90,8 @@ node --test crates/pi-rpc/tests/herdr_remote_bridge.test.cjs
 
 ## Estado de integración
 
-PRs #15–#23 ya fusionados en `main`. PR #24 es la única capa adicional
-de paridad; **no mezclar cambios de upstream v0.1.19 antes de completar
-la validación y fusionar este cierre**.
+PRs #15–#23 ya fusionados en `main`. PR #24 contiene el cierre de la paridad Stage 5 y se integra en `main` como línea base para trabajar desde otra PC.
+**No mezclar actualizaciones del upstream v0.1.19 como parte de este cierre**; tratarlas en un cambio separado con su propia regresión.
 
 **Pendientes intencionales** fuera de Stage 5: transferencia de archivos
 entre agentes/volúmenes, edición de binarios o archivos mayores de los
