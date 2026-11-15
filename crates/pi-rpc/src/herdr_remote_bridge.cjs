@@ -674,6 +674,47 @@ async function restoreTrash(req) {
   }
 }
 
+// git check-ignore does not support :(literal) pathspec magic and -z
+// requires --stdin. Stream exact NUL-separated filenames instead.
+function remoteCheckIgnore(directory, names) {
+  return new Promise((resolve, reject) => {
+    if (names.length > 100 || names.some((name) =>
+        !validEntryName(name))) {
+      reject(new Error("Invalid ignored-file query"));
+      return;
+    }
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const child = execFile("git", [
+      "--no-optional-locks", "-c", "core.fsmonitor=false",
+      "-C", directory, "check-ignore", "--stdin", "-z",
+    ], {
+      encoding: "buffer", shell: false, timeout: 8000,
+      maxBuffer: 256 * 1024,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    }, (error, stdout) => {
+      if (error && error.code !== 1) {
+        finish(error);
+        return;
+      }
+      try {
+        const rows = strictUtf8(Buffer.from(stdout || ""))
+          .split("\0").filter(Boolean);
+        finish(null, new Set(rows));
+      } catch (decodeError) {
+        finish(decodeError);
+      }
+    });
+    child.stdin.on("error", (error) => finish(error));
+    child.stdin.end(names.join("\0") + "\0");
+  });
+}
+
 async function remoteFilesRequest(req) {
   const command = req.type;
   const response = (success, data, error) => emit("O", JSON.stringify({
@@ -730,11 +771,10 @@ async function remoteFilesRequest(req) {
       for (let start = 0; start < sorted.length; start += 100) {
         const group = sorted.slice(start, start + 100);
         try {
-          const output = await runGit(selected, ["check-ignore", "-z", "--",
-            ...group.map((entry) => ":(literal)" + entry.name)], true);
-          for (const name of strictUtf8(output).split("\0").filter(Boolean)) {
-            ignored.add(name);
-          }
+          const ignoredNames = await remoteCheckIgnore(
+            selected, group.map((entry) => entry.name),
+          );
+          for (const name of ignoredNames) ignored.add(name);
         } catch {
           // No git repository / no ignored names; never fail filesystem UI.
         }
