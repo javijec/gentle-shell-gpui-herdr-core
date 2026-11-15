@@ -111,6 +111,7 @@ async fn put_bytes(
     parent: String,
     name: String,
     bytes: Vec<u8>,
+    expected_revision: Option<String>,
 ) -> Result<String, String> {
     if root == "/" || !valid_remote_path(&root, &parent)
         || !valid_name(&name) || bytes.len() > MAX_BYTES
@@ -122,6 +123,8 @@ async fn put_bytes(
         "type": "herdr_fs_transfer_begin",
         "root": root, "path": parent, "name": name,
         "size": bytes.len(), "sha256": digest,
+        "replace": expected_revision.is_some(),
+        "expectedRevision": expected_revision,
     })).await.map_err(|error| error.to_string())?;
     let id = start.data["transfer"].as_str()
         .filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -178,7 +181,31 @@ pub(super) async fn upload(
     if bytes.len() > MAX_BYTES {
         return Err("Selected file exceeds the 16 MiB limit".into());
     }
-    put_bytes(root, process, parent, name, bytes).await
+    put_bytes(root, process, parent, name, bytes, None).await
+}
+
+/// Save an existing large UTF-8 file. Begin requires the same original
+/// SHA-256 that was read, and commit rechecks it before atomic replacement.
+pub(super) async fn replace_text(
+    root: String, process: Arc<RpcProcess>,
+    remote_path: String, text: String, expected_revision: String,
+) -> Result<String, String> {
+    if !valid_remote_path(&root, &remote_path) || remote_path == root
+        || text.len() > MAX_BYTES || text.contains('\0')
+        || expected_revision.len() != 64
+        || !expected_revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("Invalid large-text replacement request".into());
+    }
+    let (directory, name) = remote_path.rsplit_once('/')
+        .ok_or("Remote file has no parent directory")?;
+    let parent = if directory.is_empty() { "/".into() } else { directory.into() };
+    let revision = hex_digest(text.as_bytes());
+    put_bytes(
+        root, process, parent, name.to_owned(), text.into_bytes(),
+        Some(expected_revision),
+    ).await?;
+    Ok(revision)
 }
 
 /// Explicit download into an OS-chosen directory; create_new prevents any
@@ -220,7 +247,7 @@ pub(crate) async fn relay(
 ) -> Result<String, String> {
     let name = remote_filename(&from_path)?.to_owned();
     let bytes = fetch(from_root, from_process, from_path).await?;
-    put_bytes(to_root, to_process, to_directory, name, bytes).await
+    put_bytes(to_root, to_process, to_directory, name, bytes, None).await
 }
 
 #[cfg(test)]
