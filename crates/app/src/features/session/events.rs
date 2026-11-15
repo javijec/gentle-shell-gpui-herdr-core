@@ -24,17 +24,13 @@ const GIT_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 /// Stderr lines kept for an exited backend.
 const STDERR_LINES: usize = 40;
 
-/// A Git status query on a remote Pi process is advisory. Show only a
-/// successful branch/short-HEAD result; never fall back to Windows Git.
+/// The private remote bridge reports Git HEAD without producing a visible
+/// Shell tool event. Prefer the branch and use short HEAD when detached.
 fn remote_git_branch(data: &Value) -> Option<String> {
-    if data["exitCode"].as_i64() != Some(0) {
-        return None;
-    }
-    data["output"].as_str()
-        .map(str::trim)
-        .filter(|branch| !branch.is_empty() && branch.len() <= 256
-            && !branch.chars().any(char::is_control))
-        .map(str::to_owned)
+    let branch = data["currentBranch"].as_str().filter(|name| !name.is_empty())
+        .or_else(|| data["headOid"].as_str().map(|oid| &oid[..oid.len().min(7)]))?;
+    (branch.len() <= 256 && !branch.chars().any(char::is_control))
+        .then(|| branch.to_owned())
 }
 
 impl SessionView {
@@ -614,15 +610,14 @@ impl SessionView {
             self.git.snapshot = None;
             self.git.repository = None;
             self.git.remote_branch = None;
-            // A read-only Pi RPC bash call runs in the selected remote agent's
-            // original process and does not spawn or reattach any terminals.
-            if self.process().is_some() {
+            // Use the bridge's private, read-only Git query instead of Pi
+            // bash: the latter generates a visible Shell tool card at startup.
+            // Never fall back to Windows Git or a visible agent tool call.
+            if let (Some(process), Some((_, root))) =
+                (self.remote_fs_process(), self.remote_fs_target())
+            {
                 self.request(
-                    json!({
-                        "type": "bash",
-                        "command": "git symbolic-ref --quiet --short HEAD || git rev-parse --short HEAD",
-                        "excludeFromContext": true
-                    }),
+                    json!({"type": "herdr_git_head", "root": root}),
                     cx,
                     move |this, result, cx| {
                         // The selected session or network generation may have
@@ -1327,12 +1322,14 @@ mod remote_git_branch_tests {
     #[test]
     fn does_not_show_windows_branch_when_remote_query_fails() {
         assert_eq!(remote_git_branch(&json!({
-            "exitCode": 0, "output": "feature/javipi-work\n"
+            "currentBranch": "feature/javipi-work", "headOid": "abcdef1234567890"
         })).as_deref(), Some("feature/javipi-work"));
         assert_eq!(remote_git_branch(&json!({
-            "exitCode": 128, "output": "fatal: not a git repository"
+            "currentBranch": null, "headOid": "abcdef1234567890"
+        })).as_deref(), Some("abcdef1"));
+        assert_eq!(remote_git_branch(&json!({
+            "currentBranch": null, "headOid": null
         })), None);
-        assert_eq!(remote_git_branch(&json!({"exitCode": 0, "output": ""})), None);
-        assert_eq!(remote_git_branch(&json!({"exitCode": 0, "output": "bad\nbranch"})), None);
+        assert_eq!(remote_git_branch(&json!({"currentBranch": "bad\nbranch"})), None);
     }
 }
