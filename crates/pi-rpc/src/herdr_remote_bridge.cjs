@@ -1064,7 +1064,81 @@ async function gitRefState(toplevel) {
   return { headOid, currentBranch };
 }
 
+// Palette sources are read from the selected Linux machine, never from the
+// Windows workspace. Bound every filesystem traversal and never follow links.
+async function remotePalette(req) {
+  if (req.root === "/") {
+    throw new Error("Choose a project directory before searching remote files");
+  }
+  const root = await safeRemotePath(req.root, req.root);
+  let files = [];
+  let truncated = false;
+  let branches = [];
+  try {
+    const { toplevel } = await gitRepository(root);
+    const listed = await runGitListing(toplevel, [
+      "ls-files", "--cached", "--others", "--exclude-standard", "-z",
+    ], 0, MAX_PALETTE_FILES);
+    files = strictUtf8(listed.output).split("\0").filter(Boolean);
+    if (files.some((file) => !safeGitRelative(file))) {
+      throw new Error("Git returned an invalid remote file path");
+    }
+    truncated = listed.truncated;
+    const refs = await runGitListing(toplevel, [
+      "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)",
+      "refs/heads",
+    ], 10, MAX_GIT_BRANCHES);
+    const current = (await gitRefState(toplevel)).currentBranch;
+    branches = strictUtf8(refs.output).split("\n").filter(Boolean)
+      .filter((name) => name.length <= 512 &&
+        !/[\x00-\x1f\x7f]/.test(name))
+      .map((name) => ({ name, current: name === current }));
+    return { files, truncated, branches, branchesTruncated: refs.truncated };
+  } catch (error) {
+    // Gitless projects still have a Files palette. Never treat a Git error
+    // as permission to leave the agent's Linux launch directory.
+    if (error.message && error.message.includes("invalid remote file path")) {
+      throw error;
+    }
+    const directories = [{ relative: "", depth: 0 }];
+    let visited = 0;
+    while (directories.length && files.length < MAX_PALETTE_FILES &&
+           visited < MAX_PALETTE_FILES * 8) {
+      const { relative, depth } = directories.shift();
+      const absolute = path.posix.join(root, relative);
+      const directory = await fs.opendir(absolute);
+      for await (const entry of directory) {
+        if (++visited > MAX_PALETTE_FILES * 8) {
+          truncated = true;
+          break;
+        }
+        if (entry.name.startsWith(".") || entry.name === "node_modules" ||
+            entry.name === "target" || entry.name.includes("\\") ||
+            /[\x00-\x1f\x7f]/.test(entry.name) ||
+            entry.isSymbolicLink()) {
+          continue;
+        }
+        const name = relative ? relative + "/" + entry.name : entry.name;
+        if (!safeGitRelative(name)) continue;
+        if (entry.isDirectory() && depth < 24) {
+          directories.push({ relative: name, depth: depth + 1 });
+        } else if (entry.isFile()) {
+          files.push(name);
+          if (files.length === MAX_PALETTE_FILES) {
+            truncated = true;
+            break;
+          }
+        }
+      }
+    }
+    return { files, truncated, branches, branchesTruncated: false };
+  }
+}
+
 async function remoteGit(req) {
+  if (req.type === "herdr_palette_snapshot") {
+    return await remotePalette(req);
+  }
   const { toplevel } = await gitRepository(req.root);
   // Private metadata request: never create a visible Pi bash tool call.
   if (req.type === "herdr_git_head") {
@@ -1756,7 +1830,8 @@ async function remoteGitRequest(req) {
     if (typeof req.id !== "string" || req.id.length > 128) {
       throw new Error("Missing request identifier");
     }
-    if (!["herdr_git_head", "herdr_git_history", "herdr_git_snapshot", "herdr_git_diff",
+    if (!["herdr_palette_snapshot", "herdr_git_head", "herdr_git_history",
+          "herdr_git_snapshot", "herdr_git_diff",
           ...GIT_MUTATIONS].includes(command)) {
       throw new Error("Unsupported remote Git operation");
     }
@@ -1808,7 +1883,8 @@ function inputLine() {
                         request.type === "herdr_fs_trash" ||
                         request.type === "herdr_fs_restore")) {
           void remoteFilesRequest(request);
-        } else if (request && (request.type === "herdr_git_head" ||
+        } else if (request && (request.type === "herdr_palette_snapshot" ||
+                               request.type === "herdr_git_head" ||
                                request.type === "herdr_git_history" ||
                                request.type === "herdr_git_snapshot" ||
                                request.type === "herdr_git_diff" ||
