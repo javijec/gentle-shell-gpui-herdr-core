@@ -702,6 +702,7 @@ test("Stage 6 Git History uses private bounded RPC and returns native log record
   try {
     const git = gitInit(root);
     git("branch", "feature/history");
+    git("switch", "feature/history");
     const h = harness(root);
     const before = h.childWrites.length;
     rpcInput(h, {
@@ -742,6 +743,7 @@ test("Stage 6 palette indexes only remote workspace files and local branches", {
   try {
     const git = gitInit(root);
     git("branch", "feature/palette");
+    git("switch", "feature/palette");
     fs.writeFileSync(path.join(root, ".gitignore"), "secret.txt\n");
     fs.writeFileSync(path.join(root, "secret.txt"), "secret\n");
     fs.mkdirSync(path.join(root, "src"));
