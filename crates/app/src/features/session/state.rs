@@ -6850,4 +6850,54 @@ mod tests {
         let _ = quiet.config_apply(&event(2, "profile_applied"));
         assert!(quiet.take_config_changes().is_empty());
     }
+
+    #[test]
+    fn a_session_apply_binds_the_profile_until_the_session_goes() {
+        let mut desktop = apply_ready();
+        let apply = |desktop: &mut Desktop, mode: ProfileApplyMode, status: &str| {
+            desktop
+                .config_apply_profile(ProfileApply::new("deep", mode))
+                .unwrap();
+            let wire = if mode == ProfileApplyMode::Session {
+                "session"
+            } else {
+                "default"
+            };
+            let _ = answer_apply(desktop, |id| {
+                config_response_lines(
+                    id,
+                    json!({"profile": "deep", "mode": wire, "status": status, "notes": []}),
+                )
+            });
+        };
+        apply(&mut desktop, ProfileApplyMode::Session, "not_applied");
+        assert_eq!(
+            desktop.session_profile(),
+            None,
+            "a refused apply binds nothing"
+        );
+        apply(&mut desktop, ProfileApplyMode::Default, "applied");
+        assert_eq!(
+            desktop.session_profile(),
+            None,
+            "a default is not a session binding"
+        );
+        apply(&mut desktop, ProfileApplyMode::Session, "applied");
+        assert_eq!(desktop.session_profile(), Some("deep"));
+
+        // A new or resumed session, or a replaced backend, starts unbound.
+        desktop.reset();
+        assert_eq!(desktop.session_profile(), None);
+
+        // Gentle Shell's own event binds too.
+        let mut desktop = apply_ready();
+        let _ = desktop.config_apply(&desktop_widget(record(json!({
+            "schema": SCHEMA,
+            "kind": "event",
+            "seq": 2,
+            "event": "profile_applied",
+            "data": {"profile": "fast", "mode": "session", "source": "desktop"},
+        }))));
+        assert_eq!(desktop.session_profile(), Some("fast"));
+    }
 }
