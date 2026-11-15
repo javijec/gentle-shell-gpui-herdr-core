@@ -54,6 +54,20 @@ impl Workspace {
     }
 
     pub(super) fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_agent_is_remote(cx) {
+            if let Some((_, machine, cwd)) = self.selected_remote_files(cx) {
+                self.open_agent_on_machine(
+                    pi_rpc::AgentTarget::Remote { machine, cwd },
+                    window,
+                    cx,
+                );
+            } else {
+                window.push_notification(Notification::info(
+                    "The remote agent's original machine and directory are not available.",
+                ), cx);
+            }
+            return;
+        }
         let cwd = self.active_cwd(cx);
         self.open_tab(PaneKind::Agent, cwd, None, None, window, cx);
     }
@@ -64,6 +78,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_agent_is_remote(cx) {
+            self.open_shell_on_selected_machine(window, cx);
+            return;
+        }
         let cwd = self.active_cwd(cx);
         self.open_tab(PaneKind::Terminal, cwd, None, None, window, cx);
     }
