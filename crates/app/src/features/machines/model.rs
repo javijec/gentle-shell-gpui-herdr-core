@@ -37,6 +37,17 @@ impl Terminal {
         self.state == "live"
     }
 
+    /// The remote-directory picker uses existing Herdr terminals as
+    /// per-machine working-directory suggestions.
+    pub fn belongs_to(&self, machine: Option<&str>) -> bool {
+        match machine {
+            None => !self.address.contains('/'),
+            Some(machine) => self.address
+                .split_once('/')
+                .is_some_and(|(prefix, _)| prefix == machine),
+        }
+    }
+
     pub fn display_title(&self) -> &str {
         if self.title.trim().is_empty() {
             &self.address
