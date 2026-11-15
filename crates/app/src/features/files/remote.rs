@@ -1002,6 +1002,13 @@ impl RemoteFilesView {
                 this.entry_busy = false;
                 match result {
                     Ok(receipt) => {
+                        if !matches!(&receipt.path, WorkspacePath::Herdr(path)
+                            if path == &selected)
+                        {
+                            this.error = Some("Unexpected remote Trash result".into());
+                            cx.notify();
+                            return;
+                        }
                         if let Some(token) = receipt.token {
                             this.last_trash = Some((token, selected.clone()));
                         }
