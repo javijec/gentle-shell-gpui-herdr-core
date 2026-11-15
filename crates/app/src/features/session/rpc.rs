@@ -313,6 +313,14 @@ impl SessionView {
     /// start method and no restart: only the running job the user picked is
     /// affected, and the server's answer is the truth.
     pub(super) fn cancel_running_job(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.process().is_none() {
+            self.transcript.notice(
+                NoticeLevel::Warning,
+                "The owning agent is offline; the background job was not cancelled.",
+            );
+            cx.notify();
+            return;
+        }
         let applied = self.desktop.cancel_job(id);
         self.apply_supervision(applied, cx);
     }
