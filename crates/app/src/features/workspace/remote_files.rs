@@ -105,6 +105,41 @@ impl Workspace {
         }
     }
 
+    /// The native Architecture Docs installer expects local Windows files.
+    /// Remote agents instead open the selected Linux docs directory through
+    /// the existing Herdr file browser; never read/write Windows docs.
+    pub(super) fn show_selected_remote_docs(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.files_sidebar_open {
+            self.toggle_files_panel(cx);
+        }
+        self.sync_remote_files(window, cx);
+        let Some((session, _, root)) = self.selected_remote_files(cx) else {
+            window.push_notification(Notification::info(
+                "Remote project directory unavailable. Reconnect the agent.",
+            ), cx);
+            return;
+        };
+        if root.is_empty() || root == "/" {
+            window.push_notification(Notification::info(
+                "Select a Linux project directory before browsing architecture docs.",
+            ), cx);
+            return;
+        }
+        if let Some(view) = &self.remote_files
+            && view.read(cx).matches(&session, &root)
+        {
+            view.update(cx, |view, cx| view.show_remote_docs(cx));
+        } else {
+            window.push_notification(Notification::info(
+                "Remote Files is waiting for the selected agent.",
+            ), cx);
+        }
+    }
+
     /// A remote branch result is tagged with the original machine and root.
     /// If the focus changes before the user picks it, fail closed instead of
     /// executing Git on a different Linux host or on Windows.
