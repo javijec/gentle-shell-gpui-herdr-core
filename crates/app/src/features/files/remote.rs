@@ -4,6 +4,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
@@ -17,7 +18,8 @@ use super::backend::{
     WorkspaceDirEntry as RemoteEntry, WorkspacePath,
     WorkspaceText as RemotePreview,
 };
-use gentle_core::git::status::StatusEntry as RemoteGitFile;
+use gentle_core::git::status::{EntryKind, StatusEntry as RemoteGitFile};
+use super::changes_ui::{ChangeSide, change_row, section_header, side_entries};
 use super::tabs::FilePanelTab as RemoteTab;
 use super::viewer::MdMode;
 use crate::shared::ui;
@@ -852,57 +854,70 @@ impl RemoteFilesView {
 
     /// Build each row in its own stack frame and erase the resulting
     /// GPUI element type before returning to the list builder.
+    /// Both native and Herdr use the same checkbox row. The backend
+    /// provides the operation and guards; there is no host-specific UI.
     fn push_git_file_row(
         &self, rows: &mut Vec<AnyElement>, snapshot: &RemoteGitSnapshot,
-        index: usize, entry: &RemoteGitFile, writable: bool,
-        cx: &mut Context<Self>,
+        index: usize, entry: &RemoteGitFile, side: ChangeSide, badge: char,
+        writable: bool, cx: &mut Context<Self>,
     ) {
-        let target = format!("{}/{}",
-            snapshot.toplevel.trim_end_matches('/'), entry.path);
-        let diff_target = target.clone();
+        let diff_target = format!(
+            "{}/{}", snapshot.toplevel.trim_end_matches('/'), entry.path
+        );
+        let action = match side {
+            ChangeSide::Unstaged => GitFileAction::Stage,
+            ChangeSide::Staged => GitFileAction::Unstage,
+        };
         let stage_target = entry.path.clone();
-        let unstage_target = entry.path.clone();
-        let badge = format!("{}{}", entry.index, entry.worktree);
         let index_state = entry.index;
         let worktree_state = entry.worktree;
-        let can_stage = writable && entry.unstaged().is_some();
-        let can_unstage = writable && entry.staged().is_some();
+        let allowed = writable && entry.kind != EntryKind::Conflict
+            && !self.git_busy && !self.git_loading;
+        let id = format!("remote-change-{side:?}-{index}");
+        let weak = cx.entity().downgrade();
+        let control = div()
+            .id(SharedString::from(format!("{id}-check-wrap")))
+            .flex_none()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(Checkbox::new(SharedString::from(format!("{id}-check")))
+                .small()
+                .checked(side == ChangeSide::Staged)
+                .disabled(!allowed)
+                .on_click(move |_, _, cx| {
+                    let target = stage_target.clone();
+                    let _ = weak.update(cx, |this, cx| {
+                        this.git_file_action(action, target, index_state, worktree_state, cx);
+                    });
+                }));
         rows.push(
-            h_flex()
-                .id(("remote-git-change", index))
-                .h(px(32.)).px_2().gap_1()
-                .child(div().w(px(26.)).font_family(ui::MONO)
-                    .text_xs().text_color(ui::warning()).child(badge))
-                .child(
-                    div().id(("remote-git-diff-link", index))
-                        .flex_1().min_w_0().truncate().text_xs()
-                        .cursor_pointer()
-                        .hover(|row| row.bg(ui::surface_hover()))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(RemoteFilesEvent::OpenDiff(diff_target.clone()));
-                        }))
-                        .child(entry.path.clone()),
-                )
-                .when(can_stage, |row| row.child(
-                    Button::new(format!("remote-git-stage-{index}"))
-                        .ghost().xsmall().label("Stage")
-                        .disabled(self.git_busy || self.git_loading)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.git_file_action(GitFileAction::Stage,
-                                stage_target.clone(), index_state, worktree_state, cx);
-                        })),
-                ))
-                .when(can_unstage, |row| row.child(
-                    Button::new(format!("remote-git-unstage-{index}"))
-                        .ghost().xsmall().label("Unstage")
-                        .disabled(self.git_busy || self.git_loading)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.git_file_action(GitFileAction::Unstage,
-                                unstage_target.clone(), index_state, worktree_state, cx);
-                        })),
-                ))
+            change_row(
+                SharedString::from(id), &entry.path, badge, false, 0., control,
+            )
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(RemoteFilesEvent::OpenDiff(diff_target.clone()));
+                }))
                 .into_any_element(),
         );
+    }
+
+    fn push_git_section_header(
+        &self, rows: &mut Vec<AnyElement>, side: ChangeSide, count: usize,
+    ) {
+        // Bulk writes must be a separate guarded server operation. Their
+        // controls remain visible but disabled until that protocol exists.
+        let checkbox = Checkbox::new(SharedString::from(
+            format!("remote-{side:?}-all-check"),
+        ))
+            .small()
+            .checked(side == ChangeSide::Staged)
+            .disabled(true);
+        let button = Button::new(format!("remote-{side:?}-all"))
+            .outline()
+            .xsmall()
+            .label(side.action_label())
+            .disabled(true)
+            .tooltip("Bulk Stage/Unstage is not supported by this Herdr bridge");
+        rows.push(section_header(side, count, checkbox, button).into_any_element());
     }
 
     fn push_git_commit_form(
@@ -1019,8 +1034,19 @@ unstaged files stay untouched."))
                     rows.push(div().px_3().py_3().text_sm().text_color(ui::muted())
                         .child("Working tree clean").into_any_element());
                 }
-                for (index, entry) in snapshot.files.iter().enumerate() {
-                    self.push_git_file_row(&mut rows, snapshot, index, entry, writable, cx);
+                for side in [ChangeSide::Unstaged, ChangeSide::Staged] {
+                    let entries = side_entries(&snapshot.files, side);
+                    if entries.is_empty() {
+                        continue;
+                    }
+                    self.push_git_section_header(&mut rows, side, entries.len());
+                    for (index, badge) in entries {
+                        if let Some(entry) = snapshot.files.get(index) {
+                            self.push_git_file_row(
+                                &mut rows, snapshot, index, entry, side, badge, writable, cx,
+                            );
+                        }
+                    }
                 }
                 if snapshot.files_truncated {
                     rows.push(div().px_3().py_2().text_xs()
