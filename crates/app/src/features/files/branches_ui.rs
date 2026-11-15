@@ -3,12 +3,102 @@
 //! Actions belong to the owning view/backend; the UI never executes Git.
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Icon, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::features::git::RefEntry;
 use crate::shared::ui;
+
+/// All native and Herdr reference lists share one section identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum RefSection {
+    Branches,
+    Remotes,
+    Tags,
+    Stashes,
+    Worktrees,
+    Submodules,
+}
+
+impl RefSection {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Branches => "Branches",
+            Self::Remotes => "Remotes",
+            Self::Tags => "Tags",
+            Self::Stashes => "Stashes",
+            Self::Worktrees => "Worktrees",
+            Self::Submodules => "Submodules",
+        }
+    }
+}
+
+/// Shared reference filter behavior; a blank search displays every item.
+pub(super) fn matches_filter(filter: &str, name: &str) -> bool {
+    let query = filter.trim();
+    query.is_empty() || name.to_lowercase().contains(&query.to_lowercase())
+}
+
+/// Classify Herdr's local/remotes branch records using the same section
+/// identities and filter rule as the native Branches view.
+pub(super) fn branch_matches(
+    section: RefSection, local: bool, name: &str, filter: &str,
+) -> bool {
+    let correct_section = match section {
+        RefSection::Branches => local,
+        RefSection::Remotes => !local,
+        _ => false,
+    };
+    correct_section && matches_filter(filter, name)
+}
+
+/// One filter shell for both native and Herdr reference panes. The input
+/// belongs to the owner so switching remote agents never reuses old state.
+pub(super) fn filter_field(filter: &Entity<InputState>, busy: bool) -> Div {
+    div().flex_none().mx_2().mt_1().mb_1().child(
+        ui::field()
+            .h(px(30.))
+            .child(Icon::new(IconName::Funnel).small().text_color(ui::faint()))
+            .child(Input::new(filter).appearance(false).small())
+            .when(busy, |d| {
+                d.child(Spinner::new().xsmall().color(ui::accent()))
+            }),
+    )
+}
+
+/// One collapsible section header for every Git reference category.
+pub(super) fn ref_section_header(
+    section: RefSection, count: usize, collapsed: bool,
+) -> Stateful<Div> {
+    h_flex()
+        .id(SharedString::from(format!("refs-section-{section:?}")))
+        .h(px(26.))
+        .mx_1p5()
+        .px_1p5()
+        .gap_1p5()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|s| s.bg(ui::surface_hover()))
+        .child(Icon::new(if collapsed {
+            IconName::ChevronRight
+        } else {
+            IconName::ChevronDown
+        }).xsmall().text_color(ui::faint()))
+        .child(div()
+            .flex_1()
+            .text_size(px(12.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(ui::muted())
+            .child(section.label()))
+        .child(div()
+            .font_family(ui::MONO)
+            .text_size(px(10.5))
+            .text_color(ui::faint())
+            .child(count.to_string()))
+}
 
 pub(super) struct BranchDisplay<'a> {
     pub name: &'a str,
@@ -94,7 +184,22 @@ fn ahead_behind(ahead: u32, behind: u32) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::BranchDisplay;
+    use super::{BranchDisplay, RefSection, branch_matches, matches_filter};
+
+    #[test]
+    fn branch_filter_is_shared_and_case_insensitive() {
+        assert!(matches_filter("", "main"));
+        assert!(matches_filter("FEAT", "feature/my-tool"));
+        assert!(matches_filter(" my ", "feature/my-tool"));
+        assert!(!matches_filter("release", "feature/my-tool"));
+        assert_eq!(RefSection::Branches.label(), "Branches");
+        assert_eq!(RefSection::Remotes.label(), "Remotes");
+        assert!(branch_matches(RefSection::Branches, true, "main", ""));
+        assert!(!branch_matches(RefSection::Branches, false, "origin/main", ""));
+        assert!(branch_matches(RefSection::Remotes, false, "origin/main", "ORIGIN"));
+        assert!(!branch_matches(RefSection::Remotes, true, "main", ""));
+        assert!(!branch_matches(RefSection::Tags, true, "v1.0", ""));
+    }
 
     #[test]
     fn herdr_branch_display_does_not_invent_tracking_metrics() {
