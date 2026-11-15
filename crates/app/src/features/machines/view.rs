@@ -99,7 +99,6 @@ impl MachinesView {
         let action = machine.map(|m| m.name.clone());
         let rows: Vec<AnyElement> = terminals
             .into_iter()
-            .take(150)
             .enumerate()
             .map(|(i, terminal)| self.render_terminal(terminal, index * 1000 + i, cx))
             .collect();
@@ -219,14 +218,7 @@ impl MachinesView {
                 )
             })
             .children(rows)
-            .when(count > 150, |d| {
-                d.child(
-                    div()
-                        .text_xs()
-                        .text_color(ui::muted())
-                        .child(format!("Showing 150 of {count} terminals.")),
-                )
-            })
+
             .into_any_element()
     }
 
