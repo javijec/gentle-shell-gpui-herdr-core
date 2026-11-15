@@ -7,11 +7,12 @@ use std::process::{Command, Stdio};
 use gentle_core::fuzzy::FileEntry;
 use serde_json::Value;
 
+/// Indexed remote files, local branches and the truncation flag.
+type RemotePaletteSnapshot = (Vec<FileEntry>, Vec<(String, bool)>, bool);
+
 /// Private Herdr palette response. Paths are relative POSIX strings and
 /// never become Windows PathBuf values. Invalid or unbounded data is rejected.
-pub(super) fn parse_remote_palette(
-    data: &Value,
-) -> Option<(Vec<FileEntry>, Vec<(String, bool)>, bool)> {
+pub(super) fn parse_remote_palette(data: &Value) -> Option<RemotePaletteSnapshot> {
     let entries = data["files"].as_array()?;
     let refs = data["branches"].as_array()?;
     if entries.len() > 2000 || refs.len() > 120 {
