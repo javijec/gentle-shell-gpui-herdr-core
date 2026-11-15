@@ -221,7 +221,8 @@ impl FileTreeView {
                 RefsEvent::Changed => cx.notify(),
                 // A remote action cannot originate in the local RefsView.
                 RefsEvent::SwitchRemoteBranch(_)
-                | RefsEvent::RemoteStash { .. } => {},
+                | RefsEvent::RemoteStash { .. }
+                | RefsEvent::RemoteWorktree { .. } => {},
             }),
         ];
         let mut this = Self {

@@ -18,7 +18,7 @@ use serde_json::json;
 use crate::features::session::SessionView;
 use crate::features::git::{RefEntry, RefsSnapshot, WorkTree, StashAction};
 use gentle_core::git::refs::{HeadInfo, RefKind, Stash, Submodule, parse_refs, parse_submodules};
-use super::refs::{RefsEvent, RefsView, RemoteWorktreeDisplay};
+use super::refs::{RefsEvent, RefsView, RemoteWorktreeDisplay, RemoteWorktreeAction};
 use super::changes::{ChangesEvent, ChangesView};
 use super::backend::{
     GitFileAction, GitFileMutation, HerdrGitGuard, WorkspaceBackend,
@@ -490,6 +490,7 @@ pub struct RemoteFilesView {
     git_confirm_switch: Option<String>,
     git_confirm_stash: Option<(String, StashAction)>,
     git_confirm_network: Option<String>,
+    git_confirm_worktree: Option<(RemoteWorktreeAction, String)>,
     _git_events: Vec<Subscription>,
     focus: FocusHandle,
     tree_children: HashMap<String, Vec<RemoteEntry>>,
@@ -691,6 +692,8 @@ impl RemoteFilesView {
                     this.git_switch_branch(branch.clone(), cx),
                 RefsEvent::RemoteStash { name, action } =>
                     this.git_stash_action(name.clone(), *action, cx),
+                RefsEvent::RemoteWorktree { action, branch, path } =>
+                    this.git_worktree_action(*action, branch.clone(), path.clone(), cx),
                 _ => {}
             }
         });
@@ -756,6 +759,7 @@ impl RemoteFilesView {
             git_confirm_switch: None,
             git_confirm_stash: None,
             git_confirm_network: None,
+            git_confirm_worktree: None,
             _git_events: git_events,
             focus: cx.focus_handle(),
             tree_children: HashMap::new(),
@@ -1520,6 +1524,7 @@ impl RemoteFilesView {
         self.git_confirm_switch = None;
         self.git_confirm_stash = None;
         self.git_confirm_network = None;
+        self.git_confirm_worktree = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
             view.mark_remote_stash(None, cx);
@@ -1615,6 +1620,7 @@ impl RemoteFilesView {
         self.git_confirm_switch = None;
         self.git_confirm_stash = None;
         self.git_confirm_network = None;
+        self.git_confirm_worktree = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
             view.mark_remote_stash(None, cx);
@@ -1730,6 +1736,42 @@ impl RemoteFilesView {
             "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
             "expectedIndexToken": snapshot.index_token,
             "branch": branch,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_worktree_action(
+        &mut self, action: RemoteWorktreeAction, branch: Option<String>,
+        path: Option<String>, cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self.git.as_ref().filter(|s|
+            s.writes_enabled && s.head_oid.is_some() && s.index_token.is_some()
+                && !s.worktrees.is_empty()
+        ) else { return; };
+        let target = branch.as_deref().or(path.as_deref())
+            .unwrap_or("prune").to_owned();
+        let operation = (action, target.clone());
+        if self.git_confirm_worktree.as_ref() != Some(&operation) {
+            self.git_confirm_worktree = Some(operation);
+            self.git_feedback = Some(
+                "Worktree action requires confirmation; select the same action again.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        let (kind, new_branch) = match action {
+            RemoteWorktreeAction::AddExisting => ("herdr_git_worktree_add", false),
+            RemoteWorktreeAction::AddNew => ("herdr_git_worktree_add", true),
+            RemoteWorktreeAction::Remove => ("herdr_git_worktree_remove", false),
+            RemoteWorktreeAction::Prune => ("herdr_git_worktree_prune", false),
+        };
+        let command = json!({
+            "type": kind,
+            "root": self.root, "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "branch": branch, "path": path, "newBranch": new_branch,
         });
         self.git_write(command, cx);
     }
