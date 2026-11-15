@@ -2035,6 +2035,17 @@ impl RemoteFilesView {
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_git(cx))),
                     )
                     .child(
+                        Button::new("remote-git-close").ghost().xsmall()
+                            .icon(Icon::new(IconName::X))
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(RemoteFilesEvent::Close);
+                            })),
+                    ),
+            )
+            .child(self.render_tabs(cx))
+            .child(
+                h_flex().px_2().py_1().gap_1().flex_none()
+                .child(
                         Button::new("remote-git-fetch")
                             .ghost().xsmall().label(if self.git_confirm_network.as_deref()
                                 == Some("fetch") { "Confirm Fetch" } else { "Fetch" })
@@ -2045,7 +2056,7 @@ impl RemoteFilesView {
                                 this.git_network_action("fetch", cx)
                             })),
                     )
-                    .child(
+                .child(
                         Button::new("remote-git-pull")
                             .ghost().xsmall().label(if self.git_confirm_network.as_deref()
                                 == Some("pull") { "Confirm Pull" } else { "Pull" })
@@ -2056,7 +2067,7 @@ impl RemoteFilesView {
                                 this.git_network_action("pull", cx)
                             })),
                     )
-                    .child(
+                .child(
                         Button::new("remote-git-push")
                             .ghost().xsmall().label(if self.git_confirm_network.as_deref()
                                 == Some("push") { "Confirm Push" } else { "Push" })
@@ -2067,15 +2078,7 @@ impl RemoteFilesView {
                                 this.git_network_action("push", cx)
                             })),
                     )
-                    .child(
-                        Button::new("remote-git-close").ghost().xsmall()
-                            .icon(Icon::new(IconName::X))
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(RemoteFilesEvent::Close);
-                            })),
-                    ),
             )
-            .child(self.render_tabs(cx))
             .when(self.git_loading, |panel| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child("Reading status from remote Git…"),
@@ -2107,7 +2110,7 @@ impl RemoteFilesView {
                     .border_color(ui::border()).px_3().text_size(px(10.))
                     .text_color(ui::muted())
                     .child(if self.git.as_ref().is_some_and(|s| s.writes_enabled) {
-                        "Remote Git · guarded writes · no push/discard"
+                        "Remote Git · guarded operations · confirmation required"
                     } else {
                         "Remote Git · read-only · open a new 5D agent for writes"
                     }),
