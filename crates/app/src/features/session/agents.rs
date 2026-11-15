@@ -613,7 +613,10 @@ impl SessionView {
                 "No background jobs yet. Commands the agent runs in the background show up here.",
             ),
             AgentsTab::Jobs => {
-                let (cancel, view) = (self.desktop.cancel_job_supported(), cx.entity().downgrade());
+                let (cancel, view) = (
+                    self.desktop.cancel_job_supported() && self.process().is_some(),
+                    cx.entity().downgrade(),
+                );
                 v_flex()
                     .gap_0p5()
                     .children(
