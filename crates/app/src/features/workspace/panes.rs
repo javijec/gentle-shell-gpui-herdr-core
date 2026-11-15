@@ -579,6 +579,14 @@ impl Workspace {
         if !crate::features::terminal::herdr_enabled() {
             return;
         }
+        if self.terminated_herdr_sessions.contains(&address)
+            || self.terminating_herdr_sessions.contains(&address)
+        {
+            window.push_notification(Notification::info(
+                "This Herdr session has been terminated and cannot be reopened.",
+            ), cx);
+            return;
+        }
         // A restored pane may not have copied its terminal address into the
         // chrome yet. Ask its provider as well as its persisted identity.
         let locate = |this: &Self, cx: &App| -> Option<(usize, usize, PaneId)> {
