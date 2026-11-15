@@ -92,6 +92,7 @@ pub fn register(cx: &mut App) {
                 focus,
                 title: Rc::new(move |cx: &App| title_view.read(cx).title()),
                 unsaved: None,
+                terminal_address: None,
             }
         });
     cx.set_global(PaneFactories {
