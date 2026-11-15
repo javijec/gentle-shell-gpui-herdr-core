@@ -32,9 +32,26 @@ impl Workspace {
         if let Some((tabs, active)) = self.spaces[index].saved.take() {
             for saved in tabs {
                 let leaves = saved.layout.leaves();
+                // Recover the owner agents first, regardless of their visual
+                // order in the split tree. File/History panes can then bind
+                // to the same restored Herdr addresses without spawning a
+                // replacement agent or treating Linux paths as Windows files.
+                let agents: Vec<Option<PaneId>> = leaves.iter().map(|pane| {
+                    if pane.kind == PaneKind::Agent {
+                        self.restore_pane(pane, window, cx)
+                    } else {
+                        None
+                    }
+                }).collect();
+                let mut next = 0;
                 let mut built = Vec::new();
                 let tree = saved.layout.filter_map(&mut |pane: &SavedPane| {
-                    let id = self.restore_pane(pane, window, cx);
+                    let id = if pane.kind == PaneKind::Agent {
+                        agents[next]
+                    } else {
+                        self.restore_pane(pane, window, cx)
+                    };
+                    next += 1;
                     built.push(id);
                     id
                 });
