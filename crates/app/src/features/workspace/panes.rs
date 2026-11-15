@@ -715,6 +715,14 @@ impl Workspace {
                 (kind, target)
             }
         };
+        if self.active_agent_is_remote(cx)
+            && matches!(kind, PaneKind::File | PaneKind::History)
+        {
+            window.push_notification(Notification::info(
+                "Use remote Files or History to open a pane on this Linux agent.",
+            ), cx);
+            return;
+        }
         if kind == PaneKind::Terminal && self.active_agent_is_remote(cx) {
             // A remote terminal needs a Herdr terminal.run on its machine;
             // never silently launch a Windows/local PTY.
