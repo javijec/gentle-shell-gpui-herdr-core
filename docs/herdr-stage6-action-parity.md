@@ -24,7 +24,7 @@
 | `/gentle:changes` | Files dock derecho, Changes | ChangesView remoto en dock derecho, no Machines ni Git Windows |
 | Nueva pestaña de agente | backend local | nueva sesión en la máquina y cwd Linux del agente activo |
 | Nueva terminal | PTY local | `terminal.run` remoto en máquina y cwd seleccionados |
-| Dividir en agente/terminal | nuevo pane local | agente remoto en split; terminal Herdr nueva en pestaña |
+| Dividir en agente/terminal | nuevo pane local | agente o terminal Herdr en split cuando hay espacio, pestaña si no hay espacio o cambió el panel de origen |
 | Configuración de Profiles | Desktop RPC o archivos locales heredados | **sólo** Desktop RPC de la sesión remota; se prohíbe leer config Windows |
 | Settings / Providers | configuración de la instalación Windows | se identifica explícitamente como local; no reinicia ni reconfigura agentes JaviPi |
 | Architecture Docs | GUI local de instalación/chequeo | abre directorio `docs/` Linux mediante Files; generación por agente remoto |
@@ -64,7 +64,7 @@ node --test crates/pi-rpc/tests/herdr_remote_bridge.test.cjs
 1. Local Windows: History, Changes, búsqueda Files/Branches, editar archivo, crear agente y terminal, switch con confirmación.
 2. JaviPi: misma secuencia, `Ctrl+K → History` muestra sólo commits de JaviPi y el mismo gráfico; cambio de rama desde la paleta requiere confirmación existente de Branches.
 3. `/gentle:changes` abre Changes del remoto, sin mover/cerrar Machines y sin tarjetas de herramientas Git creadas automáticamente en el chat.
-4. Con dos agentes sobre un mismo repo: iniciar una búsqueda, cambiar de agente, elegir un resultado anterior: rechazar con aviso explícito.
+4. Con dos agentes sobre un mismo repo: iniciar una búsqueda, cambiar de agente, elegir un resultado anterior: rechazar con aviso explícito. Validar también que los eventos de pantallas de sesiones que perdieron el foco no se redirijan al nuevo host.
 5. Con JaviPi desconectada: paleta no lista Windows, History indica fallo del puente y no se ejecutan acciones locales.
 6. `Ctrl+T` y New Agent dentro de una sesión JaviPi crean únicamente terminal/agente remoto; comprobar `hc ls` y que no crecen los procesos locales inesperadamente.
 7. Profiles remotos: cambios por RPC del propio agente; si es legado, error explícito en vez de `profiles.json` de Windows.
