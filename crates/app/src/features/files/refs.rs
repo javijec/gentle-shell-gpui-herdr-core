@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::ButtonVariant;
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -32,6 +32,8 @@ pub enum RefsEvent {
     Changed,
     /// Open an agent tab in this worktree's folder.
     OpenAgent(PathBuf),
+    /// Open local commit history for this repository.
+    OpenHistory(PathBuf),
     /// Herdr uses the same Branches UI; its owner executes the guarded switch.
     SwitchRemoteBranch(String),
     RemoteStash { name: String, action: StashAction },
@@ -967,7 +969,7 @@ impl RefsView {
         .into_any_element()
     }
 
-    fn render_footer(&self) -> Option<Div> {
+    fn render_footer(&self, cx: &mut Context<Self>) -> Option<Div> {
         if self.remote {
             let head = &self.remote_refs.as_ref()?.head;
             let name = head.branch.clone().unwrap_or_else(|| {
@@ -987,7 +989,9 @@ impl RefsView {
                 .child(div().pl(px(22.)).text_size(px(12.))
                     .text_color(ui::muted()).child("Herdr · remote repository")));
         }
-        let head = &self.snapshot()?.refs.head;
+        let repo = self.snapshot()?;
+        let head = &repo.refs.head;
+        let toplevel = repo.toplevel.clone();
         let title = match (&head.branch, &head.sha) {
             (Some(branch), _) => branch.clone(),
             (None, Some(sha)) => format!("Detached at {sha}"),
