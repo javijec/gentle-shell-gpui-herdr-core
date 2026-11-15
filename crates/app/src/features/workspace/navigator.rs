@@ -648,7 +648,6 @@ impl Workspace {
         &mut self,
         source: &NavigatorSessionSource,
         rename_on_double_click: bool,
-        click_count: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -659,7 +658,7 @@ impl Workspace {
                 }
                 self.activate(*tab, window, cx);
                 self.focus_pane(*pane, window, cx);
-                if rename_on_double_click && click_count >= 2 {
+                if rename_on_double_click {
                     self.start_tab_rename(*tab, window, cx);
                 }
             }
@@ -681,9 +680,9 @@ impl Workspace {
         }
     }
 
-    /// Herdr-style compact Machines rail: always visible, icon-only.
-    /// A click expands the full tree with its previous width intact. No
-    /// session is created, restored or terminated by this navigation.
+    /// The narrow rail is a fully functional session switcher, not a list
+    /// of computers. Each computer is a small visual group header and every
+    /// agent/terminal beneath it is directly selectable without expanding.
     pub(super) fn render_machine_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let groups = self.navigator_groups();
         let active_machine = self.active_navigator_machine_key();
@@ -720,19 +719,19 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .py_2()
+                    .py_1()
                     .child(
                         v_flex()
                             .w_full()
-                            .gap_1()
-                            .children(groups.into_iter().enumerate().map(|(index, group)| {
+                            .gap_2()
+                            .children(groups.into_iter().enumerate().map(|(group_index, group)| {
+                                let group_active = group.key == active_machine;
+                                let key = group.key.clone();
                                 let icon = if group.local {
                                     IconName::SquareTerminal
                                 } else {
                                     IconName::Layers
                                 };
-                                let active = group.key == active_machine;
-                                let group_key = group.key.clone();
                                 let state = navigator_machine_status(&group.state);
                                 let indicator = match group.state.as_str() {
                                     "connected" => ui::accent(),
@@ -740,62 +739,134 @@ impl Workspace {
                                     "needs_login" | "needs_update" | "unreachable" => ui::warning(),
                                     _ => ui::muted(),
                                 };
+                                let name = group.name.clone();
                                 let count = group.sessions.len();
-                                let tooltip = format!(
-                                    "{} · {state} · {count} session{} · Click to expand",
-                                    group.name, if count == 1 { "" } else { "s" },
+                                let header_tip = format!(
+                                    "{name} · {state} · {count} session{} · Expand machine",
+                                    if count == 1 { "" } else { "s" },
                                 );
-                                div()
-                                    .id(("machine-rail-item", index))
+                                v_flex()
+                                    .id(("machine-rail-group", group_index))
                                     .w_full()
-                                    .h(px(42.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(6.))
-                                    .cursor_pointer()
-                                    .when(active, |row| row.bg(ui::surface_hover().opacity(0.85)))
-                                    .hover(|row| row.bg(ui::surface_hover().opacity(0.55)))
-                                    .tooltip(move |window, cx| {
-                                        Tooltip::new(tooltip.clone()).build(window, cx)
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.expand_machine_from_rail(group_key.clone(), cx);
-                                    }))
+                                    .gap(px(2.))
                                     .child(
-                                        v_flex()
+                                        div()
+                                            .id(("machine-rail-header", group_index))
+                                            .w_full()
+                                            .h(px(29.))
+                                            .flex()
                                             .items_center()
-                                            .gap(px(3.))
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .rounded(px(5.))
+                                            .when(group_active, |row| {
+                                                row.bg(ui::surface_hover().opacity(0.35))
+                                            })
+                                            .hover(|row| row.bg(ui::surface_hover().opacity(0.55)))
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(header_tip.clone()).build(window, cx)
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.expand_machine_from_rail(key.clone(), cx);
+                                            }))
                                             .child(
-                                                Icon::new(icon)
-                                                    .small()
-                                                    .text_color(if active {
-                                                        ui::petal()
-                                                    } else if group.connected {
-                                                        ui::fg()
-                                                    } else {
-                                                        ui::muted()
-                                                    }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .size(px(5.))
-                                                    .rounded_full()
-                                                    .bg(indicator),
-                                            )
-                                            .when(count > 0, |item| {
-                                                item.child(
-                                                    div()
-                                                        .text_size(px(9.))
-                                                        .text_color(ui::muted())
-                                                        .child(if count > 99 {
-                                                            "99+".to_string()
-                                                        } else {
-                                                            count.to_string()
-                                                        }),
-                                                )
-                                            }),
+                                                h_flex()
+                                                    .gap(px(3.))
+                                                    .items_center()
+                                                    .child(
+                                                        Icon::new(icon)
+                                                            .xsmall()
+                                                            .text_color(if group_active {
+                                                                ui::petal()
+                                                            } else {
+                                                                ui::muted()
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .size(px(5.))
+                                                            .rounded_full()
+                                                            .bg(indicator),
+                                                    ),
+                                            ),
                                     )
+                                    // Session rows remain visible even if the
+                                    // corresponding full-width group is closed.
+                                    .children(group.sessions.into_iter().enumerate().map(
+                                        |(_session_index, session)| {
+                                            let source = session.source.clone();
+                                            let active = matches!(
+                                                &source,
+                                                NavigatorSessionSource::Open { space, tab, pane }
+                                                    if *space == self.current
+                                                        && *tab == self.space().active
+                                                        && self.tab().is_some_and(|t| t.focused == *pane)
+                                            );
+                                            let title = session.title.clone();
+                                            let kind = session.kind;
+                                            let running = session.running;
+                                            let directory = session.directory.clone()
+                                                .unwrap_or_else(|| "cwd unavailable".into());
+                                            let mut details = format!(
+                                                "{name} · {kind}: {title} · {directory}",
+                                            );
+                                            if let Some(address) = &session.address {
+                                                details.push_str(&format!(" · {address}"));
+                                            }
+                                            let icon = session.icon;
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "machine-rail-session-{}", session.row_id,
+                                                )))
+                                                .w_full()
+                                                .h(px(39.))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .rounded(px(6.))
+                                                .when(active, |row| {
+                                                    row.bg(ui::surface_hover().opacity(0.9))
+                                                })
+                                                .hover(|row| {
+                                                    row.bg(ui::surface_hover().opacity(0.5))
+                                                })
+                                                .tooltip(move |window, cx| {
+                                                    Tooltip::new(details.clone()).build(window, cx)
+                                                })
+                                                .on_click(cx.listener(move |this, _, window, cx| {
+                                                    this.select_navigator_session(
+                                                        &source, false, window, cx,
+                                                    );
+                                                }))
+                                                .child(
+                                                    v_flex()
+                                                        .items_center()
+                                                        .gap(px(3.))
+                                                        .child(
+                                                            Icon::new(icon)
+                                                                .small()
+                                                                .text_color(if active {
+                                                                    ui::petal()
+                                                                } else if running {
+                                                                    ui::accent()
+                                                                } else {
+                                                                    ui::muted()
+                                                                }),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .size(px(5.))
+                                                                .rounded_full()
+                                                                .bg(if running {
+                                                                    ui::accent()
+                                                                } else {
+                                                                    ui::muted()
+                                                                }),
+                                                        ),
+                                                )
+                                        },
+                                    )),
                             })),
                     ),
             )
@@ -1159,7 +1230,7 @@ impl Workspace {
                                                         })
                                                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                                                             this.select_navigator_session(
-                                                                &source, true, event.click_count(), window, cx,
+                                                                &source, event.click_count() >= 2, window, cx,
                                                             );
                                                         }))
                                                         .child(
