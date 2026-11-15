@@ -489,6 +489,7 @@ pub struct RemoteFilesView {
     git_confirm_create: Option<String>,
     git_confirm_switch: Option<String>,
     git_confirm_stash: Option<(String, StashAction)>,
+    git_confirm_network: Option<String>,
     _git_events: Vec<Subscription>,
     focus: FocusHandle,
     tree_children: HashMap<String, Vec<RemoteEntry>>,
@@ -754,6 +755,7 @@ impl RemoteFilesView {
             git_confirm_create: None,
             git_confirm_switch: None,
             git_confirm_stash: None,
+            git_confirm_network: None,
             _git_events: git_events,
             focus: cx.focus_handle(),
             tree_children: HashMap::new(),
@@ -1517,6 +1519,7 @@ impl RemoteFilesView {
         self.git_confirm_create = None;
         self.git_confirm_switch = None;
         self.git_confirm_stash = None;
+        self.git_confirm_network = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
             view.mark_remote_stash(None, cx);
@@ -1611,6 +1614,7 @@ impl RemoteFilesView {
         self.git_confirm_create = None;
         self.git_confirm_switch = None;
         self.git_confirm_stash = None;
+        self.git_confirm_network = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
             view.mark_remote_stash(None, cx);
@@ -1726,6 +1730,30 @@ impl RemoteFilesView {
             "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
             "expectedIndexToken": snapshot.index_token,
             "branch": branch,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_network_action(&mut self, action: &'static str, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|s|
+            s.writes_enabled && s.head_oid.is_some()
+                && s.current_branch.is_some() && s.index_token.is_some()
+        ) else { return; };
+        if !matches!(action, "fetch" | "pull" | "push") { return; }
+        if self.git_confirm_network.as_deref() != Some(action) {
+            self.git_confirm_network = Some(action.to_owned());
+            self.git_feedback = Some(format!(
+                "Confirm {action}: contact the configured Git remote?",
+            ));
+            cx.notify();
+            return;
+        }
+        let command = json!({
+            "type": format!("herdr_git_{action}"),
+            "root": self.root, "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
         });
         self.git_write(command, cx);
     }
@@ -1908,6 +1936,39 @@ impl RemoteFilesView {
                             .disabled(self.git_busy || self.git_loading)
                             .tooltip("Refresh remote Git status and branches")
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_git(cx))),
+                    )
+                    .child(
+                        Button::new("remote-git-fetch")
+                            .ghost().xsmall().label(if self.git_confirm_network.as_deref()
+                                == Some("fetch") { "Confirm Fetch" } else { "Fetch" })
+                            .disabled(self.git_busy || self.git_loading ||
+                                !self.git.as_ref().is_some_and(|s| s.writes_enabled))
+                            .tooltip("Fetch refs from a safe configured remote")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.git_network_action("fetch", cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("remote-git-pull")
+                            .ghost().xsmall().label(if self.git_confirm_network.as_deref()
+                                == Some("pull") { "Confirm Pull" } else { "Pull" })
+                            .disabled(self.git_busy || self.git_loading ||
+                                !self.git.as_ref().is_some_and(|s| s.writes_enabled))
+                            .tooltip("Fast-forward only; refuses a dirty tree")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.git_network_action("pull", cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("remote-git-push")
+                            .ghost().xsmall().label(if self.git_confirm_network.as_deref()
+                                == Some("push") { "Confirm Push" } else { "Push" })
+                            .disabled(self.git_busy || self.git_loading ||
+                                !self.git.as_ref().is_some_and(|s| s.writes_enabled))
+                            .tooltip("Non-force push of only this branch")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.git_network_action("push", cx)
+                            })),
                     )
                     .child(
                         Button::new("remote-git-close").ghost().xsmall()
