@@ -631,7 +631,10 @@ impl Workspace {
                 cwd,
                 AgentPaneInit {
                     restored_herdr: Some(address),
-                    start_now: false,
+                    // Explicit user selection requests an immediate REATTACH,
+                    // even if the global discovery pass previously failed.
+                    // The restored address is never replaced by terminal.run.
+                    start_now: true,
                     ..Default::default()
                 },
                 window,
