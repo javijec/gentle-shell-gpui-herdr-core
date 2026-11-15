@@ -20,6 +20,7 @@ use super::backend::{
 };
 use gentle_core::git::status::{EntryKind, StatusEntry as RemoteGitFile};
 use super::changes_ui::{ChangeSide, change_row, section_header, side_entries};
+use super::branches_ui::{BranchDisplay, branch_row};
 use super::tabs::FilePanelTab as RemoteTab;
 use super::viewer::MdMode;
 use crate::shared::ui;
@@ -960,33 +961,24 @@ unstaged files stay untouched."))
     ) {
         let name = branch.name.clone();
         let confirmed = self.git_confirm_switch.as_deref() == Some(name.as_str());
+        let action = (writable && branch.local && !branch.current).then(|| {
+            Button::new(format!("remote-git-switch-{index}"))
+                .ghost()
+                .xsmall()
+                .label(if confirmed { "Confirm switch" } else { "Switch" })
+                .disabled(self.git_busy || self.git_loading)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.git_switch_branch(name.clone(), cx);
+                }))
+                .into_any_element()
+        });
         rows.push(
-            h_flex()
-                .id(("remote-git-branch", index))
-                .h(px(32.)).px_3().gap_2()
-                .child(Icon::new(IconName::GitBranch).small()
-                    .text_color(if branch.current {
-                        ui::success()
-                    } else { ui::muted() }))
-                .child(div().flex_1().min_w_0().truncate().text_xs()
-                    .font_weight(if branch.current {
-                        FontWeight::SEMIBOLD
-                    } else { FontWeight::NORMAL })
-                    .child(branch.name.clone()))
-                .when(branch.current, |row| row.child(
-                    div().text_xs().text_color(ui::success())
-                        .child("HEAD"),
-                ))
-                .when(writable && branch.local && !branch.current, |row| row.child(
-                    Button::new(format!("remote-git-switch-{index}"))
-                        .ghost().xsmall()
-                        .label(if confirmed { "Confirm switch" } else { "Switch" })
-                        .disabled(self.git_busy || self.git_loading)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.git_switch_branch(name.clone(), cx);
-                        })),
-                ))
-                .into_any_element(),
+            branch_row(
+                SharedString::from(format!("remote-git-branch-{index}")),
+                BranchDisplay::from_remote(&branch.name, branch.current),
+                action,
+            )
+            .into_any_element(),
         );
     }
 
