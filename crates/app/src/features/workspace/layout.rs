@@ -77,6 +77,26 @@ pub(super) fn resized_dock_width(
     pointer.clamp(minimum, maximum)
 }
 
+impl Workspace {
+    /// Both Files variants share a custom width; before the first drag their
+    /// original local (260px) and remote (330px) defaults remain unchanged.
+    pub(super) fn dock_widths(
+        &self,
+        viewport: f32,
+        selected_remote: bool,
+        machines_visible: bool,
+        files_visible: bool,
+    ) -> (f32, f32) {
+        fit_dock_widths(
+            viewport,
+            machines_visible.then_some(self.machines_dock_width),
+            files_visible.then_some(self.files_dock_width.unwrap_or(
+                if selected_remote { SIDEBAR_WIDTH + 70. } else { SIDEBAR_WIDTH },
+            )),
+        )
+    }
+}
+
 /// Whether a `w`×`h` pane split along `axis` leaves both halves usable.
 pub(super) fn fits_split(axis: SplitAxis, w: f32, h: f32) -> bool {
     match axis {
