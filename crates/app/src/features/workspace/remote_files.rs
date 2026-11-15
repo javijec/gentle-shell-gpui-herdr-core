@@ -6,7 +6,7 @@ use super::*;
 
 /// Scope a browser click to the currently selected remote agent's Linux
 /// project; the bridge additionally checks symlinks and realpath.
-fn remote_file_in_root(root: &str, path: &str) -> bool {
+pub(super) fn remote_file_in_root(root: &str, path: &str) -> bool {
     if root.is_empty() || !root.starts_with('/') || !path.starts_with('/')
         || path == root || path.len() > 2048 || path.contains('\\')
         || path.bytes().any(|byte| byte < 32 || byte == 127)
