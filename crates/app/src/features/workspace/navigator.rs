@@ -207,6 +207,45 @@ impl Workspace {
         }
     }
 
+    /// Start a Herdr terminal on the requested machine, independent of the
+    /// currently selected agent. Never spawn Pi when Terminal is selected.
+    fn new_terminal_in_group(
+        &mut self,
+        machine: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if crate::features::terminal::herdr_enabled() {
+            if let Some(name) = &machine
+                && !self.machine_snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot.machines.iter().any(|item| {
+                        item.name == *name && item.connected()
+                    })
+                })
+            {
+                window.push_notification(Notification::info(
+                    format!("{name} is disconnected. No terminal was created."),
+                ), cx);
+                return;
+            }
+            let task = cx.background_executor().spawn(async move {
+                machine_model::create_shell(machine.as_deref())
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                let _ = this.update_in(cx, |this, window, cx| match result {
+                    Ok(address) => this.open_herdr_terminal(address, window, cx),
+                    Err(error) => window.push_notification(
+                        Notification::error(error), cx,
+                    ),
+                });
+            }).detach();
+        } else if machine.is_none() {
+            let cwd = self.active_cwd(cx);
+            self.open_tab(PaneKind::Terminal, cwd, None, None, window, cx);
+        }
+    }
+
     pub(super) fn render_machine_navigator(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let groups = self.navigator_groups();
         let herdr = crate::features::terminal::herdr_enabled();
@@ -344,28 +383,63 @@ impl Workspace {
                                                     .text_color(ui::muted())
                                                     .child(group.sessions.len().to_string()),
                                             )
-                                            .child(
-                                                Button::new(("navigator-add-machine", group_index))
-                                                    .ghost()
-                                                    .xsmall()
-                                                    .icon(Icon::new(IconName::Bot))
-                                                    .tooltip(if available {
-                                                        "New agent on this machine"
-                                                    } else {
-                                                        "Machine disconnected"
+                                            .child({
+                                                // Do not bubble the + click into the
+                                                // machine row's expand/collapse handler.
+                                                let weak = cx.entity().downgrade();
+                                                div()
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                        cx.stop_propagation();
                                                     })
-                                                    .when(available, |button| {
-                                                        button.on_click(cx.listener(
-                                                            move |this, _, window, cx| {
-                                                                cx.stop_propagation();
-                                                                this.new_agent_in_group(
-                                                                    machine_for_add.clone(),
-                                                                    window, cx,
-                                                                )
-                                                            },
-                                                        ))
-                                                    }),
-                                            ),
+                                                    .child(
+                                                        Button::new(("navigator-new-session", group_index))
+                                                            .ghost()
+                                                            .xsmall()
+                                                            .icon(Icon::new(IconName::Plus))
+                                                            .tooltip(if available {
+                                                                "New Gentle Shell or Terminal"
+                                                            } else {
+                                                                "Machine disconnected"
+                                                            })
+                                                            .when(available, |button| {
+                                                                button.dropdown_menu(move |menu, _, _| {
+                                                                    let weak_agent = weak.clone();
+                                                                    let weak_terminal = weak.clone();
+                                                                    let agent_machine = machine_for_add.clone();
+                                                                    let terminal_machine = machine_for_add.clone();
+                                                                    menu.min_w(px(210.))
+                                                                        .item(
+                                                                            PopupMenuItem::element(|_, _| {
+                                                                                h_flex().gap_2().px_2().py_1p5()
+                                                                                    .child(Icon::new(IconName::Bot).small())
+                                                                                    .child("Gentle Shell")
+                                                                            })
+                                                                            .on_click(move |_, window, cx| {
+                                                                                let _ = weak_agent.update(cx, |this, cx| {
+                                                                                    this.new_agent_in_group(
+                                                                                        agent_machine.clone(), window, cx,
+                                                                                    );
+                                                                                });
+                                                                            }),
+                                                                        )
+                                                                        .item(
+                                                                            PopupMenuItem::element(|_, _| {
+                                                                                h_flex().gap_2().px_2().py_1p5()
+                                                                                    .child(Icon::new(IconName::SquareTerminal).small())
+                                                                                    .child("Terminal")
+                                                                            })
+                                                                            .on_click(move |_, window, cx| {
+                                                                                let _ = weak_terminal.update(cx, |this, cx| {
+                                                                                    this.new_terminal_in_group(
+                                                                                        terminal_machine.clone(), window, cx,
+                                                                                    );
+                                                                                });
+                                                                            }),
+                                                                        )
+                                                                })
+                                                            }),
+                                                    )
+                                            }),
                                     )
                                     .when(!collapsed, |section| {
                                         section.child(
