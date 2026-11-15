@@ -12,6 +12,9 @@ fn sample() -> SavedState {
         session: Some(PathBuf::from("/tmp/sessions/a.jsonl")),
         herdr_terminal: None,
         agent_target: None,
+        remote_path: None,
+        remote_owner: None,
+        remote_draft: None,
     };
     let terminal = SavedPane {
         kind: PaneKind::Terminal,
@@ -20,6 +23,9 @@ fn sample() -> SavedState {
         session: None,
         herdr_terminal: Some("remote/t7".to_string()),
         agent_target: None,
+        remote_path: None,
+        remote_owner: None,
+        remote_draft: None,
     };
     let file = SavedPane {
         kind: PaneKind::File,
@@ -28,6 +34,9 @@ fn sample() -> SavedState {
         session: None,
         herdr_terminal: None,
         agent_target: None,
+        remote_path: None,
+        remote_owner: None,
+        remote_draft: None,
     };
     SavedState {
         version: VERSION,
@@ -113,6 +122,9 @@ fn agent_herdr_address_round_trip_and_legacy_layout_are_compatible() {
         session: Some(PathBuf::from("/home/dietpi/.gentle-shell/agent/sessions/chat.jsonl")),
         herdr_terminal: Some("javipi/t42".into()),
         agent_target: Some(pi_rpc::AgentTarget::remote_for_machine("javipi".into())),
+        remote_path: None,
+        remote_owner: None,
+        remote_draft: None,
     };
     let json = serde_json::to_string(&saved).unwrap();
     assert!(json.contains(r#""herdr_terminal":"javipi/t42""#));
@@ -121,6 +133,35 @@ fn agent_herdr_address_round_trip_and_legacy_layout_are_compatible() {
         r#"{"kind":"agent","cwd":"D:/Programacion/my-project"}"#,
     ).unwrap();
     assert!(old.herdr_terminal.is_none());
+}
+
+#[test]
+fn remote_file_draft_round_trip_is_bound_to_original_revision_and_terminal() {
+    let saved = SavedPane {
+        kind: PaneKind::File,
+        cwd: PathBuf::from("D:/Programacion/project"),
+        path: None,
+        session: None,
+        herdr_terminal: None,
+        agent_target: Some(pi_rpc::AgentTarget::Remote {
+            machine: "javipi".into(), cwd: "/srv/project".into(),
+        }),
+        remote_path: Some("/srv/project/src/main.rs".into()),
+        remote_owner: Some("javipi/t12".into()),
+        remote_draft: Some(super::SavedRemoteDraft {
+            path: "/srv/project/src/main.rs".into(),
+            content: "unfinished changes".into(),
+            revision: "f".repeat(64),
+        }),
+    };
+    let json = serde_json::to_string(&saved).unwrap();
+    assert_eq!(serde_json::from_str::<SavedPane>(&json).unwrap(), saved);
+    assert!(!json.contains("D:\\\\Programacion\\\\project\\\\src\\\\main.rs"));
+    let legacy: SavedPane = serde_json::from_str(
+        r#"{"kind":"file","cwd":"D:/project","path":"D:/project/file.txt"}"#,
+    ).unwrap();
+    assert!(legacy.remote_path.is_none());
+    assert!(legacy.remote_draft.is_none());
 }
 
 #[test]
@@ -135,6 +176,9 @@ fn selected_local_and_remote_agents_survive_workspace_round_trip() {
             machine: "javipi".into(),
             cwd: "/srv/workspaces/JaviPi".into(),
         }),
+        remote_path: None,
+        remote_owner: None,
+        remote_draft: None,
     };
     let local = SavedPane {
         agent_target: Some(pi_rpc::AgentTarget::Local),
