@@ -559,9 +559,12 @@ impl Workspace {
             None => this.current,
         };
         this.current = target;
-        // Opening the desktop or restoring a workspace is never permission
-        // to create an agent. An explicit CLI prompt remains a user request.
-        this.ensure_open(target, window, cx);
+        // Leave saved tabs dormant on application startup. Machines lists
+        // their identities without instantiating any agent view or starting
+        // a backend. Only an explicit CLI prompt may open a tab immediately.
+        if prompt.is_some() {
+            this.ensure_open(target, window, cx);
+        }
         if let Some(prompt) = prompt {
             let root = this.space().root.clone();
             this.open_tab(PaneKind::Agent, root, Some(prompt), None, window, cx);
