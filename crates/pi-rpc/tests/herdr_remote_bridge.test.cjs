@@ -865,6 +865,70 @@ async function gitWrite(h, root, snapshot, type, id, props = {}) {
   return fsReply(h, id);
 }
 
+test("Stage 5 Git Discard is revision-fenced and untracked files go to Trash", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-discard-"));
+  try {
+    const git = gitInit(root);
+    fs.writeFileSync(path.join(root, "tracked.txt"), "modified\n");
+    fs.writeFileSync(path.join(root, "new.txt"), "recoverable");
+    const h = harness(root);
+    let snap = await gitSnapshot(h, root, "discard-start");
+    const modified = snap.files.find((f) => f.path === "tracked.txt");
+    const untracked = snap.files.find((f) => f.path === "new.txt");
+    assert.ok(modified && untracked);
+    const stale = await gitWrite(h, root, snap, "herdr_git_discard",
+      "discard-stale", {
+        path: path.join(root, modified.path),
+        expectedIndex: "X", expectedWorktree: modified.worktree, staged: false,
+      });
+    assert.equal(stale.success, false);
+    const clean = await gitWrite(h, root, snap, "herdr_git_discard",
+      "discard-tracked", {
+        path: path.join(root, modified.path),
+        expectedIndex: modified.index,
+        expectedWorktree: modified.worktree, staged: false,
+      });
+    assert.equal(clean.success, true, clean.error);
+    assert.equal(fs.readFileSync(path.join(root, "tracked.txt"), "utf8"), "first\n");
+    const trashed = await gitWrite(h, root, snap, "herdr_git_discard",
+      "discard-untracked", {
+        path: path.join(root, untracked.path),
+        expectedIndex: untracked.index,
+        expectedWorktree: untracked.worktree,
+        staged: false,
+      });
+    assert.equal(trashed.success, true, trashed.error);
+    assert.match(trashed.data.trashToken, /^[a-z0-9]+-[a-f0-9]{24}$/);
+    assert.equal(fs.existsSync(path.join(root, "new.txt")), false);
+    rpcInput(h, {
+      type: "herdr_fs_restore", id: "discard-undo", root,
+      token: trashed.data.trashToken,
+    });
+    const undone = await fsReply(h, "discard-undo");
+    assert.equal(undone.success, true, undone.error);
+    assert.equal(fs.readFileSync(path.join(root, "new.txt"), "utf8"), "recoverable");
+
+    fs.writeFileSync(path.join(root, "tracked.txt"), "staged version\n");
+    git("add", "--", "tracked.txt");
+    snap = await gitSnapshot(h, root, "discard-staged-snapshot");
+    const staged = snap.files.find((f) => f.path === "tracked.txt");
+    const reset = await gitWrite(h, root, snap, "herdr_git_discard",
+      "discard-staged", {
+        path: path.join(root, "tracked.txt"),
+        expectedIndex: staged.index, expectedWorktree: staged.worktree,
+        staged: true,
+      });
+    assert.equal(reset.success, true, reset.error);
+    assert.equal(fs.readFileSync(path.join(root, "tracked.txt"), "utf8"), "first\n");
+    assert.equal(h.childWrites.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Stage 5 guarded stash push/apply/drop checks status and stash OID", {
   skip: process.platform === "win32",
 }, async () => {
