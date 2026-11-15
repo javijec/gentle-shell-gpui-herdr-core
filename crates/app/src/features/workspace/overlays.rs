@@ -256,8 +256,14 @@ impl Workspace {
             Screen::Changes => {
                 let target = session.or_else(|| self.active_session());
                 if target.as_ref().is_some_and(|agent| agent.read(cx).is_remote_herdr()) {
-                    // Use the selected Linux agent's existing RPC bridge.
-                    // Never show the Windows Git tree for a remote command.
+                    // An event from a background agent cannot redirect this
+                    // view to a different remote or the Windows worktree.
+                    if target != self.active_session() {
+                        window.push_notification(Notification::info(
+                            "Select the originating remote agent before opening its Changes.",
+                        ), cx);
+                        return;
+                    }
                     self.show_selected_remote_changes(window, cx);
                 } else {
                     let Some(tree) = self
@@ -368,6 +374,13 @@ impl Workspace {
     }
 
     pub(super) fn open_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_agent_is_remote(cx) {
+            window.push_notification(Notification::info(
+                "Saved Sessions browsing is local to this computer. Showing live Herdr machines and terminals; no Windows session will be opened on JaviPi.",
+            ), cx);
+            self.open_machines(window, cx);
+            return;
+        }
         self.start_active_session(window, cx);
         let cwd = self.active_cwd(cx);
         let current = self
@@ -463,6 +476,11 @@ impl Workspace {
     }
 
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_agent_is_remote(cx) {
+            window.push_notification(Notification::info(
+                "Settings manages this Windows desktop and local Gentle Shell installation. Remote agent settings are not modified by this screen.",
+            ), cx);
+        }
         self.start_active_session(window, cx);
         let cwd = self.active_cwd(cx);
         let view = cx.new(|cx| SettingsView::new(cwd, window, cx));
@@ -531,6 +549,13 @@ impl Workspace {
     }
 
     pub(super) fn open_docs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_agent_is_remote(cx) {
+            self.show_selected_remote_docs(window, cx);
+            window.push_notification(Notification::info(
+                "Showing Linux docs in Remote Files. Architecture Docs installation and checks run only in the local workspace; use the remote agent to generate or update docs.",
+            ), cx);
+            return;
+        }
         let root = self.space().root.clone();
         let skill = self.docs_skill_dir(cx);
         let view = cx.new(|cx| DocsView::new(root.clone(), skill, window, cx));
@@ -561,6 +586,12 @@ impl Workspace {
     }
 
     pub(super) fn open_memory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_agent_is_remote(cx) {
+            window.push_notification(Notification::info(
+                "The Memory browser connects to this computer's Engram, not JaviPi. Query the remote agent for its own memories.",
+            ), cx);
+            return;
+        }
         let cwd = self.active_cwd(cx);
         let view = cx.new(|cx| MemoryView::new(cwd, window, cx));
         let subscription = cx.subscribe_in(
@@ -592,6 +623,11 @@ impl Workspace {
     }
 
     pub(super) fn open_providers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_agent_is_remote(cx) {
+            window.push_notification(Notification::info(
+                "Provider accounts here belong to the Windows installation. JaviPi uses its own credentials and provider configuration.",
+            ), cx);
+        }
         let cwd = self.active_cwd(cx);
         let view = cx.new(|cx| ProvidersView::new(cwd, window, cx));
         let subscription = cx.subscribe_in(
