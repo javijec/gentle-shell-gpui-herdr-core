@@ -193,6 +193,49 @@ pub fn add_machine(target: &str, name: Option<&str>) -> Result<(), String> {
     })
 }
 
+/// Refuse to terminate an arbitrary Herdr terminal or a session whose type
+/// changed between rendering Machines and the confirmation dialog.
+fn validate_termination(record: &Value, address: &str, is_agent: bool)
+    -> Result<bool, String>
+{
+    let valid_address = !address.is_empty() && address.len() <= 256
+        && address.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/')
+        });
+    if !valid_address || record["address"].as_str() != Some(address) {
+        return Err("Herdr session identity changed; refusing to terminate it.".into());
+    }
+    let actual_agent = record["labels"]["gentle-shell"] == "rpc-agent";
+    if is_agent != actual_agent {
+        return Err("Herdr session type changed; refresh Machines and retry.".into());
+    }
+    match record["state"].as_str() {
+        Some("live") => Ok(true),
+        Some("exited" | "finished" | "killed" | "stopped" | "dead") => Ok(false),
+        _ => Err("Herdr session state is unknown; not terminating.".into()),
+    }
+}
+
+/// Terminate the exact Herdr session, not merely its GPUI viewer. Called
+/// asynchronously by Workspace; no UI session is removed on an RPC error.
+pub fn terminate_session(address: &str, is_agent: bool) -> Result<(), String> {
+    if address.is_empty() || address.len() > 256
+        || !address.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/')
+        })
+    {
+        return Err("Invalid Herdr session address.".into());
+    }
+    let mut client = client()?;
+    let record = client.call("terminal.get", json!({"terminal": address}))
+        .map_err(|error| error.to_string())?;
+    if validate_termination(&record, address, is_agent)? {
+        client.call("terminal.kill", json!({"terminal": address}))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn connect_machine(name: &str) -> Result<(), String> {
     let mut client = client()?;
     client.call("machine.connect", json!({"machine": name}))
@@ -203,7 +246,7 @@ pub fn connect_machine(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use super::{machine_add_params, parse_machine, parse_terminal};
+    use super::{machine_add_params, parse_machine, parse_terminal, validate_termination};
 
     #[test]
     fn machine_registration_uses_ssh_target_and_optional_name() {
@@ -225,6 +268,26 @@ mod tests {
         for name in ["space name", "bad/name", "bad\nname"] {
             assert!(machine_add_params("workbox", Some(name)).is_err());
         }
+    }
+
+    #[test]
+    fn terminate_only_matching_herdr_session_and_type() {
+        let agent = json!({
+            "address": "javipi/t12", "state": "live",
+            "labels":{"gentle-shell":"rpc-agent"}
+        });
+        assert_eq!(validate_termination(&agent, "javipi/t12", true), Ok(true));
+        assert!(validate_termination(&agent, "javipi/t12", false).is_err());
+        assert!(validate_termination(&agent, "javipi/t13", true).is_err());
+        assert!(validate_termination(&agent, "../t12", true).is_err());
+        let finished = json!({
+            "address":"javipi/t12", "state":"exited",
+            "labels":{"gentle-shell":"rpc-agent"}
+        });
+        assert_eq!(validate_termination(&finished, "javipi/t12", true), Ok(false));
+        let shell = json!({"address":"t8", "state":"live"});
+        assert_eq!(validate_termination(&shell, "t8", false), Ok(true));
+        assert!(validate_termination(&shell, "t8", true).is_err());
     }
 
     #[test]
