@@ -25,12 +25,6 @@ impl ChangeSide {
         }
     }
 
-    pub(super) fn action_label(self) -> &'static str {
-        match self {
-            Self::Unstaged => "Stage all",
-            Self::Staged => "Unstage all",
-        }
-    }
 }
 
 pub(super) fn side_entries(entries: &[StatusEntry], side: ChangeSide) -> Vec<(usize, char)> {
