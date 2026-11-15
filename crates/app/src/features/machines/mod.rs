@@ -68,7 +68,7 @@ impl MachinesView {
         view
     }
 
-    fn begin_add_machine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn begin_add_machine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !crate::features::terminal::herdr_enabled() || self.busy {
             return;
         }
