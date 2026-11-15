@@ -398,7 +398,12 @@ impl Workspace {
                 MachinesEvent::OpenTerminal(address) => {
                     let address = address.clone();
                     this.close_overlay(window, cx);
-                    this.show_or_attach_herdr_terminal(address, window, cx);
+                    this.show_or_attach_herdr_session(address, false, window, cx);
+                }
+                MachinesEvent::OpenExisting { address, agent } => {
+                    let (address, agent) = (address.clone(), *agent);
+                    this.close_overlay(window, cx);
+                    this.show_or_attach_herdr_session(address, agent, window, cx);
                 }
                 MachinesEvent::NewAgent(machine) => {
                     let machine = machine.clone();
