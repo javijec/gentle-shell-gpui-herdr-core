@@ -435,9 +435,12 @@ impl Workspace {
             })
             .collect();
         let session = self.active_session();
+        let owner = session.clone();
         let view = cx.new(|cx| ProfilesView::new(cwd, models, session, window, cx));
-        let subscription = cx.subscribe_in(&view, window, |this, _, event: &ProfilesEvent, window, cx| {
-            let tab = this.active_session();
+        let subscription = cx.subscribe_in(&view, window, move |this, _, event: &ProfilesEvent, window, cx| {
+            // Profile actions must reach the session that opened the screen,
+            // never whichever machine happened to gain focus since then.
+            let tab = owner.clone();
             match event {
                 ProfilesEvent::Close => this.close_overlay(window, cx),
                 ProfilesEvent::Changed => {}
@@ -530,10 +533,11 @@ impl Workspace {
                         let _ = view.update(cx, |view, cx| view.shell_done(result, cx));
                     };
                     match this.active_session() {
-                        Some(session) => session.update(cx, |session, cx| {
-                            session.run_extension_command(text.clone(), cx, report)
-                        }),
-                        None => report(
+                        Some(session) if !session.read(cx).is_remote_herdr() =>
+                            session.update(cx, |session, cx| {
+                                session.run_extension_command(text.clone(), cx, report)
+                            }),
+                        _ => report(
                             Err(
                                 "Open an agent tab first: Gentle Shell applies this setting."
                                     .into(),
