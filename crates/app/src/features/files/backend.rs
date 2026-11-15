@@ -59,6 +59,12 @@ pub(super) enum WorkspaceEntryAction {
     CopyTo(WorkspacePath),
 }
 
+/// Trash receipt: remote tokens allow guarded in-app restore.
+pub(super) struct WorkspaceTrashReceipt {
+    pub path: WorkspacePath,
+    pub token: Option<String>,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum GitFileAction {
     Stage,
@@ -337,6 +343,73 @@ impl WorkspaceBackend {
                     Ok(WorkspacePath::Herdr(path))
                 }
                 _ => Err("Workspace path does not belong to the selected backend".into()),
+            }
+        })
+    }
+
+    /// Recoverable Trash. Native uses the OS Trash; Herdr stores a private
+    /// sibling-volume entry and returns a token for a safe Restore.
+    pub fn trash(self, source: WorkspacePath) -> BackendFuture<WorkspaceTrashReceipt> {
+        Box::pin(async move {
+            match (self, source) {
+                (Self::Local { root }, WorkspacePath::Local(path)) => {
+                    ensure_local_path(&root, &path)?;
+                    if path == root {
+                        return Err("Cannot trash workspace root".into());
+                    }
+                    ops::trash(&path)?;
+                    Ok(WorkspaceTrashReceipt {
+                        path: WorkspacePath::Local(path), token: None,
+                    })
+                }
+                (Self::Herdr { root, process }, WorkspacePath::Herdr(path)) => {
+                    ensure_herdr_path(&root, &path)?;
+                    if path == root || root == "/" {
+                        return Err("Cannot trash remote workspace root".into());
+                    }
+                    let response = process.request(json!({
+                        "type": "herdr_fs_trash", "root": root, "path": path,
+                    })).await.map_err(|err| err.to_string())?;
+                    if response.data["path"].as_str() != Some(path.as_str()) {
+                        return Err("Trash returned unexpected path".into());
+                    }
+                    let token = response.data["token"].as_str()
+                        .filter(|id| id.len() <= 64
+                            && id.bytes().all(|ch|
+                                ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-'))
+                        .ok_or("Invalid Trash receipt")?.to_owned();
+                    Ok(WorkspaceTrashReceipt {
+                        path: WorkspacePath::Herdr(path), token: Some(token),
+                    })
+                }
+                _ => Err("Workspace path does not belong to the selected backend".into()),
+            }
+        })
+    }
+
+    /// Undo a previously confirmed Herdr Trash action. The bridge loads
+    /// the original path from the protected token, not from the UI.
+    pub fn restore(self, token: String) -> BackendFuture<WorkspacePath> {
+        Box::pin(async move {
+            match self {
+                Self::Herdr { root, process } => {
+                    if root == "/" {
+                        return Err("Restore requires a project directory".into());
+                    }
+                    let reply = process.request(json!({
+                        "type": "herdr_fs_restore", "root": root, "token": token,
+                    })).await.map_err(|err| err.to_string())?;
+                    let path = reply.data["path"].as_str()
+                        .ok_or("Invalid remote Restore response")?;
+                    ensure_herdr_path(&root, path)?;
+                    if path == root {
+                        return Err("Cannot restore over the project root".into());
+                    }
+                    Ok(WorkspacePath::Herdr(path.to_owned()))
+                }
+                Self::Local { .. } => {
+                    Err("Use the operating system Trash to restore local files".into())
+                }
             }
         })
     }
