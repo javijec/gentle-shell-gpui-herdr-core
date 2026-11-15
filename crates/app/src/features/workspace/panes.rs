@@ -426,6 +426,32 @@ impl Workspace {
                 self.new_factory_pane_restored(PaneKind::Terminal, cwd, saved.herdr_terminal.clone(), window, cx)
             }
             PaneKind::File => {
+                if let Some(path) = saved.remote_path.clone() {
+                    let Some(pi_rpc::AgentTarget::Remote { machine, cwd: root }) =
+                        saved.agent_target.as_ref() else {
+                        return None;
+                    };
+                    if !super::remote_files::remote_file_in_root(root, &path) {
+                        return None;
+                    }
+                    let owner = saved.remote_owner.as_deref()?;
+                    let session = self.panes.values().find_map(|pane| {
+                        (pane.herdr_address.as_deref() == Some(owner))
+                            .then(|| pane.session.clone()).flatten()
+                    })?;
+                    let id = self.build_remote_file_pane(
+                        session, machine.clone(), root.clone(),
+                        path, window, cx,
+                    );
+                    if let Some(draft) = saved.remote_draft.clone()
+                        && let Some(view) = self.panes.get(&id)
+                            .and_then(|pane| pane.item.view.clone()
+                                .downcast::<RemoteFilesView>().ok())
+                    {
+                        view.update(cx, |view, cx| view.restore_draft(draft, cx));
+                    }
+                    return Some(id);
+                }
                 let path = saved.path.clone().filter(|p| p.is_file())?;
                 PaneFactories::get(cx).file.as_ref()?;
                 self.new_factory_pane(PaneKind::File, path, window, cx)
