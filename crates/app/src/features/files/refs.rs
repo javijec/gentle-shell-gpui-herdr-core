@@ -541,6 +541,7 @@ impl RefsView {
                 )
                 .context_menu(move |menu, _, _| {
                     let weak_action = weak.clone();
+                    let name = name.clone();
                     let operation = if prunable {
                         RemoteWorktreeAction::Prune
                     } else {
