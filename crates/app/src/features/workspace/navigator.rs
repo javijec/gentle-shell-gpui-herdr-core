@@ -642,6 +642,45 @@ impl Workspace {
         }).detach();
     }
 
+    /// The same session-selection behavior backs both the full navigator and
+    /// the 48px rail. A click is navigation, never an implicit new agent.
+    fn select_navigator_session(
+        &mut self,
+        source: &NavigatorSessionSource,
+        rename_on_double_click: bool,
+        click_count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match source {
+            NavigatorSessionSource::Open { space, tab, pane } => {
+                if *space != self.current {
+                    self.switch_workspace(*space, window, cx);
+                }
+                self.activate(*tab, window, cx);
+                self.focus_pane(*pane, window, cx);
+                if rename_on_double_click && click_count >= 2 {
+                    self.start_tab_rename(*tab, window, cx);
+                }
+            }
+            NavigatorSessionSource::Saved { space, tab, .. } => {
+                self.switch_workspace(*space, window, cx);
+                self.activate(*tab, window, cx);
+            }
+            NavigatorSessionSource::Herdr { address, live, agent } => {
+                if *live {
+                    self.show_or_attach_herdr_session(
+                        address.clone(), *agent, window, cx,
+                    );
+                } else {
+                    window.push_notification(Notification::info(
+                        "This Herdr session is not live. No new agent was created.",
+                    ), cx);
+                }
+            }
+        }
+    }
+
     /// Herdr-style compact Machines rail: always visible, icon-only.
     /// A click expands the full tree with its previous width intact. No
     /// session is created, restored or terminated by this navigation.
@@ -1119,29 +1158,9 @@ impl Workspace {
                                                             Tooltip::new(details.clone()).build(window, cx)
                                                         })
                                                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                                                            match &source {
-                                                                NavigatorSessionSource::Open { space, tab, pane, .. } => {
-                                                                    if *space != this.current {
-                                                                        this.switch_workspace(*space, window, cx);
-                                                                    }
-                                                                    this.activate(*tab, window, cx);
-                                                                    this.focus_pane(*pane, window, cx);
-                                                                    if event.click_count() >= 2 {
-                                                                        this.start_tab_rename(*tab, window, cx);
-                                                                    }
-                                                                }
-                                                                NavigatorSessionSource::Saved { space, tab, .. } => {
-                                                                    this.switch_workspace(*space, window, cx);
-                                                                    this.activate(*tab, window, cx);
-                                                                }
-                                                                NavigatorSessionSource::Herdr { address, live, agent } => {
-                                                                    if *live {
-                                                                        this.show_or_attach_herdr_session(
-                                                                            address.clone(), *agent, window, cx,
-                                                                        );
-                                                                    }
-                                                                }
-                                                            }
+                                                            this.select_navigator_session(
+                                                                &source, true, event.click_count(), window, cx,
+                                                            );
                                                         }))
                                                         .child(
                                                             Icon::new(session.icon)
