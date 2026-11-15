@@ -599,7 +599,7 @@ impl SessionView {
         let Some(process) = self.process() else {
             self.transcript.notice(
                 NoticeLevel::Warning,
-                "Agent disconnected. Your answer was not sent; reconnect and retry.",
+                "Agent disconnected. Your answer was not sent; reconnect and retry.".to_string(),
             );
             cx.notify();
             return;
