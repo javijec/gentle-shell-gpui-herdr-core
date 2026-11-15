@@ -1145,6 +1145,7 @@ const GIT_MUTATIONS = [
   "herdr_git_fetch", "herdr_git_pull", "herdr_git_push",
   "herdr_git_worktree_add", "herdr_git_worktree_remove",
   "herdr_git_worktree_prune",
+  "herdr_git_discard",
 ];
 
 async function checkGitIndexRequest(req, toplevel) {
@@ -1496,6 +1497,7 @@ async function remoteGitWrite(req) {
   try {
     await checkGitRefRequest(req, toplevel);
     const hasStaged = await checkGitIndexRequest(req, toplevel);
+    let trashed = null;
     if (req.type === "herdr_git_stage" || req.type === "herdr_git_unstage") {
       const relative = await selectedGitEntry(req, toplevel);
       const literal = ":(literal)" + relative;
@@ -1513,6 +1515,36 @@ async function remoteGitWrite(req) {
         } else {
           await runGitMutation(toplevel, ["restore", "--staged", "--", literal]);
         }
+      }
+    } else if (req.type === "herdr_git_discard") {
+      if (typeof req.staged !== "boolean") {
+        throw new Error("Discard requires a selected Git side");
+      }
+      const relative = await selectedGitEntry(req, toplevel);
+      const target = path.posix.join(toplevel, relative);
+      const literal = ":(literal)" + relative;
+      if (req.expectedIndex === "?" && req.expectedWorktree === "?") {
+        if (req.staged) throw new Error("Untracked entries cannot be discarded from index");
+        // Recoverable Trash replaces permanent git clean -f.
+        trashed = await guardedTrash({ root: req.root, path: target });
+      } else if (req.staged) {
+        if (req.expectedIndex === " " || req.expectedIndex === "?") {
+          throw new Error("No staged change to discard");
+        }
+        if (req.expectedIndex === "A") {
+          await runGitMutation(toplevel, ["rm", "-f", "-q", "--", literal]);
+        } else if (req.expectedHead) {
+          await runGitMutation(toplevel, [
+            "restore", "--source=HEAD", "--staged", "--worktree", "--", literal,
+          ]);
+        } else {
+          throw new Error("No HEAD available to restore this staged file");
+        }
+      } else {
+        if (req.expectedWorktree === " ") {
+          throw new Error("No unstaged change to discard");
+        }
+        await runGitMutation(toplevel, ["restore", "--worktree", "--", literal]);
       }
     } else if (req.type === "herdr_git_stage_all" ||
                req.type === "herdr_git_unstage_all") {
@@ -1599,7 +1631,10 @@ async function remoteGitWrite(req) {
     } else {
       throw new Error("Unsupported remote Git write");
     }
-    return { toplevel, operation: req.type, ...await gitRefState(toplevel) };
+    return {
+      toplevel, operation: req.type, ...await gitRefState(toplevel),
+      ...(trashed ? { trashToken: trashed.token, trashedPath: trashed.path } : {}),
+    };
   } finally {
     gitWriteInFlight.delete(toplevel);
   }
