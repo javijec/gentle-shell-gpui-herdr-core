@@ -405,6 +405,14 @@ impl SessionView {
     /// Stop one helper over `cancel_subagent`; the legacy prompt stays only for
     /// a peer that genuinely does not offer the method.
     fn stop_agent(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.process().is_none() {
+            self.transcript.notice(
+                NoticeLevel::Warning,
+                "The owning agent is offline; the helper was not stopped.",
+            );
+            cx.notify();
+            return;
+        }
         let applied = self.desktop.cancel_subagent(id.to_string());
         match applied.report.as_ref() {
             Some(desktop::supervision::Report::Unsupported) => self.ask_to_stop_agent(id, cx),
