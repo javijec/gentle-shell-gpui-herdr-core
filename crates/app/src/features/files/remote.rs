@@ -16,7 +16,7 @@ use gpui_kit::*;
 use serde_json::json;
 
 use crate::features::session::SessionView;
-use crate::features::git::{RefEntry, RefsSnapshot, WorkTree};
+use crate::features::git::{RefEntry, RefsSnapshot, WorkTree, StashAction};
 use gentle_core::git::refs::{HeadInfo, RefKind, Stash, Submodule, parse_refs, parse_submodules};
 use super::refs::{RefsEvent, RefsView, RemoteWorktreeDisplay};
 use super::changes::{ChangesEvent, ChangesView};
@@ -51,6 +51,7 @@ struct RemoteGitBranch {
 struct RemoteGitStash {
     name: String,
     message: String,
+    oid: Option<String>,
 }
 
 struct RemoteGitSnapshot {
@@ -180,7 +181,13 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
             let message = item["message"].as_str()
                 .filter(|s| s.len() <= 2048 && !s.chars().any(char::is_control))
                 .ok_or("Invalid remote Git stash message")?;
-            Ok(RemoteGitStash { name: name.to_owned(), message: message.to_owned() })
+            let oid = item["oid"].as_str()
+                .filter(|oid| matches!(oid.len(), 40 | 64)
+                    && oid.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .map(str::to_owned);
+            Ok(RemoteGitStash {
+                name: name.to_owned(), message: message.to_owned(), oid,
+            })
         }).collect::<Result<Vec<_>, &'static str>>()?,
         _ => return Err("Invalid remote Git stashes"),
     };
@@ -481,6 +488,7 @@ pub struct RemoteFilesView {
     _changes_events: Subscription,
     git_confirm_create: Option<String>,
     git_confirm_switch: Option<String>,
+    git_confirm_stash: Option<(String, StashAction)>,
     _git_events: Vec<Subscription>,
     focus: FocusHandle,
     tree_children: HashMap<String, Vec<RemoteEntry>>,
@@ -677,8 +685,12 @@ impl RemoteFilesView {
         });
         let refs = cx.new(|cx| RefsView::new_remote(window, cx));
         let refs_events = cx.subscribe(&refs, |this, _, event: &RefsEvent, cx| {
-            if let RefsEvent::SwitchRemoteBranch(branch) = event {
-                this.git_switch_branch(branch.clone(), cx);
+            match event {
+                RefsEvent::SwitchRemoteBranch(branch) =>
+                    this.git_switch_branch(branch.clone(), cx),
+                RefsEvent::RemoteStash { name, action } =>
+                    this.git_stash_action(name.clone(), *action, cx),
+                _ => {}
             }
         });
         let changes = cx.new(|cx| ChangesView::new_remote(window, cx));
@@ -703,6 +715,9 @@ impl RemoteFilesView {
                 }
                 ChangesEvent::RemoteBulkStage { stage } => {
                     this.git_bulk_stage(*stage, cx);
+                }
+                ChangesEvent::RemoteStashPush(message) => {
+                    this.git_stash_push(message.clone(), cx);
                 }
                 _ => {}
             }
@@ -738,6 +753,7 @@ impl RemoteFilesView {
             _changes_events: changes_events,
             git_confirm_create: None,
             git_confirm_switch: None,
+            git_confirm_stash: None,
             _git_events: git_events,
             focus: cx.focus_handle(),
             tree_children: HashMap::new(),
@@ -1500,8 +1516,10 @@ impl RemoteFilesView {
     fn refresh_git(&mut self, cx: &mut Context<Self>) {
         self.git_confirm_create = None;
         self.git_confirm_switch = None;
+        self.git_confirm_stash = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
+            view.mark_remote_stash(None, cx);
         });
         self.git_generation = self.git_generation.wrapping_add(1);
         let generation = self.git_generation;
@@ -1592,8 +1610,10 @@ impl RemoteFilesView {
         self.git_feedback = None;
         self.git_confirm_create = None;
         self.git_confirm_switch = None;
+        self.git_confirm_stash = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
+            view.mark_remote_stash(None, cx);
         });
         let response = cx.background_executor().spawn(operation);
         cx.spawn(async move |this, cx| {
@@ -1706,6 +1726,75 @@ impl RemoteFilesView {
             "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
             "expectedIndexToken": snapshot.index_token,
             "branch": branch,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_stash_push(&mut self, message: String, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|s|
+            s.writes_enabled && !s.files_truncated && !s.files.is_empty()
+                && s.head_oid.is_some() && s.index_token.is_some()
+        ) else { return; };
+        let message = message.trim().to_owned();
+        if message.is_empty() || message.len() > 120
+            || message.chars().any(char::is_control)
+        { return; }
+        let expected_files: Vec<_> = snapshot.files.iter().map(|entry| json!({
+            "path": entry.path,
+            "index": entry.index.to_string(),
+            "worktree": entry.worktree.to_string(),
+        })).collect();
+        let command = json!({
+            "type": "herdr_git_stash_push",
+            "root": self.root, "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "expectedFiles": expected_files, "message": message,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_stash_action(
+        &mut self, name: String, action: StashAction, cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self.git.as_ref().filter(|s|
+            s.writes_enabled && !s.stashes_truncated && s.index_token.is_some()
+                && s.head_oid.is_some()
+        ) else { return; };
+        let Some(oid) = snapshot.stashes.iter().find(|stash| stash.name == name)
+            .and_then(|stash| stash.oid.clone())
+        else {
+            self.git_error = Some(
+                "Stash action requires a new Herdr agent with OID support".into(),
+            );
+            cx.notify();
+            return;
+        };
+        let pending = (name.clone(), action);
+        if self.git_confirm_stash.as_ref() != Some(&pending) {
+            self.git_confirm_stash = Some(pending.clone());
+            self.refs.update(cx, |view, cx| {
+                view.mark_remote_stash(Some(pending), cx);
+            });
+            self.git_feedback = Some(
+                "Review the stash and choose the same action again to confirm.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        let kind = match action {
+            StashAction::Apply => "herdr_git_stash_apply",
+            StashAction::Pop => "herdr_git_stash_pop",
+            StashAction::Drop => "herdr_git_stash_drop",
+        };
+        let command = json!({
+            "type": kind, "root": self.root,
+            "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "stash": name, "expectedStashOid": oid,
         });
         self.git_write(command, cx);
     }
