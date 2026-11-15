@@ -820,6 +820,8 @@ const MAX_GIT_REF_DETAILS = 360;
 const MAX_GIT_WORKTREE_LINES = 600;
 const MAX_GIT_SUBMODULES = 120;
 const MAX_GIT_DIFF = 96 * 1024;
+const MAX_GIT_HISTORY = 800;
+const MAX_PALETTE_FILES = 2000;
 
 function strictUtf8(bytes) {
   return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -1067,6 +1069,60 @@ async function remoteGit(req) {
   // Private metadata request: never create a visible Pi bash tool call.
   if (req.type === "herdr_git_head") {
     return await gitRefState(toplevel);
+  }
+  if (req.type === "herdr_git_history") {
+    // Share the native History graph's Git record format without invoking Pi
+    // tools or leaking the Linux repository into Windows Git.
+    const limit = req.limit;
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_GIT_HISTORY) {
+      throw new Error("Remote history limit must be between 1 and 800");
+    }
+    const references = await runGitListing(toplevel, [
+      "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)",
+      "refs/heads",
+    ], 10, MAX_GIT_BRANCHES);
+    const branches = strictUtf8(references.output).split("\n").filter(Boolean);
+    if (branches.some((name) => name.length > 512 ||
+          /[\\x00-\\x1f\\x7f]/.test(name))) {
+      throw new Error("Invalid remote history branch");
+    }
+    if (req.branch !== null && req.branch !== undefined &&
+        (typeof req.branch !== "string" || !branches.includes(req.branch))) {
+      throw new Error("Selected branch is not a local branch in this repository");
+    }
+    const { currentBranch } = await gitRefState(toplevel);
+    const branch = req.branch || null;
+    const rev = branch ? "refs/heads/" + branch : "HEAD";
+    const args = [
+      "log", "--topo-order", "--decorate=full", "--shortstat", "--no-color",
+      "--format=%x1e%H%x00%P%x00%an%x00%ct%x00%D%x00%s%x00%(trailers:key=Co-authored-by,valueonly,separator=%x1f)",
+      "-n" + limit, rev, "--",
+    ];
+    // runGit has an explicit 384 KiB cap and 8 s deadline. Reject enormous
+    // histories instead of allocating or streaming unbounded PTY output.
+    const [raw, count, dirtyStatus] = await Promise.all([
+      runGit(toplevel, args).catch((error) => {
+        // A valid unborn repository has no history yet.
+        if (currentBranch && error.message.includes("ambiguous argument")) {
+          return Buffer.alloc(0);
+        }
+        throw error;
+      }),
+      runGit(toplevel, ["rev-list", "--count", rev, "--"])
+        .then((bytes) => Number(strictUtf8(bytes).trim())).catch(() => 0),
+      branch === null || branch === currentBranch
+        ? runGitListing(toplevel, ["status", "--porcelain", "-z",
+            "--untracked-files=normal"], 0, 1)
+        : Promise.resolve({ output: Buffer.alloc(0), truncated: false }),
+    ]);
+    const dirty = dirtyStatus.truncated || dirtyStatus.output.length > 0;
+    return {
+      toplevel, current: currentBranch,
+      branch: branch || currentBranch,
+      branches, branchesTruncated: references.truncated,
+      log: strictUtf8(raw), total: Number.isSafeInteger(count) ? count : 0,
+      dirty,
+    };
   }
   if (req.type === "herdr_git_snapshot") {
     const [status, branches, index, tags, stashes, details, worktrees, submodules] = await Promise.all([
@@ -1700,7 +1756,7 @@ async function remoteGitRequest(req) {
     if (typeof req.id !== "string" || req.id.length > 128) {
       throw new Error("Missing request identifier");
     }
-    if (!["herdr_git_head", "herdr_git_snapshot", "herdr_git_diff",
+    if (!["herdr_git_head", "herdr_git_history", "herdr_git_snapshot", "herdr_git_diff",
           ...GIT_MUTATIONS].includes(command)) {
       throw new Error("Unsupported remote Git operation");
     }
@@ -1753,6 +1809,7 @@ function inputLine() {
                         request.type === "herdr_fs_restore")) {
           void remoteFilesRequest(request);
         } else if (request && (request.type === "herdr_git_head" ||
+                               request.type === "herdr_git_history" ||
                                request.type === "herdr_git_snapshot" ||
                                request.type === "herdr_git_diff" ||
                                GIT_MUTATIONS.includes(request.type))) {
