@@ -2457,7 +2457,14 @@ impl Render for RemoteFilesView {
         }
         let parent = remote_parent(&self.root, &self.current);
         let central = self.pane_path.is_some();
-        let mut content = v_flex().gap(px(1.)).flex_1().min_h_0();
+        // This must be a direct flex child of panel_shell. An extra plain
+        // div wrapper makes the inner uniform_list resolve a zero-height
+        // viewport on some GPUI/Windows layouts, even with loaded rows.
+        let mut content = v_flex()
+            .gap(px(1.))
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden();
         if let Some(preview) = &self.preview {
             let copied = preview.path.clone();
             let rows: Vec<String> = preview.content.lines().take(600).map(str::to_owned).collect();
@@ -2632,7 +2639,15 @@ impl Render for RemoteFilesView {
                         .child(if let Some(path) = &self.pane_path {
                             format!("{} · {}", self.machine, path)
                         } else {
-                            format!("Remote Files · {}", self.machine)
+                            if super::backend::remote_fs_trace_enabled() {
+                                format!(
+                                    "Remote Files · {} · {} rows",
+                                    self.machine,
+                                    self.tree_rows.len(),
+                                )
+                            } else {
+                                format!("Remote Files · {}", self.machine)
+                            }
                         }))
                     .when(!central, |bar| bar.child(
                         Button::new("remote-show-ignored")
@@ -2851,12 +2866,10 @@ impl Render for RemoteFilesView {
                 div().px_3().py_2().text_xs().text_color(ui::warning())
                     .child(error),
             ))
-            .child(
-                div()
-                    .id("remote-file-tree-scroll")
-                    .flex_1().min_h_0().overflow_hidden()
-                    .child(content),
-            )
+            // Preserve flex sizing all the way into the lazy tree. The
+            // previous unstyled div wrapper had no flex layout and could
+            // collapse the list's viewport despite successful RPC results.
+            .child(content)
             .when(self.truncated, |panel| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child("Showing first 500 entries"),
