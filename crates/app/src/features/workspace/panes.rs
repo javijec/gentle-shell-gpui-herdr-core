@@ -569,9 +569,10 @@ impl Workspace {
     /// Focus an already represented Herdr session, including an agent or
     /// terminal in another workspace. Only attach a new terminal viewer when
     /// the address is not represented anywhere in the desktop. No terminal.run.
-    pub(super) fn show_or_attach_herdr_terminal(
+    pub(super) fn show_or_attach_herdr_session(
         &mut self,
         address: String,
+        is_agent: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -622,7 +623,24 @@ impl Workspace {
                 return;
             }
         }
-        self.open_herdr_terminal(address, window, cx);
+        if is_agent {
+            // This address was tagged gentle-shell=rpc-agent by Herdr Core.
+            // Restore its Pi bridge in a new pane; NEVER call terminal.run.
+            let cwd = self.active_cwd(cx);
+            let pane = self.new_agent_pane(
+                cwd,
+                AgentPaneInit {
+                    restored_herdr: Some(address),
+                    start_now: false,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            self.push_pane_tab(pane, window, cx);
+        } else {
+            self.open_herdr_terminal(address, window, cx);
+        }
     }
 
     /// Attach an existing Herdr address as a new GPUI tab without running a
