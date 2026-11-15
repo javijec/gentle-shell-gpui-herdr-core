@@ -112,7 +112,7 @@ pub(super) fn restore_bytes(path: &Path, previous: Option<&str>) -> io::Result<(
 pub enum StoreRead {
     Missing,
     Invalid,
-    Valid(ProfilesFile, Drops),
+    Valid(ProfilesFile, Box<Drops>),
 }
 
 pub fn read_store(path: &Path) -> StoreRead {
@@ -120,7 +120,7 @@ pub fn read_store(path: &Path) -> StoreRead {
         Err(e) if e.kind() == io::ErrorKind::NotFound => StoreRead::Missing,
         Err(_) => StoreRead::Invalid,
         Ok(text) => match parse_profiles(&text) {
-            Some((file, drops)) => StoreRead::Valid(file, drops),
+            Some((file, drops)) => StoreRead::Valid(file, Box::new(drops)),
             None => StoreRead::Invalid,
         },
     }
@@ -381,6 +381,14 @@ fn drops_notice(drops: &Drops, origin: &str) -> Option<String> {
     }
     if let Some(active) = &drops.active {
         parts.push(format!("active marker: {active}"));
+    }
+    if !drops.workflow.is_empty() {
+        let list: Vec<String> = drops
+            .workflow
+            .iter()
+            .map(|(p, mode)| format!("{p} ({mode})"))
+            .collect();
+        parts.push(format!("orchestrator modes: {}", list.join(", ")));
     }
     (!parts.is_empty()).then(|| {
         format!(
