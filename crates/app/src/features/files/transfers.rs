@@ -210,7 +210,7 @@ pub(super) async fn download(
 
 /// Same transfer stream between two independent Herdr agents, without
 /// writing private Linux content into a Windows temporary file.
-pub(super) async fn relay(
+pub(crate) async fn relay(
     from_root: String,
     from_process: Arc<RpcProcess>,
     from_path: String,
