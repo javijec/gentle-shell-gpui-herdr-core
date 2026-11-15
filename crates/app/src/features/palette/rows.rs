@@ -165,6 +165,7 @@ impl PaletteView {
                         |remote| PaletteAction::OpenRemoteFile {
                             machine: remote.machine.clone(),
                             root: remote.root.clone(),
+                            terminal: remote.terminal.clone(),
                             path: format!("{}/{}",
                                 remote.root.trim_end_matches('/'), path),
                         },
@@ -207,6 +208,7 @@ impl PaletteView {
                     |remote| PaletteAction::SwitchRemoteBranch {
                         machine: remote.machine.clone(),
                         root: remote.root.clone(),
+                        terminal: remote.terminal.clone(),
                         branch: name.clone(),
                     },
                 ),
