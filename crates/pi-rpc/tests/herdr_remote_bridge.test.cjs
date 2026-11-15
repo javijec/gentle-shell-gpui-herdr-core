@@ -865,6 +865,49 @@ async function gitWrite(h, root, snapshot, type, id, props = {}) {
   return fsReply(h, id);
 }
 
+test("Stage 5 guarded stash push/apply/drop checks status and stash OID", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-stash-actions-"));
+  try {
+    gitInit(root);
+    fs.writeFileSync(path.join(root, "tracked.txt"), "working version\n");
+    const h = harness(root);
+    let snap = await gitSnapshot(h, root, "stash-snapshot-1");
+    const files = snap.files.map(({ path, index, worktree }) => ({
+      path, index, worktree,
+    }));
+    const pushed = await gitWrite(h, root, snap, "herdr_git_stash_push",
+      "stash-push", { message: "reviewed work", expectedFiles: files });
+    assert.equal(pushed.success, true, pushed.error);
+    assert.equal(fs.readFileSync(path.join(root, "tracked.txt"), "utf8"), "first\n");
+    snap = await gitSnapshot(h, root, "stash-snapshot-2");
+    const stash = snap.stashes.find((row) => row.name === "stash@{0}");
+    assert.ok(stash, "new stash should appear");
+    assert.match(stash.oid, /^[a-f0-9]{40,64}$/);
+    const rejected = await gitWrite(h, root, snap, "herdr_git_stash_drop",
+      "stash-stale", { stash: stash.name, expectedStashOid: "f".repeat(40) });
+    assert.equal(rejected.success, false, "stale stash OID must be rejected");
+    const applied = await gitWrite(h, root, snap, "herdr_git_stash_apply",
+      "stash-apply", { stash: stash.name, expectedStashOid: stash.oid });
+    assert.equal(applied.success, true, applied.error);
+    assert.equal(fs.readFileSync(path.join(root, "tracked.txt"), "utf8"),
+      "working version\n");
+    const popDirty = await gitWrite(h, root, snap, "herdr_git_stash_pop",
+      "stash-pop-dirty", { stash: stash.name, expectedStashOid: stash.oid });
+    assert.equal(popDirty.success, false, "cannot pop onto dirty worktree");
+    const dropped = await gitWrite(h, root, snap, "herdr_git_stash_drop",
+      "stash-drop", { stash: stash.name, expectedStashOid: stash.oid });
+    assert.equal(dropped.success, true, dropped.error);
+    const after = await gitSnapshot(h, root, "stash-snapshot-3");
+    assert.deepEqual(after.stashes, []);
+    assert.equal(h.childWrites.length, 1, "Git actions never enter Pi agent commands");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("5F bulk Git stage and unstage are bounded and revalidate status", {
   skip: process.platform === "win32",
 }, async () => {
