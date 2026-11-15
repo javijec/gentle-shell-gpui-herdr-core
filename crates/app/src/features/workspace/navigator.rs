@@ -283,18 +283,6 @@ impl Workspace {
 
     /// Close from Machines means permanent termination, not merely detaching
     /// the GPUI viewer or saving an Undo snapshot. Always ask first.
-    pub(super) fn confirm_terminate_herdr_address(
-        &mut self, address: String, agent: bool,
-        window: &mut Window, cx: &mut Context<Self>,
-    ) {
-        self.confirm_permanent_session_close(
-            NavigatorSessionSource::Herdr {
-                address: address.clone(), live: true, agent,
-            },
-            Some(address), agent, window, cx,
-        );
-    }
-
     fn confirm_permanent_session_close(
         &mut self, source: NavigatorSessionSource,
         address: Option<String>, agent: bool,
