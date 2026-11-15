@@ -69,7 +69,7 @@ impl Workspace {
         // The remote History pane is tied to a living Herdr RPC session;
         // never rehydrate it through the Windows Git history factory.
         if pane.item.kind == PaneKind::History
-            && matches!(pane.agent_target, Some(pi_rpc::AgentTarget::Remote { .. }))
+            && matches!(pane.agent_target.as_ref(), Some(pi_rpc::AgentTarget::Remote { .. }))
         {
             return None;
         }
