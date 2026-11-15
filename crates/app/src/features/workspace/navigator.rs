@@ -118,7 +118,7 @@ impl Workspace {
     /// Build the machine tree from both sources of truth: GPUI panes (agents
     /// and terminals, including splits and other workspaces) and Herdr Core's
     /// terminal.list. Every Herdr address appears only once.
-    fn navigator_groups(&self, cx: &App) -> Vec<NavigatorMachine> {
+    fn navigator_groups(&self) -> Vec<NavigatorMachine> {
         let mut groups = vec![NavigatorMachine {
             key: "local".into(),
             name: "This computer".into(),
@@ -372,7 +372,7 @@ impl Workspace {
     }
 
     pub(super) fn render_machine_navigator(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let groups = self.navigator_groups(cx);
+        let groups = self.navigator_groups();
         let herdr = crate::features::terminal::herdr_enabled();
         let total: usize = groups.iter().map(|g| g.sessions.len()).sum();
         v_flex()
