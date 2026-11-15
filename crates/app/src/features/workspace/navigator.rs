@@ -281,36 +281,6 @@ impl Workspace {
         groups
     }
 
-    /// Known agent identities are shared with the standalone Machines
-    /// manager so its terminal list can label those entries correctly.
-    pub(super) fn known_herdr_agent_addresses(&self, cx: &App)
-        -> std::collections::HashSet<String>
-    {
-        let mut addresses = std::collections::HashSet::new();
-        for pane in self.panes.values() {
-            if pane.item.kind != PaneKind::Agent { continue; }
-            if let Some(address) = pane.herdr_address.clone().or_else(|| {
-                pane.item.terminal_address.as_ref().and_then(|get| get(cx))
-            }) {
-                addresses.insert(address);
-            }
-        }
-        for space in &self.spaces {
-            if let Some((tabs, _)) = &space.saved {
-                for tab in tabs {
-                    for pane in tab.layout.leaves() {
-                        if pane.kind == PaneKind::Agent
-                            && let Some(address) = &pane.herdr_terminal
-                        {
-                            addresses.insert(address.clone());
-                        }
-                    }
-                }
-            }
-        }
-        addresses
-    }
-
     /// Close from Machines means permanent termination, not merely detaching
     /// the GPUI viewer or saving an Undo snapshot. Always ask first.
     pub(super) fn confirm_terminate_herdr_address(
