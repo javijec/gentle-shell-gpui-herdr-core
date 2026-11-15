@@ -770,11 +770,6 @@ impl Workspace {
                                                                 && *tab == self.space().active
                                                                 && self.tab().is_some_and(|t| t.focused == *pane)
                                                     );
-                                                    let close_target = match &source {
-                                                        NavigatorSessionSource::Open { space, tab, .. }
-                                                            if *space == self.current => Some(*tab),
-                                                        _ => None,
-                                                    };
                                                     let renaming = match &source {
                                                         NavigatorSessionSource::Open { space, pane, .. }
                                                             if *space == self.current =>
@@ -784,6 +779,9 @@ impl Workspace {
                                                     };
                                                     let group_name = format!("nav-session-{}", session.row_id);
                                                     let close_id = format!("nav-close-{}", session.row_id);
+                                                    let close_source = session.source.clone();
+                                                    let close_address = session.address.clone();
+                                                    let close_agent = session.kind == "Gentle Shell";
                                                     let details = format!(
                                                         "{} · {}{}{}",
                                                         session.kind, session.title,
@@ -914,35 +912,39 @@ impl Workspace {
                                                                     .bg(ui::accent()),
                                                             )
                                                         })
-                                                        .when_some(close_target, |row, close_index| {
-                                                            row.child(
-                                                                div()
-                                                                    .id(SharedString::from(close_id))
-                                                                    .size(px(20.))
-                                                                    .flex_none()
-                                                                    .flex()
-                                                                    .items_center()
-                                                                    .justify_center()
-                                                                    .rounded(px(4.))
-                                                                    .text_color(ui::muted())
-                                                                    .invisible()
-                                                                    .group_hover(
-                                                                        SharedString::from(group_name),
-                                                                        |button| button.visible(),
-                                                                    )
-                                                                    .hover(|button| {
-                                                                        button.bg(ui::surface_hover())
-                                                                            .text_color(ui::fg())
-                                                                    })
-                                                                    .on_click(cx.listener(
-                                                                        move |this, _, window, cx| {
-                                                                            cx.stop_propagation();
-                                                                            this.close_tab(close_index, window, cx);
-                                                                        },
-                                                                    ))
-                                                                    .child(Icon::new(IconName::X).xsmall()),
-                                                            )
-                                                        })
+                                                        .child(
+                                                            div()
+                                                                .id(SharedString::from(close_id))
+                                                                .size(px(20.))
+                                                                .flex_none()
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .rounded(px(4.))
+                                                                .text_color(ui::muted())
+                                                                .invisible()
+                                                                .group_hover(
+                                                                    SharedString::from(group_name),
+                                                                    |button| button.visible(),
+                                                                )
+                                                                .hover(|button| {
+                                                                    button.bg(ui::surface_hover())
+                                                                        .text_color(ui::danger())
+                                                                })
+                                                                .tooltip("Terminate session permanently")
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, window, cx| {
+                                                                        cx.stop_propagation();
+                                                                        this.confirm_permanent_session_close(
+                                                                            close_source.clone(),
+                                                                            close_address.clone(),
+                                                                            close_agent,
+                                                                            window, cx,
+                                                                        );
+                                                                    },
+                                                                ))
+                                                                .child(Icon::new(IconName::X).xsmall()),
+                                                        )
                                                 })),
                                         )
                                     })
