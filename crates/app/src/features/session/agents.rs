@@ -15,7 +15,7 @@ use super::state::desktop;
 use crate::shared::ui;
 use gentle_core::activity::{AgentTask, ThreadItem};
 use gentle_core::gentle_state::{Job, JobOutcome};
-use gentle_core::transcript::format_tokens;
+use gentle_core::transcript::{NoticeLevel, format_tokens};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentsTab {
