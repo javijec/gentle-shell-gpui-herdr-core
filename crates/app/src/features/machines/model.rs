@@ -289,13 +289,6 @@ pub fn terminate_session(address: &str, is_agent: bool) -> Result<(), String> {
     Ok(())
 }
 
-pub fn connect_machine(name: &str) -> Result<(), String> {
-    let mut client = client()?;
-    client.call("machine.connect", json!({"machine": name}))
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
