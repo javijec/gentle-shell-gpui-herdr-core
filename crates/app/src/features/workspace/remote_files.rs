@@ -147,6 +147,7 @@ impl Workspace {
         &mut self,
         machine: &str,
         root: &str,
+        terminal: &str,
         branch: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -158,7 +159,10 @@ impl Workspace {
             ), cx);
             return;
         };
-        if active_machine != machine || active_root != root {
+        if terminal.is_empty()
+            || active_machine != machine || active_root != root
+            || session.read(cx).herdr_terminal().as_deref() != Some(terminal)
+        {
             window.push_notification(Notification::info(
                 "The selected remote agent changed. Reopen the palette.",
             ), cx);
