@@ -35,6 +35,19 @@ pub enum RefsEvent {
     /// Herdr uses the same Branches UI; its owner executes the guarded switch.
     SwitchRemoteBranch(String),
     RemoteStash { name: String, action: StashAction },
+    RemoteWorktree {
+        action: RemoteWorktreeAction,
+        branch: Option<String>,
+        path: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteWorktreeAction {
+    AddExisting,
+    AddNew,
+    Remove,
+    Prune,
 }
 
 #[derive(Clone, PartialEq)]
@@ -255,7 +268,7 @@ impl RefsView {
             let typed = self.filter.read(cx).value();
             let typed = typed.trim();
             let hit = |text: &str| matches_filter(typed, text);
-            if !self.remote && could_be_branch(typed)
+            if could_be_branch(typed)
                 && !refs.branches.iter().any(|b| b.name == typed)
             {
                 lines.push(Line::NewWorktree);
@@ -518,11 +531,38 @@ impl RefsView {
                 } else {
                     ""
                 };
+                let name = tree.path.clone();
+                let prunable = tree.prunable;
+                let weak = cx.entity().downgrade();
                 return row(
                     SharedString::from(format!("remote-worktree-{ix}")),
                     IconName::FolderGit, ui::muted(), title, ui::fg(),
                     Some(detail(format!("{}{}", tree.path, status))),
-                ).into_any_element();
+                )
+                .context_menu(move |menu, _, _| {
+                    let weak_action = weak.clone();
+                    let operation = if prunable {
+                        RemoteWorktreeAction::Prune
+                    } else {
+                        RemoteWorktreeAction::Remove
+                    };
+                    menu.item(PopupMenuItem::new(if prunable {
+                        "Prune stale worktree"
+                    } else {
+                        "Remove clean worktree"
+                    })
+                        .icon(Icon::new(IconName::Trash))
+                        .on_click(move |_, _, cx| {
+                            let _ = weak_action.update(cx, |_, cx| {
+                                cx.emit(RefsEvent::RemoteWorktree {
+                                    action: operation,
+                                    branch: None,
+                                    path: Some(name.clone()),
+                                });
+                            });
+                        }))
+                })
+                .into_any_element();
             }
             Line::NewWorktree => return self.render_new_worktree(cx),
         };
@@ -785,7 +825,14 @@ impl RefsView {
         )
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, window, cx| {
-            this.new_worktree(branch.clone(), true, window, cx)
+            if this.remote {
+                cx.emit(RefsEvent::RemoteWorktree {
+                    action: RemoteWorktreeAction::AddNew,
+                    branch: Some(branch.clone()), path: None,
+                });
+            } else {
+                this.new_worktree(branch.clone(), true, window, cx)
+            }
         }))
         .into_any_element()
     }
@@ -843,6 +890,8 @@ impl RefsView {
                 == Some(name.as_str()) && !branch.current).then(|| {
                 ui::chip("Click again to confirm", ui::warning()).into_any_element()
             });
+            let worktree_branch = name.clone();
+            let weak = cx.entity().downgrade();
             return branch_row(
                 SharedString::from(format!("remote-ref-branch-{name}")),
                 BranchDisplay::from_local(branch), confirmation,
@@ -851,6 +900,20 @@ impl RefsView {
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(RefsEvent::SwitchRemoteBranch(name.clone()));
             }))
+            .context_menu(move |menu, _, _| {
+                let name = worktree_branch.clone();
+                let weak = weak.clone();
+                menu.item(PopupMenuItem::new("Create remote worktree")
+                    .icon(Icon::new(IconName::FolderPlus))
+                    .on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |_, cx| {
+                            cx.emit(RefsEvent::RemoteWorktree {
+                                action: RemoteWorktreeAction::AddExisting,
+                                branch: Some(name.clone()), path: None,
+                            });
+                        });
+                    }))
+            })
             .into_any_element();
         }
         let name = branch.name.clone();
