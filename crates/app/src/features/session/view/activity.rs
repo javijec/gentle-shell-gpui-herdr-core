@@ -321,7 +321,10 @@ impl SessionView {
                             agent.agent.clone(),
                             agent.status.clone(),
                             crate::features::session::agents::status_color(&agent.status),
-                            None,
+                            agent.model.as_ref().map(|model| match &agent.thinking {
+                                Some(thinking) => format!("{model} · {thinking}"),
+                                None => model.clone(),
+                            }),
                             Some(agent.last_step.to_string()),
                         )
                     })
