@@ -23,12 +23,6 @@ mod viewer;
 pub use tree::{FileTreeEvent, FileTreeView};
 pub use viewer::FileView;
 
-/// Register both the local Files shortcuts and the remote editor shortcut.
-pub fn init(cx: &mut App) {
-    tree::init(cx);
-    RemoteFilesView::bind_keys(cx);
-}
-
 use std::path::Path;
 
 use gpui_kit::component::input::EditorState;
@@ -57,13 +51,20 @@ fn source_editor(
     .default_value(text)
 }
 
-/// The icon and tint for a file name in the tree.
-/// Key bindings and the diagram renderer's state.
+/// Register local Files shortcuts, remote editor bindings, and Mermaid state.
 pub fn init(cx: &mut App) {
     tree::init(cx);
+    RemoteFilesView::bind_keys(cx);
     mermaid::init(cx);
 }
 
+/// The diagram renderer is shared by Markdown previews and the Docs overlay.
+pub use mermaid::{
+    Renderer as DiagramRenderer, RendererState as DiagramRendererState,
+    install as install_diagram_renderer, renderer as diagram_renderer,
+};
+
+/// The icon and tint for a file name in the tree.
 fn file_icon(name: &str) -> (IconName, Hsla) {
     let lower = name.to_lowercase();
     let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
