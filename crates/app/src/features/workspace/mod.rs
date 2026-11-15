@@ -235,10 +235,6 @@ enum RemoteAgentRecovery {
 }
 
 impl RemoteAgentRecovery {
-    fn may_create_default_agent(self) -> bool {
-        matches!(self, Self::NotNeeded | Self::Empty)
-    }
-
     fn may_auto_start(self, has_herdr_address: bool) -> bool {
         match self {
             Self::NotNeeded | Self::Empty => true,
@@ -254,7 +250,6 @@ mod remote_recovery_tests {
 
     #[test]
     fn running_agents_prevent_automatic_duplicates() {
-        assert!(!Recovery::Existing.may_create_default_agent());
         assert!(!Recovery::Existing.may_auto_start(false));
         assert!(Recovery::Existing.may_auto_start(true));
     }
@@ -262,12 +257,10 @@ mod remote_recovery_tests {
     #[test]
     fn discovery_must_finish_safely_before_any_automatic_start() {
         for state in [Recovery::Discovering, Recovery::Failed] {
-            assert!(!state.may_create_default_agent());
             assert!(!state.may_auto_start(false));
             assert!(!state.may_auto_start(true));
         }
         for state in [Recovery::NotNeeded, Recovery::Empty] {
-            assert!(state.may_create_default_agent());
             assert!(state.may_auto_start(false));
         }
     }
@@ -566,14 +559,9 @@ impl Workspace {
             None => this.current,
         };
         this.current = target;
-        // A fresh default agent must NOT start before discovering older
-        // Herdr jobs. A command-line prompt is an explicit new-agent request.
-        this.ensure_open(
-            target,
-            prompt.is_none() && !discover_remote,
-            window,
-            cx,
-        );
+        // Opening the desktop or restoring a workspace is never permission
+        // to create an agent. An explicit CLI prompt remains a user request.
+        this.ensure_open(target, window, cx);
         if let Some(prompt) = prompt {
             let root = this.space().root.clone();
             this.open_tab(PaneKind::Agent, root, Some(prompt), None, window, cx);
@@ -594,18 +582,9 @@ impl Workspace {
                     match discovered {
                         Ok(addresses) if addresses.is_empty() => {
                             this.remote_agent_recovery = RemoteAgentRecovery::Empty;
-                            // There are no running remote agents: the usual
-                            // first-tab default is safe to create.
-                            let current = this.current;
-                            this.ensure_open(current, true, window, cx);
                         }
                         Ok(addresses) => {
                             this.remote_agent_recovery = RemoteAgentRecovery::Existing;
-                            this.recover_untracked_agents(addresses.clone(), window, cx);
-                            // When all running agents already had saved
-                            // addresses, prefer an existing one over an old
-                            // address-less placeholder in the active tab.
-                            this.focus_existing_remote_agent(&addresses, window, cx);
                         }
                         Err(error) => {
                             // A failed lookup is NOT evidence that no agents
@@ -616,12 +595,11 @@ impl Workspace {
                             );
                         }
                     }
-                    this.start_shown(window, cx);
+                    // Existing remote sessions appear in Machines. Opening
+                    // the app never attaches or starts an agent automatically.
                     cx.notify();
                 });
             }).detach();
-        } else {
-            this.start_shown(window, cx);
         }
         if discover_remote {
             this._machine_poll = cx.spawn(async move |this, cx| {
