@@ -25,6 +25,8 @@ pub struct MachinesView {
     loading: bool,
     busy: bool,
     error: Option<String>,
+    /// A failed background refresh means listed connection states are stale.
+    status_error: Option<String>,
     info: Option<String>,
     show_add_form: bool,
     /// true: custom command reaching a remote Herdr Core; false: host target.
@@ -53,6 +55,7 @@ impl MachinesView {
             loading: false,
             busy: false,
             error: None,
+            status_error: None,
             info: None,
             show_add_form: false,
             add_via: true,
@@ -196,11 +199,13 @@ impl MachinesView {
                                 || old.machines != snapshot.machines
                         });
                         this.snapshot = Some(snapshot);
+                        this.status_error = None;
                         if changed {
                             cx.emit(MachinesEvent::Changed);
                         }
                     }
                     Err(error) => {
+                        this.status_error = Some(error.clone());
                         if explicit || this.snapshot.is_none() {
                             this.error = Some(error);
                         }
