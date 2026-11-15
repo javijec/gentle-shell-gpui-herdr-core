@@ -2522,7 +2522,7 @@ impl Render for RemoteFilesView {
                             )
                             .child(div().flex_1())
                             .child(div().text_xs().text_color(ui::muted())
-                                .child("128 KiB maximum")),
+                                .child("UTF-8 text · 2 MiB maximum; binary via Download")),
                     )
                     .children(rows.into_iter().enumerate().map(|(i, text)| {
                         h_flex()
