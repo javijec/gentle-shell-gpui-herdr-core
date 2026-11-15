@@ -247,6 +247,24 @@ impl Workspace {
             ), cx);
             return;
         }
+        let pane = self.build_remote_file_pane(
+            session, machine, root, path, window, cx,
+        );
+        self.place_preview(pane, window, cx);
+    }
+
+    /// Instantiate a remote editor owned by one original agent. Restoration
+    /// and normal opening share exactly this constructor, including the
+    /// observer that schedules draft snapshots on every editor change.
+    pub(super) fn build_remote_file_pane(
+        &mut self,
+        session: Entity<SessionView>,
+        machine: String,
+        root: String,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PaneId {
         let file = cx.new(|cx| RemoteFilesView::new_pane(
             session.clone(), machine.clone(), root.clone(), path, window, cx,
         ));
@@ -260,27 +278,29 @@ impl Workspace {
             unsaved: Some(Rc::new(move |cx: &App| {
                 unsaved_view.read(cx).has_unsaved(cx)
             })),
-            // File panes never own or shut down the connected Herdr agent.
             terminal_address: None,
         };
+        let subscription = cx.observe(&file, |this, _, cx| {
+            this.schedule_save(cx);
+        });
         let id = self.alloc_id();
         let mut pane = Pane {
             item,
             session: None,
             linked_session: Some(session),
             cwd: self.space().root.clone(),
-            path: None, // Not a Windows path; never restore as a local file.
+            path: None, // Linux paths never become Windows PathBuf values.
             session_file: None,
             herdr_address: None,
             agent_target: Some(pi_rpc::AgentTarget::Remote { machine, cwd: root }),
             title: SharedString::default(),
             running: false,
             needs_you: false,
-            _subscriptions: Vec::new(),
+            _subscriptions: vec![subscription],
         };
         pane.sync_chrome(cx);
         self.panes.insert(id, pane);
-        self.place_preview(id, window, cx);
+        id
     }
 
     /// Relay a file directly through two existing Herdr RPC processes.
