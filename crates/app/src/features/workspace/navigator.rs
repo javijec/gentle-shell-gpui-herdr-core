@@ -32,8 +32,23 @@ struct NavigatorMachine {
     key: String,
     name: String,
     connected: bool,
+    /// Reported by the owning Herdr Core; saved-only machines are "unknown".
+    state: String,
     local: bool,
     sessions: Vec<NavigatorSession>,
+}
+
+/// Display only states reported by Herdr. A saved session is not proof that
+/// its machine is currently online.
+fn navigator_machine_status(state: &str) -> &'static str {
+    match state {
+        "connected" => "Connected",
+        "connecting" => "Connecting",
+        "needs_login" => "Needs login",
+        "needs_update" => "Needs update",
+        "unreachable" => "Unreachable",
+        _ => "Status unknown",
+    }
 }
 
 /// An explicit 4C target is authoritative. An older 4B persisted address
@@ -81,6 +96,36 @@ fn session_directory(
 }
 
 impl Workspace {
+    /// Select the machine that owns the focused runtime pane. Focusing a File
+    /// or History pane falls back to the first actual runtime in the tab;
+    /// it must not turn a JaviPi session into a Windows machine selection.
+    fn active_navigator_machine_key(&self) -> String {
+        if !crate::features::terminal::herdr_enabled() {
+            return "local".into();
+        }
+        let Some(tab) = self.tab() else { return "local".into() };
+        let runtime = |pane: &&super::Pane| {
+            pane.item.kind == PaneKind::Agent || pane.item.kind == PaneKind::Terminal
+        };
+        let pane = self.panes.get(&tab.focused).filter(runtime)
+            .or_else(|| tab.tree.leaves().into_iter()
+                .find_map(|id| self.panes.get(&id).filter(runtime)));
+        pane.and_then(|pane| machine_key(
+            pane.agent_target.as_ref(), pane.herdr_address.as_deref(),
+        )).unwrap_or_else(|| "local".into())
+    }
+
+    /// Selecting a computer in the compact rail expands *that* group,
+    /// without switching sessions, spawning agents or losing the saved width.
+    fn expand_machine_from_rail(&mut self, key: String, cx: &mut Context<Self>) {
+        self.collapsed_machines.remove(&key);
+        if !self.sidebar_visible {
+            self.sidebar_visible = true;
+            self.schedule_save(cx);
+        }
+        cx.notify();
+    }
+
     /// Machine and runtime path for the selected agent, shown separately
     /// from the Windows workspace name in the title bar.
     pub(super) fn active_runtime_label(&self) -> String {
@@ -123,6 +168,7 @@ impl Workspace {
             key: "local".into(),
             name: "This computer".into(),
             connected: true,
+            state: "connected".into(),
             local: true,
             sessions: Vec::new(),
         }];
@@ -133,6 +179,7 @@ impl Workspace {
                         key: machine.name.clone(),
                         name: machine.name.clone(),
                         connected: machine.connected(),
+                        state: machine.state.clone(),
                         local: false,
                         sessions: Vec::new(),
                     });
@@ -158,6 +205,7 @@ impl Workspace {
                         name: if local { "This computer".into() } else { key.clone() },
                         key,
                         connected: local,
+                        state: if local { "connected" } else { "unknown" }.into(),
                         local,
                         sessions: Vec::new(),
                     });
@@ -556,6 +604,7 @@ impl Workspace {
     /// session is created, restored or terminated by this navigation.
     pub(super) fn render_machine_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let groups = self.navigator_groups();
+        let active_machine = self.active_navigator_machine_key();
         let herdr = crate::features::terminal::herdr_enabled();
         v_flex()
             .size_full()
@@ -600,12 +649,19 @@ impl Workspace {
                                 } else {
                                     IconName::Layers
                                 };
-                                let connected = group.connected;
+                                let active = group.key == active_machine;
+                                let group_key = group.key.clone();
+                                let state = navigator_machine_status(&group.state);
+                                let indicator = match group.state.as_str() {
+                                    "connected" => ui::accent(),
+                                    "connecting" => ui::petal(),
+                                    "needs_login" | "needs_update" | "unreachable" => ui::warning(),
+                                    _ => ui::muted(),
+                                };
+                                let count = group.sessions.len();
                                 let tooltip = format!(
-                                    "{} · {} session{}{}",
-                                    group.name, group.sessions.len(),
-                                    if group.sessions.len() == 1 { "" } else { "s" },
-                                    if connected { "" } else { " · disconnected" },
+                                    "{} · {state} · {count} session{} · Click to expand",
+                                    group.name, if count == 1 { "" } else { "s" },
                                 );
                                 div()
                                     .id(("machine-rail-item", index))
@@ -616,12 +672,13 @@ impl Workspace {
                                     .justify_center()
                                     .rounded(px(6.))
                                     .cursor_pointer()
+                                    .when(active, |row| row.bg(ui::surface_hover().opacity(0.85)))
                                     .hover(|row| row.bg(ui::surface_hover().opacity(0.55)))
                                     .tooltip(move |window, cx| {
                                         Tooltip::new(tooltip.clone()).build(window, cx)
                                     })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_sidebar(cx);
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.expand_machine_from_rail(group_key.clone(), cx);
                                     }))
                                     .child(
                                         v_flex()
@@ -630,7 +687,9 @@ impl Workspace {
                                             .child(
                                                 Icon::new(icon)
                                                     .small()
-                                                    .text_color(if connected {
+                                                    .text_color(if active {
+                                                        ui::petal()
+                                                    } else if group.connected {
                                                         ui::fg()
                                                     } else {
                                                         ui::muted()
@@ -640,12 +699,20 @@ impl Workspace {
                                                 div()
                                                     .size(px(5.))
                                                     .rounded_full()
-                                                    .bg(if connected {
-                                                        ui::accent()
-                                                    } else {
-                                                        ui::muted()
-                                                    }),
-                                            ),
+                                                    .bg(indicator),
+                                            )
+                                            .when(count > 0, |item| {
+                                                item.child(
+                                                    div()
+                                                        .text_size(px(9.))
+                                                        .text_color(ui::muted())
+                                                        .child(if count > 99 {
+                                                            "99+".to_string()
+                                                        } else {
+                                                            count.to_string()
+                                                        }),
+                                                )
+                                            }),
                                     )
                             })),
                     ),
@@ -677,6 +744,7 @@ impl Workspace {
 
     pub(super) fn render_machine_navigator(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let groups = self.navigator_groups();
+        let active_machine = self.active_navigator_machine_key();
         let herdr = crate::features::terminal::herdr_enabled();
         let total: usize = groups.iter().map(|g| g.sessions.len()).sum();
         v_flex()
@@ -724,6 +792,14 @@ impl Workspace {
                                 }
                             })),
                     )
+                    .child(
+                        Button::new("navigator-collapse")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::PanelLeftClose))
+                            .tooltip("Collapse Machines to the slim rail (Ctrl+B)")
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                    )
                     .when(herdr, |row| {
                         row.child(
                             Button::new("navigator-machine-manage")
@@ -752,6 +828,17 @@ impl Workspace {
                                 let key = group.key.clone();
                                 let local = group.local;
                                 let available = group.connected;
+                                let active = group.key == active_machine;
+                                let state = navigator_machine_status(&group.state);
+                                let state_color = match group.state.as_str() {
+                                    "connected" => ui::accent(),
+                                    "connecting" => ui::petal(),
+                                    "needs_login" | "needs_update" | "unreachable" => ui::warning(),
+                                    _ => ui::muted(),
+                                };
+                                let group_tooltip = format!(
+                                    "{} · {} · {} sessions", group.name, state, group.sessions.len(),
+                                );
                                 let machine_for_add = if local { None } else {
                                     Some(group.key.clone())
                                 };
@@ -765,7 +852,11 @@ impl Workspace {
                                             .px_2()
                                             .gap_2()
                                             .cursor_pointer()
+                                            .when(active, |row| row.bg(ui::surface_hover().opacity(0.8)))
                                             .hover(|row| row.bg(ui::surface_hover().opacity(0.5)))
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(group_tooltip.clone()).build(window, cx)
+                                            })
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.toggle_machine_group(key.clone(), cx)
                                             }))
@@ -800,11 +891,7 @@ impl Workspace {
                                                 div()
                                                     .size(px(6.))
                                                     .rounded_full()
-                                                    .bg(if available {
-                                                        ui::accent()
-                                                    } else {
-                                                        ui::muted()
-                                                    }),
+                                                    .bg(state_color),
                                             )
                                             .child(
                                                 div()
@@ -1103,8 +1190,18 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::machine_key;
+    use super::{machine_key, navigator_machine_status};
     use pi_rpc::AgentTarget;
+
+    #[test]
+    fn distinguishes_core_connection_states_without_claiming_saved_machine_is_online() {
+        assert_eq!(navigator_machine_status("connected"), "Connected");
+        assert_eq!(navigator_machine_status("connecting"), "Connecting");
+        assert_eq!(navigator_machine_status("needs_login"), "Needs login");
+        assert_eq!(navigator_machine_status("needs_update"), "Needs update");
+        assert_eq!(navigator_machine_status("unreachable"), "Unreachable");
+        assert_eq!(navigator_machine_status("unknown"), "Status unknown");
+    }
 
     #[test]
     fn distinguishes_local_and_remote_runtime_directories() {
