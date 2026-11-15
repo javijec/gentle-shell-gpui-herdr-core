@@ -378,6 +378,73 @@ async function exclusiveFileCopy(source, destination) {
   }
 }
 
+const MAX_COPY_FILES = 500;
+const MAX_COPY_BYTES = 64 * 1024 * 1024;
+const MAX_COPY_DEPTH = 24;
+
+// Directory copying is deliberately bounded and rejects symlinks,
+// Git internals, unsupported file types and cross-root paths.
+async function safeRecursiveCopy(source, destination, root) {
+  let count = 0;
+  let bytes = 0;
+  async function inspect(dir, depth) {
+    if (depth > MAX_COPY_DEPTH) throw new Error("Folder copy exceeds 24 levels");
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const children = [];
+    for (const entry of entries) {
+      if (++count > MAX_COPY_FILES) {
+        throw new Error("Folder copy exceeds 500 entries");
+      }
+      if (!validEntryName(entry.name)) {
+        throw new Error("Folder includes protected or invalid entries");
+      }
+      const sourcePath = path.posix.join(dir, entry.name);
+      if (!within(root, sourcePath) || protectedGitPath(root, sourcePath)) {
+        throw new Error("Folder includes a path outside the project");
+      }
+      const stat = await fs.lstat(sourcePath);
+      if (stat.isSymbolicLink() ||
+          (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+        throw new Error("Folder contains a symlink or entry owned by another user");
+      }
+      if (stat.isDirectory()) {
+        children.push({ name: entry.name, type: "directory",
+          children: await inspect(sourcePath, depth + 1) });
+      } else if (stat.isFile() && stat.nlink === 1 &&
+                 stat.size <= 16 * 1024 * 1024) {
+        bytes += stat.size;
+        if (bytes > MAX_COPY_BYTES) {
+          throw new Error("Folder copy exceeds 64 MiB");
+        }
+        children.push({ name: entry.name, type: "file" });
+      } else {
+        throw new Error("Folder includes an unsupported file type");
+      }
+    }
+    return children;
+  }
+  const plan = await inspect(source, 0);
+  async function materialize(from, to, children) {
+    for (const item of children) {
+      const src = path.posix.join(from, item.name);
+      const dst = path.posix.join(to, item.name);
+      if (item.type === "directory") {
+        await fs.mkdir(dst, { mode: 0o700 });
+        await materialize(src, dst, item.children);
+      } else {
+        await exclusiveFileCopy(src, dst);
+      }
+    }
+  }
+  await fs.mkdir(destination, { mode: 0o700 });
+  try {
+    await materialize(source, destination, plan);
+  } catch (error) {
+    await fs.rm(destination, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 async function remoteEntry(req) {
   const root = await fs.realpath(req.root);
   if (root === "/" || root !== await fs.realpath(process.cwd())) {
@@ -397,9 +464,6 @@ async function remoteEntry(req) {
   if (!["rename", "duplicate", "move", "copy"].includes(op)) {
     throw new Error("Unsupported file operation");
   }
-  if ((op === "duplicate" || op === "copy") && directory) {
-    throw new Error("Recursive folder duplication is not supported yet");
-  }
   let destinationDir = path.posix.dirname(source);
   let newName = path.posix.basename(source);
   if (op === "rename") {
@@ -409,8 +473,8 @@ async function remoteEntry(req) {
     destinationDir = await safeRemotePath(req.root, req.destinationDir);
     const targetStat = await fs.lstat(destinationDir);
     if (!targetStat.isDirectory()) throw new Error("Destination is not a folder");
-    if (op === "move" && directory && within(source, destinationDir)) {
-      throw new Error("Cannot move a directory inside itself");
+    if (directory && within(source, destinationDir)) {
+      throw new Error("Cannot copy or move a directory inside itself");
     }
   }
   if (op === "duplicate" || op === "copy") {
@@ -441,7 +505,11 @@ async function remoteEntry(req) {
   }
   if (source === destination) return { path: source, operation: op };
   if (op === "duplicate" || op === "copy") {
-    await exclusiveFileCopy(source, destination);
+    if (directory) {
+      await safeRecursiveCopy(source, destination, root);
+    } else {
+      await exclusiveFileCopy(source, destination);
+    }
   } else {
     // POSIX rename can overwrite. Reserve a directory's destination first;
     // files use an exclusive hard-link followed by unlink.
