@@ -28,6 +28,7 @@ pub enum MachinesEvent {
 pub struct MachinesView {
     snapshot: Option<model::Snapshot>,
     known_agents: HashSet<String>,
+    terminated_sessions: HashSet<String>,
     loading: bool,
     busy: bool,
     error: Option<String>,
@@ -50,6 +51,7 @@ impl MachinesView {
         let mut this = Self {
             snapshot: None,
             known_agents: HashSet::new(),
+            terminated_sessions: HashSet::new(),
             loading: false,
             busy: false,
             error: None,
@@ -75,6 +77,17 @@ impl MachinesView {
     ) {
         if self.known_agents != addresses {
             self.known_agents = addresses;
+            cx.notify();
+        }
+    }
+
+    /// Persistent tombstones hide finished Herdr terminal records that
+    /// the user permanently terminated from Machines.
+    pub(crate) fn set_terminated_sessions(
+        &mut self, addresses: HashSet<String>, cx: &mut Context<Self>,
+    ) {
+        if self.terminated_sessions != addresses {
+            self.terminated_sessions = addresses;
             cx.notify();
         }
     }
