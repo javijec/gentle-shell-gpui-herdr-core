@@ -425,6 +425,12 @@ async function safeRecursiveCopy(source, destination, root) {
   }
   const plan = await inspect(source, 0);
   async function materialize(from, to, children) {
+    const current = await fs.lstat(from);
+    if (!current.isDirectory() || current.isSymbolicLink() ||
+        (typeof process.getuid === "function" && current.uid !== process.getuid()) ||
+        !within(root, await fs.realpath(from))) {
+      throw new Error("Folder changed during copying; refusing to follow it");
+    }
     for (const item of children) {
       const src = path.posix.join(from, item.name);
       const dst = path.posix.join(to, item.name);
