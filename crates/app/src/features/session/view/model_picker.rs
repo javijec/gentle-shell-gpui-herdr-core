@@ -362,20 +362,6 @@ impl SessionView {
     }
 }
 
-fn provider_color(provider: &str) -> Hsla {
-    let palette = [
-        ui::petal(),
-        ui::info(),
-        ui::success(),
-        ui::champagne(),
-        ui::warning(),
-    ];
-    let hash = provider
-        .bytes()
-        .fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize));
-    palette[hash % palette.len()]
-}
-
 fn models_loading(loaded: bool, status: &BackendStatus) -> bool {
     !loaded && matches!(status, BackendStatus::Starting | BackendStatus::Ready(_))
 }
