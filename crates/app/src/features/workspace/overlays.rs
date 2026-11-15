@@ -491,7 +491,9 @@ impl Workspace {
                 SettingsEvent::Close => this.close_overlay(window, cx),
                 SettingsEvent::Changed => {
                     for tab in this.sessions() {
-                        tab.update(cx, |session, cx| session.reload_models(window, cx));
+                        if !tab.read(cx).is_remote_herdr() {
+                            tab.update(cx, |session, cx| session.reload_models(window, cx));
+                        }
                     }
                 }
                 SettingsEvent::DevicesChanged(prefs) => {
@@ -509,7 +511,9 @@ impl Workspace {
                 }
                 SettingsEvent::BackendUpdated => {
                     for tab in this.sessions() {
-                        tab.update(cx, |session, cx| session.restart_for_update(window, cx));
+                        if !tab.read(cx).is_remote_herdr() {
+                            tab.update(cx, |session, cx| session.restart_for_update(window, cx));
+                        }
                     }
                 }
                 SettingsEvent::Setup(event) => {
@@ -643,7 +647,9 @@ impl Workspace {
                 }
                 ProvidersEvent::Changed => {
                     for tab in this.sessions() {
-                        tab.update(cx, |session, cx| session.reload_models(window, cx));
+                        if !tab.read(cx).is_remote_herdr() {
+                            tab.update(cx, |session, cx| session.reload_models(window, cx));
+                        }
                     }
                 }
             },
