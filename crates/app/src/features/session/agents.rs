@@ -481,6 +481,13 @@ impl SessionView {
             (bits.join(" · "), running > 0, helpers.len())
         };
 
+        let (host, connected) = if self.is_remote_herdr() {
+            let machine = self.remote_fs_target()
+                .map_or_else(|| "Remote".to_string(), |(machine, _)| machine);
+            (machine, self.remote_fs_process().is_some())
+        } else {
+            ("Local".to_string(), self.process().is_some())
+        };
         let header = ui::screen_header()
             .child(Icon::new(IconName::Users).small().text_color(ui::muted()))
             .child(
@@ -491,6 +498,11 @@ impl SessionView {
                     .text_color(ui::fg())
                     .child("Agents"),
             )
+            .child(ui::chip(
+                format!("{} · {}", host,
+                    if connected { "connected" } else { "offline" }),
+                if connected { ui::accent() } else { ui::warning() },
+            ))
             .child(
                 div()
                     .flex_1()
