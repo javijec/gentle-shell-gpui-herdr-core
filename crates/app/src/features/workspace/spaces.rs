@@ -110,6 +110,37 @@ impl Workspace {
         self.switch_workspace(index, window, cx);
     }
 
+    /// Prompt for a local project folder before starting a new agent.
+    /// Cancelling the native chooser does not open any pane or Pi session.
+    /// Reuses the same GPUI path prompt as workspace creation.
+    pub(super) fn pick_local_agent_folder(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose a folder for Gentle Shell".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.pop() else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                if path.is_dir() {
+                    this.open_local_agent_in_directory(path, window, cx);
+                } else {
+                    window.push_notification(Notification::info(
+                        "Choose an existing local folder before creating the agent.",
+                    ), cx);
+                }
+            });
+        }).detach();
+    }
+
     pub(super) fn pick_workspace_folder(
         &mut self,
         name: String,
