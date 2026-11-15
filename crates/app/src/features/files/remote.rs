@@ -4,7 +4,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Editor, EditorState, InputEvent};
+use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -54,10 +54,15 @@ struct RemoteGitFile {
 struct RemoteGitBranch {
     name: String,
     current: bool,
+    local: bool,
 }
 
 struct RemoteGitSnapshot {
     toplevel: String,
+    head_oid: Option<String>,
+    current_branch: Option<String>,
+    index_token: Option<String>,
+    writes_enabled: bool,
     files: Vec<RemoteGitFile>,
     branches: Vec<RemoteGitBranch>,
     files_truncated: bool,
@@ -106,13 +111,75 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
                 .ok_or("Invalid remote branch")?;
             let current = item["current"].as_bool()
                 .ok_or("Missing active branch state")?;
-            Ok(RemoteGitBranch { name: name.to_owned(), current })
+            Ok(RemoteGitBranch {
+                name: name.to_owned(), current,
+                local: item["local"].as_bool().unwrap_or(false),
+            })
         }).collect::<Result<Vec<_>, &'static str>>()?;
+    let head_oid = match data.get("headOid") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) if (s.len() == 40 || s.len() == 64)
+            && s.bytes().all(|b| b.is_ascii_hexdigit()) => Some(s.to_owned()),
+        _ => return Err("Invalid remote Git HEAD"),
+    };
+    let current_branch = match data.get("currentBranch") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) if !s.is_empty()
+            && s.len() <= 512 && !s.chars().any(char::is_control) => Some(s.to_owned()),
+        _ => return Err("Invalid remote Git current branch"),
+    };
+    let index_token = data["indexToken"].as_str()
+        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_owned);
+    let writes_enabled = data["writesEnabled"].as_bool() == Some(true)
+        && index_token.is_some()
+        && data["indexTruncated"].as_bool() != Some(true);
     Ok(RemoteGitSnapshot {
-        toplevel, files, branches,
+        toplevel, head_oid, current_branch, index_token, writes_enabled,
+        files, branches,
         files_truncated: data["filesTruncated"].as_bool().unwrap_or(false),
         branches_truncated: data["branchesTruncated"].as_bool().unwrap_or(false),
     })
+}
+
+#[cfg(test)]
+mod remote_git_snapshot_tests {
+    use super::parse_git_snapshot;
+    use serde_json::json;
+
+    #[test]
+    fn supports_guarded_5d_snapshots_and_old_read_only_bridge() {
+        let mut value = json!({
+            "toplevel": "/srv/workspaces/JaviPi",
+            "readOnly": true,
+            "writesEnabled": true,
+            "headOid": "a".repeat(40),
+            "currentBranch": "main",
+            "indexToken": "b".repeat(64),
+            "indexTruncated": false,
+            "files": [{ "path": "tracked.txt", "index": "M", "worktree": " " }],
+            "branches": [{ "name": "main", "current": true, "local": true }],
+        });
+        let result = parse_git_snapshot(&value).expect("valid 5D snapshot");
+        assert!(result.writes_enabled);
+        assert_eq!(result.index_token.as_deref().map(str::len), Some(64));
+        assert!(result.branches[0].local);
+        value.as_object_mut().expect("object").remove("indexToken");
+        assert!(!parse_git_snapshot(&value).expect("missing token").writes_enabled);
+        value["readOnly"] = json!(false);
+        assert!(parse_git_snapshot(&value).is_err());
+    }
+
+    #[test]
+    fn rejects_paths_that_escape_linux_repository() {
+        let value = json!({
+            "toplevel": "/srv/workspaces/JaviPi",
+            "readOnly": true,
+            "files": [{ "path": "../outside", "index": "M", "worktree": " " }],
+            "branches": [],
+        });
+        assert!(parse_git_snapshot(&value).is_err());
+    }
 }
 
 const MAX_EDIT_BYTES: usize = 128 * 1024;
@@ -135,6 +202,14 @@ pub struct RemoteFilesView {
     git_loading: bool,
     git_error: Option<String>,
     git_generation: u64,
+    git_busy: bool,
+    git_feedback: Option<String>,
+    git_summary: Entity<InputState>,
+    git_branch_name: Entity<InputState>,
+    git_confirm_commit: Option<String>,
+    git_confirm_create: Option<String>,
+    git_confirm_switch: Option<String>,
+    _git_events: Vec<Subscription>,
     focus: FocusHandle,
     entries: Vec<RemoteEntry>,
     preview: Option<RemotePreview>,
@@ -205,6 +280,20 @@ impl RemoteFilesView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let git_summary = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Commit summary (staged files)")
+        });
+        let git_branch_name = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("New local branch name")
+        });
+        let git_events = vec![
+            cx.subscribe(&git_summary, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event { cx.notify(); }
+            }),
+            cx.subscribe(&git_branch_name, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event { cx.notify(); }
+            }),
+        ];
         let mut view = Self {
             session,
             machine,
@@ -216,6 +305,14 @@ impl RemoteFilesView {
             git_loading: false,
             git_error: None,
             git_generation: 0,
+            git_busy: false,
+            git_feedback: None,
+            git_summary,
+            git_branch_name,
+            git_confirm_commit: None,
+            git_confirm_create: None,
+            git_confirm_switch: None,
+            _git_events: git_events,
             focus: cx.focus_handle(),
             entries: Vec::new(),
             preview: None,
@@ -603,6 +700,9 @@ impl RemoteFilesView {
     }
 
     fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        self.git_confirm_commit = None;
+        self.git_confirm_create = None;
+        self.git_confirm_switch = None;
         self.git_generation = self.git_generation.wrapping_add(1);
         let generation = self.git_generation;
         self.git_loading = true;
@@ -643,6 +743,124 @@ impl RemoteFilesView {
             });
         }).detach();
         cx.notify();
+    }
+
+    // Writes never use the local Git module. The bridge rechecks repo identity,
+    // HEAD, branch and selected file states before running fixed Git verbs.
+    fn git_write(&mut self, command: serde_json::Value, cx: &mut Context<Self>) {
+        if self.git_busy || self.git_loading { return; }
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.git_error = Some("Remote agent disconnected; no Git changes were made.".into());
+            cx.notify();
+            return;
+        };
+        self.git_busy = true;
+        self.git_error = None;
+        self.git_feedback = None;
+        self.git_confirm_commit = None;
+        self.git_confirm_create = None;
+        self.git_confirm_switch = None;
+        let response = cx.background_executor().spawn(async move {
+            process.request(command).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = response.await;
+            let _ = this.update(cx, |this, cx| {
+                this.git_busy = false;
+                match result {
+                    Ok(_) => {
+                        this.git_feedback = Some("Remote Git updated. Status refreshed.".into());
+                        this.refresh_git(cx);
+                    }
+                    Err(error) => {
+                        this.git_error = Some(friendly_error(&error.to_string()));
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    fn git_file_action(&mut self, action: &'static str, path: String,
+        index: char, worktree: char, cx: &mut Context<Self>,
+    ) {
+        let Some(snapshot) = self.git.as_ref().filter(|s| s.writes_enabled) else { return; };
+        let command = json!({
+            "type": action, "root": self.root, "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "path": path, "expectedIndex": index.to_string(),
+            "expectedWorktree": worktree.to_string(),
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_commit(&mut self, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|s| s.writes_enabled
+            && !s.files_truncated && s.files.iter()
+                .any(|entry| entry.index != ' ' && entry.index != '?'))
+        else { return; };
+        let summary = self.git_summary.read(cx).value().trim().to_owned();
+        if summary.is_empty() { return; }
+        if self.git_confirm_commit.as_deref() != Some(summary.as_str()) {
+            self.git_confirm_commit = Some(summary);
+            self.git_feedback = Some(
+                "Review the staged changes, then click Confirm commit.".into());
+            cx.notify();
+            return;
+        }
+        let command = json!({
+            "type": "herdr_git_commit", "root": self.root,
+            "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "summary": summary,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_create_branch(&mut self, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|s| s.writes_enabled
+            && s.head_oid.is_some() && s.current_branch.is_some())
+        else { return; };
+        let branch = self.git_branch_name.read(cx).value().trim().to_owned();
+        if branch.is_empty() { return; }
+        if self.git_confirm_create.as_deref() != Some(branch.as_str()) {
+            self.git_confirm_create = Some(branch);
+            self.git_feedback = Some("Click Confirm create to add the local branch.".into());
+            cx.notify();
+            return;
+        }
+        let command = json!({
+            "type": "herdr_git_create_branch", "root": self.root,
+            "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "branch": branch,
+        });
+        self.git_write(command, cx);
+    }
+
+    fn git_switch_branch(&mut self, branch: String, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|s| s.writes_enabled
+            && s.head_oid.is_some() && s.current_branch.is_some())
+        else { return; };
+        if self.git_confirm_switch.as_deref() != Some(branch.as_str()) {
+            self.git_confirm_switch = Some(branch);
+            self.git_feedback = Some(
+                "Branch switching requires a clean tree. Click Confirm switch.".into());
+            cx.notify();
+            return;
+        }
+        let command = json!({
+            "type": "herdr_git_switch_branch", "root": self.root,
+            "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid, "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+            "branch": branch,
+        });
+        self.git_write(command, cx);
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> Div {
@@ -689,9 +907,166 @@ impl RemoteFilesView {
             )
     }
 
-    fn render_git_panel(&self, cx: &mut Context<Self>) -> Div {
+    /// Build each row in its own stack frame and erase the resulting
+    /// GPUI element type before returning to the list builder.
+    fn push_git_file_row(
+        &self, rows: &mut Vec<AnyElement>, snapshot: &RemoteGitSnapshot,
+        index: usize, entry: &RemoteGitFile, writable: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let target = format!("{}/{}",
+            snapshot.toplevel.trim_end_matches('/'), entry.path);
+        let diff_target = target.clone();
+        let stage_target = target.clone();
+        let unstage_target = target;
+        let badge = format!("{}{}", entry.index, entry.worktree);
+        let index_state = entry.index;
+        let worktree_state = entry.worktree;
+        let can_stage = writable && (entry.worktree != ' ' || entry.index == '?');
+        let can_unstage = writable && entry.index != ' ' && entry.index != '?';
+        rows.push(
+            h_flex()
+                .id(("remote-git-change", index))
+                .h(px(32.)).px_2().gap_1()
+                .child(div().w(px(26.)).font_family(ui::MONO)
+                    .text_xs().text_color(ui::warning()).child(badge))
+                .child(
+                    div().id(("remote-git-diff-link", index))
+                        .flex_1().min_w_0().truncate().text_xs()
+                        .cursor_pointer()
+                        .hover(|row| row.bg(ui::surface_hover()))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(RemoteFilesEvent::OpenDiff(diff_target.clone()));
+                        }))
+                        .child(entry.path.clone()),
+                )
+                .when(can_stage, |row| row.child(
+                    Button::new(format!("remote-git-stage-{index}"))
+                        .ghost().xsmall().label("Stage")
+                        .disabled(self.git_busy || self.git_loading)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.git_file_action("herdr_git_stage",
+                                stage_target.clone(), index_state, worktree_state, cx);
+                        })),
+                ))
+                .when(can_unstage, |row| row.child(
+                    Button::new(format!("remote-git-unstage-{index}"))
+                        .ghost().xsmall().label("Unstage")
+                        .disabled(self.git_busy || self.git_loading)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.git_file_action("herdr_git_unstage",
+                                unstage_target.clone(), index_state, worktree_state, cx);
+                        })),
+                ))
+                .into_any_element(),
+        );
+    }
+
+    fn push_git_commit_form(
+        &self, rows: &mut Vec<AnyElement>, snapshot: &RemoteGitSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let staged_count = snapshot.files.iter()
+            .filter(|entry| entry.index != ' ' && entry.index != '?').count();
+        let summary = self.git_summary.read(cx).value().trim().to_owned();
+        let confirmed = self.git_confirm_commit.as_deref() == Some(summary.as_str());
+        rows.push(
+            v_flex().px_3().py_3().gap_2().border_t_1()
+                .border_color(ui::border())
+                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("Commit staged changes ({staged_count} visible)")))
+                .child(div().text_xs().text_color(ui::muted())
+                    .child("Only staged Git changes are committed; \
+unstaged files stay untouched."))
+                .child(Input::new(&self.git_summary).small())
+                .child(
+                    Button::new("remote-git-commit")
+                        .primary().small().w_full()
+                        .label(if confirmed { "Confirm commit" } else { "Review commit" })
+                        .disabled(self.git_busy || self.git_loading
+                            || summary.is_empty() || staged_count == 0
+                            || snapshot.files_truncated)
+                        .on_click(cx.listener(|this, _, _, cx| this.git_commit(cx))),
+                )
+                .when(snapshot.files_truncated, |v| v.child(
+                    div().text_xs().text_color(ui::warning())
+                        .child("Refresh in a smaller worktree before committing."),
+                ))
+                .into_any_element(),
+        );
+    }
+
+    fn push_git_branch_row(
+        &self, rows: &mut Vec<AnyElement>, branch: &RemoteGitBranch,
+        index: usize, writable: bool, cx: &mut Context<Self>,
+    ) {
+        let name = branch.name.clone();
+        let confirmed = self.git_confirm_switch.as_deref() == Some(name.as_str());
+        rows.push(
+            h_flex()
+                .id(("remote-git-branch", index))
+                .h(px(32.)).px_3().gap_2()
+                .child(Icon::new(IconName::GitBranch).small()
+                    .text_color(if branch.current {
+                        ui::success()
+                    } else { ui::muted() }))
+                .child(div().flex_1().min_w_0().truncate().text_xs()
+                    .font_weight(if branch.current {
+                        FontWeight::SEMIBOLD
+                    } else { FontWeight::NORMAL })
+                    .child(branch.name.clone()))
+                .when(branch.current, |row| row.child(
+                    div().text_xs().text_color(ui::success())
+                        .child("HEAD"),
+                ))
+                .when(writable && branch.local && !branch.current, |row| row.child(
+                    Button::new(format!("remote-git-switch-{index}"))
+                        .ghost().xsmall()
+                        .label(if confirmed { "Confirm switch" } else { "Switch" })
+                        .disabled(self.git_busy || self.git_loading)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.git_switch_branch(name.clone(), cx);
+                        })),
+                ))
+                .into_any_element(),
+        );
+    }
+
+    fn push_git_create_branch_form(
+        &self, rows: &mut Vec<AnyElement>, snapshot: &RemoteGitSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self.git_branch_name.read(cx).value().trim().to_owned();
+        let confirmed = self.git_confirm_create.as_deref() == Some(name.as_str());
+        rows.push(
+            v_flex().px_3().py_3().gap_2().border_t_1()
+                .border_color(ui::border())
+                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD)
+                    .child("Create local branch from HEAD"))
+                .child(Input::new(&self.git_branch_name).small())
+                .child(
+                    Button::new("remote-git-create-branch")
+                        .ghost().small().w_full()
+                        .label(if confirmed { "Confirm create" } else { "Create branch" })
+                        .disabled(self.git_busy || self.git_loading || name.is_empty()
+                            || snapshot.head_oid.is_none()
+                            || snapshot.current_branch.is_none())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.git_create_branch(cx);
+                        })),
+                )
+                .child(div().text_xs().text_color(ui::muted())
+                    .child("Switch refuses staged, unstaged and untracked changes."))
+                .into_any_element(),
+        );
+    }
+
+    /// The list owns only type-erased elements, avoiding a huge combined
+    /// GPUI render expression and keeping 5C/5D behavior identical.
+    fn render_git_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut rows: Vec<AnyElement> = Vec::new();
         if let Some(snapshot) = &self.git {
+            let writable = snapshot.writes_enabled && self.root != "/";
             rows.push(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child(snapshot.toplevel.clone()).into_any_element(),
@@ -702,65 +1077,41 @@ impl RemoteFilesView {
                         .child("Working tree clean").into_any_element());
                 }
                 for (index, entry) in snapshot.files.iter().enumerate() {
-                    let target = format!("{}/{}",
-                        snapshot.toplevel.trim_end_matches('/'), entry.path);
-                    let badge = format!("{}{}", entry.index, entry.worktree);
-                    rows.push(
-                        h_flex()
-                            .id(("remote-git-change", index))
-                            .h(px(28.))
-                            .px_2()
-                            .gap_2()
-                            .cursor_pointer()
-                            .hover(|row| row.bg(ui::surface_hover()))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(RemoteFilesEvent::OpenDiff(target.clone()));
-                            }))
-                            .child(div().w(px(28.)).font_family(ui::MONO)
-                                .text_xs().text_color(ui::warning()).child(badge))
-                            .child(div().flex_1().min_w_0().truncate()
-                                .text_xs().child(entry.path.clone()))
-                            .into_any_element(),
-                    );
+                    self.push_git_file_row(&mut rows, snapshot, index, entry, writable, cx);
                 }
                 if snapshot.files_truncated {
                     rows.push(div().px_3().py_2().text_xs()
                         .text_color(ui::warning())
                         .child("Showing first 200 changed files").into_any_element());
                 }
-            } else {
+                if writable {
+                    self.push_git_commit_form(&mut rows, snapshot, cx);
+                }
+            } else if self.tab == RemoteTab::Branches {
                 if snapshot.branches.is_empty() {
                     rows.push(div().px_3().py_3().text_sm().text_color(ui::muted())
                         .child("No Git branches").into_any_element());
                 }
                 for (index, branch) in snapshot.branches.iter().enumerate() {
-                    rows.push(
-                        h_flex()
-                            .id(("remote-git-branch", index))
-                            .h(px(28.)).px_3().gap_2()
-                            .child(Icon::new(IconName::GitBranch).small()
-                                .text_color(if branch.current {
-                                    ui::success()
-                                } else { ui::muted() }))
-                            .child(div().flex_1().min_w_0().truncate().text_xs()
-                                .font_weight(if branch.current {
-                                    FontWeight::SEMIBOLD
-                                } else { FontWeight::NORMAL })
-                                .child(branch.name.clone()))
-                            .when(branch.current, |row| row.child(
-                                div().text_xs().text_color(ui::success())
-                                    .child("HEAD"),
-                            ))
-                            .into_any_element(),
-                    );
+                    self.push_git_branch_row(&mut rows, branch, index, writable, cx);
                 }
                 if snapshot.branches_truncated {
                     rows.push(div().px_3().py_2().text_xs()
                         .text_color(ui::warning())
                         .child("Showing first 120 branches").into_any_element());
                 }
+                if writable {
+                    self.push_git_create_branch_form(&mut rows, snapshot, cx);
+                }
             }
         }
+        v_flex().children(rows).into_any_element()
+    }
+
+    /// Keep the root GPUI render shallow on Windows debug builds.
+    /// 5D previously built every interactive row and both editors inside
+    /// this one render frame, overflowing the Windows UI thread stack.
+    fn render_git_panel(&self, cx: &mut Context<Self>) -> Div {
         v_flex()
             .size_full()
             .min_h_0()
@@ -774,6 +1125,7 @@ impl RemoteFilesView {
                         Button::new("remote-git-refresh")
                             .ghost().xsmall()
                             .icon(Icon::new(IconName::RefreshCw))
+                            .disabled(self.git_busy || self.git_loading)
                             .tooltip("Refresh remote Git status and branches")
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_git(cx))),
                     )
@@ -790,20 +1142,32 @@ impl RemoteFilesView {
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child("Reading status from remote Git…"),
             ))
+            .when(self.git_busy, |panel| panel.child(
+                div().px_3().py_2().text_xs().text_color(ui::muted())
+                    .child("Applying guarded remote Git operation…"),
+            ))
             .when_some(self.git_error.clone(), |panel, error| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::warning())
                     .child(error),
             ))
+            .when_some(self.git_feedback.clone(), |panel, feedback| panel.child(
+                div().px_3().py_2().text_xs().text_color(ui::muted())
+                    .child(feedback),
+            ))
             .child(
                 div().id("remote-git-scroll").flex_1().min_h_0()
                     .overflow_y_scroll()
-                    .child(v_flex().children(rows)),
+                    .child(self.render_git_list(cx)),
             )
             .child(
                 div().h(px(26.)).flex_none().border_t_1()
                     .border_color(ui::border()).px_3().text_size(px(10.))
                     .text_color(ui::muted())
-                    .child("Remote Git · read-only · click a change to view diff"),
+                    .child(if self.git.as_ref().is_some_and(|s| s.writes_enabled) {
+                        "Remote Git · guarded writes · no push/discard"
+                    } else {
+                        "Remote Git · read-only · open a new 5D agent for writes"
+                    }),
             )
     }
 

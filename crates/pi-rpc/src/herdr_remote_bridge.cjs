@@ -331,9 +331,9 @@ async function remoteFilesRequest(req) {
   }
 }
 
-// Read-only Git queries for the already running agent's Linux project.
-// Never execute user-provided command names, Git aliases, shells, hooks,
-// Windows Git, checkout, staging, commits, pushes or repository mutations.
+// Remote Git is scoped to the currently selected agent's Linux repository.
+// 5C reads remain unchanged; 5D mutations have separate, explicit commands.
+// Never run Git aliases, a shell, local Windows Git or network Git actions.
 const MAX_GIT_LIST = 200;
 const MAX_GIT_BRANCHES = 120;
 const MAX_GIT_DIFF = 96 * 1024;
@@ -378,6 +378,33 @@ function runGit(directory, args, allowedDiffExit = false) {
 // output. A busy repository may have millions of untracked files: collect
 // at most N complete records plus one sentinel, then stop Git. This is not
 // a transport failure; it is an explicitly marked partial snapshot.
+// Mutations use mandatory Git locks and never run hooks or launch editors.
+// Git receives fixed verbs and validated arguments, not arbitrary commands.
+function runGitMutation(directory, args) {
+  return new Promise((resolve, reject) => {
+    execFile("git", [
+      "-c", "core.fsmonitor=false",
+      "-c", "core.hooksPath=/dev/null",
+      "-c", "commit.gpgsign=false",
+      "-C", directory, ...args,
+    ], {
+      shell: false, timeout: 30000, maxBuffer: 128 * 1024,
+      encoding: "buffer",
+      env: { ...process.env, GIT_PAGER: "cat",
+        GIT_TERMINAL_PROMPT: "0", GIT_EDITOR: "true",
+        GIT_EXTERNAL_DIFF: "0" },
+    }, (error, stdout, stderr) => {
+      if (error) {
+        const detail = Buffer.from(stderr || "").toString("utf8").trim() ||
+          error.message || "Git mutation failed";
+        reject(new Error("Remote Git write failed: " + detail.slice(0, 300)));
+      } else {
+        resolve(Buffer.from(stdout));
+      }
+    });
+  });
+}
+
 function runGitListing(directory, args, separator, maxRecords) {
   return new Promise((resolve, reject) => {
     const child = spawn("git", [
@@ -505,34 +532,48 @@ function parseGitBranches(output) {
   const rows = strictUtf8(output).split("\n").filter(Boolean);
   const branches = [];
   for (const row of rows.slice(0, MAX_GIT_BRANCHES)) {
-    const [name, mark] = row.split("\0");
+    const [name, mark, fullRef] = row.split("\0");
     if (!name || name.length > 512 || /[\x00-\x1f\x7f]/.test(name)) {
       throw new Error("Invalid Git branch");
     }
-    branches.push({ name, current: mark === "*" });
+    branches.push({ name, current: mark === "*",
+      local: typeof fullRef === "string" && fullRef.startsWith("refs/heads/") });
   }
   return { branches, truncated: rows.length > branches.length };
+}
+
+async function gitRefState(toplevel) {
+  const headOid = await runGit(toplevel, ["rev-parse", "--verify", "-q", "HEAD"])
+    .then((bytes) => strictUtf8(bytes).trim()).catch(() => null);
+  const currentBranch = await runGit(toplevel, [
+    "symbolic-ref", "--quiet", "--short", "HEAD",
+  ]).then((bytes) => strictUtf8(bytes).trim()).catch(() => null);
+  return { headOid, currentBranch };
 }
 
 async function remoteGit(req) {
   const { toplevel } = await gitRepository(req.root);
   if (req.type === "herdr_git_snapshot") {
-    const [status, branches] = await Promise.all([
+    const [status, branches, index] = await Promise.all([
       runGitListing(toplevel, ["status", "--porcelain=v1", "-z",
         "--no-renames", "--untracked-files=all", "--ignore-submodules=all"],
         0, MAX_GIT_LIST),
       runGitListing(toplevel, ["branch", "--all", "--list",
-        "--format=%(refname:short)%00%(HEAD)"],
+        "--format=%(refname:short)%00%(HEAD)%00%(refname)"],
         10, MAX_GIT_BRANCHES),
+      runGitListing(toplevel, ["diff", "--cached", "--raw",
+        "-z", "--no-renames"], 0, MAX_GIT_LIST * 2),
     ]);
     const files = parseGitEntries(status.output);
     const refs = parseGitBranches(branches.output);
+    const { headOid, currentBranch } = await gitRefState(toplevel);
     return {
-      toplevel, files: files.entries,
+      toplevel, headOid, currentBranch, files: files.entries,
+      indexToken: sha256(index.output), indexTruncated: index.truncated,
       filesTruncated: files.truncated || status.truncated,
       branches: refs.branches,
       branchesTruncated: refs.truncated || branches.truncated,
-      readOnly: true,
+      readOnly: true, writesEnabled: true,
     };
   }
   if (req.type !== "herdr_git_diff" || !validLinuxPath(req.path)) {
@@ -601,6 +642,189 @@ async function remoteGit(req) {
   };
 }
 
+
+// Only explicit mutations below may change a repo. Each request names the
+// exact repo and the HEAD/branch displayed by the UI. No stage-all or
+// unstage-all, no discard, reset, push, pull, fetch or forced checkout.
+const gitWriteInFlight = new Set();
+const GIT_MUTATIONS = [
+  "herdr_git_stage", "herdr_git_unstage", "herdr_git_commit",
+  "herdr_git_create_branch", "herdr_git_switch_branch",
+];
+
+async function checkGitIndexRequest(req, toplevel) {
+  if (typeof req.expectedIndexToken !== "string" ||
+      !/^[a-f0-9]{64}$/.test(req.expectedIndexToken)) {
+    throw new Error("Missing remote Git index revision; refresh before writing");
+  }
+  const index = await runGitListing(toplevel, [
+    "diff", "--cached", "--raw", "-z", "--no-renames",
+  ], 0, MAX_GIT_LIST * 2);
+  if (index.truncated || sha256(index.output) !== req.expectedIndexToken) {
+    throw new Error("Conflict: staged Git index changed. Refresh before writing");
+  }
+  return index.output.length > 0;
+}
+
+function validateGitRefRequest(req, toplevel) {
+  if (req.toplevel !== toplevel || toplevel === "/") {
+    throw new Error("Remote Git write requires the selected repository root");
+  }
+  if (!Object.hasOwn(req, "expectedHead") ||
+      !Object.hasOwn(req, "expectedBranch") ||
+      !(req.expectedHead === null ||
+        (typeof req.expectedHead === "string" &&
+          /^[a-f0-9]{40,64}$/.test(req.expectedHead))) ||
+      !(req.expectedBranch === null ||
+        (typeof req.expectedBranch === "string" &&
+          req.expectedBranch.length > 0 && req.expectedBranch.length <= 512))) {
+    throw new Error("Remote Git write requires the expected HEAD and branch");
+  }
+}
+
+async function checkGitRefRequest(req, toplevel) {
+  const actual = await gitRefState(toplevel);
+  if (actual.headOid !== req.expectedHead ||
+      actual.currentBranch !== req.expectedBranch) {
+    throw new Error("Conflict: Git HEAD or branch changed. Refresh before writing");
+  }
+}
+
+async function selectedGitEntry(req, toplevel) {
+  if (!validLinuxPath(req.path)) {
+    throw new Error("Expected an absolute remote Git file path");
+  }
+  const target = path.posix.normalize(req.path);
+  if (target === toplevel || !within(toplevel, target)) {
+    throw new Error("Git file is outside the selected repository");
+  }
+  const relative = path.posix.relative(toplevel, target);
+  if (!safeGitRelative(relative)) {
+    throw new Error("Invalid Git file name");
+  }
+  // Never stage a symlink, an external file, or a directory. A deleted
+  // tracked file is allowed only if its parent still resolves within root.
+  const parent = await fs.realpath(path.posix.dirname(target));
+  if (!within(toplevel, parent)) {
+    throw new Error("Git file parent resolves outside the repository");
+  }
+  let stat = null;
+  try { stat = await fs.lstat(target); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  if (stat && (!stat.isFile() || stat.isSymbolicLink())) {
+    throw new Error("Only regular files and tracked deletions may be staged");
+  }
+  if (stat && !within(toplevel, await fs.realpath(target))) {
+    throw new Error("Git file resolves outside the repository");
+  }
+  if (typeof req.expectedIndex !== "string" || req.expectedIndex.length !== 1 ||
+      typeof req.expectedWorktree !== "string" ||
+      req.expectedWorktree.length !== 1) {
+    throw new Error("Missing expected Git file state");
+  }
+  const output = await runGit(toplevel, [
+    "status", "--porcelain=v1", "-z", "--no-renames",
+    "--untracked-files=all", "--ignore-submodules=all",
+    "--", ":(literal)" + relative,
+  ]);
+  const entries = parseGitEntries(output).entries;
+  if (entries.length !== 1 || entries[0].path !== relative ||
+      entries[0].index !== req.expectedIndex ||
+      entries[0].worktree !== req.expectedWorktree) {
+    throw new Error("Conflict: Git file changed. Refresh before writing");
+  }
+  return relative;
+}
+
+function validatedBranchName(name) {
+  if (typeof name !== "string" || name.length > 120 ||
+      !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)) {
+    throw new Error("Invalid local branch name");
+  }
+  return name;
+}
+
+async function remoteGitWrite(req) {
+  const { toplevel } = await gitRepository(req.root);
+  validateGitRefRequest(req, toplevel);
+  if (gitWriteInFlight.has(toplevel)) {
+    throw new Error("Another remote Git write is already in progress");
+  }
+  gitWriteInFlight.add(toplevel);
+  try {
+    await checkGitRefRequest(req, toplevel);
+    const hasStaged = await checkGitIndexRequest(req, toplevel);
+    if (req.type === "herdr_git_stage" || req.type === "herdr_git_unstage") {
+      const relative = await selectedGitEntry(req, toplevel);
+      const literal = ":(literal)" + relative;
+      if (req.type === "herdr_git_stage") {
+        if (req.expectedWorktree === " " && req.expectedIndex !== "?") {
+          throw new Error("No unstaged change for the selected file");
+        }
+        await runGitMutation(toplevel, ["add", "-A", "--", literal]);
+      } else {
+        if (req.expectedIndex === " " || req.expectedIndex === "?") {
+          throw new Error("No staged change for the selected file");
+        }
+        if (req.expectedHead === null) {
+          await runGitMutation(toplevel, ["rm", "--cached", "-q", "--", literal]);
+        } else {
+          await runGitMutation(toplevel, ["restore", "--staged", "--", literal]);
+        }
+      }
+    } else if (req.type === "herdr_git_commit") {
+      if (!req.expectedBranch) {
+        throw new Error("Cannot commit from a detached HEAD");
+      }
+      const summary = req.summary;
+      if (typeof summary !== "string" || summary.trim() !== summary ||
+          summary.length < 1 || summary.length > 120 ||
+          /[\x00-\x1f\x7f]/.test(summary)) {
+        throw new Error("Commit summary must be 1-120 characters on one line");
+      }
+      const message = req.description === undefined ? "" : req.description;
+      if (typeof message !== "string" || message.length > 4000 ||
+          message.includes("\0")) {
+        throw new Error("Invalid commit description");
+      }
+      if (!hasStaged) {
+        throw new Error("No staged changes to commit");
+      }
+      const args = ["commit", "--no-verify", "--no-gpg-sign", "-m", summary];
+      if (message.trim()) args.push("-m", message.trim());
+      await runGitMutation(toplevel, args);
+    } else if (req.type === "herdr_git_create_branch" ||
+               req.type === "herdr_git_switch_branch") {
+      if (!req.expectedBranch || !req.expectedHead) {
+        throw new Error("Branch operations need an existing branch and commit");
+      }
+      const branch = validatedBranchName(req.branch);
+      await runGit(toplevel, ["check-ref-format", "--branch", branch]);
+      if (req.type === "herdr_git_create_branch") {
+        await runGitMutation(toplevel, ["branch", branch]);
+      } else {
+        // Refuse every switch when dirty, including untracked files.
+        const dirty = await runGitListing(toplevel, [
+          "status", "--porcelain=v1", "-z",
+          "--untracked-files=all",
+        ], 0, 1);
+        if (dirty.output.length || dirty.truncated) {
+          throw new Error("Switch requires a clean index and worktree");
+        }
+        await runGit(toplevel, [
+          "show-ref", "--verify", "--quiet", "refs/heads/" + branch,
+        ]);
+        await runGitMutation(toplevel, ["switch", "--no-guess", branch]);
+      }
+    } else {
+      throw new Error("Unsupported remote Git write");
+    }
+    return { toplevel, operation: req.type, ...await gitRefState(toplevel) };
+  } finally {
+    gitWriteInFlight.delete(toplevel);
+  }
+}
+
 async function remoteGitRequest(req) {
   const command = req.type;
   const response = (success, data, error) => emit("O", JSON.stringify({
@@ -611,10 +835,12 @@ async function remoteGitRequest(req) {
     if (typeof req.id !== "string" || req.id.length > 128) {
       throw new Error("Missing request identifier");
     }
-    if (!["herdr_git_snapshot", "herdr_git_diff"].includes(command)) {
+    if (!["herdr_git_snapshot", "herdr_git_diff",
+          ...GIT_MUTATIONS].includes(command)) {
       throw new Error("Unsupported remote Git operation");
     }
-    response(true, await remoteGit(req));
+    response(true, GIT_MUTATIONS.includes(command) ?
+      await remoteGitWrite(req) : await remoteGit(req));
   } catch (error) {
     response(false, null,
       error && error.message ? error.message : "Remote Git query failed");
@@ -658,7 +884,8 @@ function inputLine() {
                         request.type === "herdr_fs_write")) {
           void remoteFilesRequest(request);
         } else if (request && (request.type === "herdr_git_snapshot" ||
-                               request.type === "herdr_git_diff")) {
+                               request.type === "herdr_git_diff" ||
+                               GIT_MUTATIONS.includes(request.type))) {
           void remoteGitRequest(request);
         } else {
           agent.stdin.write(requestLine);
