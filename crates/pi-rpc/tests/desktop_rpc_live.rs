@@ -306,6 +306,13 @@ impl Probe {
                 }
                 PumpItem::Message(Incoming::Ui(ui)) => return Ok(LiveRecord::Ui(ui)),
                 PumpItem::Message(Incoming::Event(_)) => return Ok(LiveRecord::Event),
+                // This probe owns a native PiProcess, never a Herdr transport.
+                PumpItem::Message(Incoming::ConnectionLost(reason)) => {
+                    anyhow::bail!("unexpected Herdr connection loss in native probe: {reason}")
+                }
+                PumpItem::Message(Incoming::ConnectionRestored) => {
+                    anyhow::bail!("unexpected Herdr reconnection in native probe")
+                }
                 PumpItem::Closed => anyhow::bail!("backend closed"),
                 PumpItem::Timeout => anyhow::bail!("timed out waiting for backend output"),
             }
@@ -483,6 +490,13 @@ impl Probe {
                     None => {}
                 },
                 PumpItem::Message(Incoming::Event(_)) => continue,
+                // This probe owns a native PiProcess, never a Herdr transport.
+                PumpItem::Message(Incoming::ConnectionLost(reason)) => {
+                    anyhow::bail!("unexpected Herdr connection loss in native probe: {reason}")
+                }
+                PumpItem::Message(Incoming::ConnectionRestored) => {
+                    anyhow::bail!("unexpected Herdr reconnection in native probe")
+                }
                 PumpItem::Closed => anyhow::bail!("backend closed"),
                 PumpItem::Timeout => return Ok(()),
             }
