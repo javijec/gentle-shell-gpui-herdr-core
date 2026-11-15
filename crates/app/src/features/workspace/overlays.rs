@@ -387,41 +387,30 @@ impl Workspace {
                 MachinesView::new(window, cx)
             }
         });
-        let known = self.known_herdr_agent_addresses(cx);
-        let terminated = self.terminated_herdr_sessions.clone();
-        view.update(cx, |view, cx| {
-            view.set_known_agent_addresses(known, cx);
-            view.set_terminated_sessions(terminated, cx);
-        });
         let subscription = cx.subscribe_in(
             &view,
             window,
             |this, _, event: &MachinesEvent, window, cx| match event {
                 MachinesEvent::Close => this.close_overlay(window, cx),
-                MachinesEvent::OpenTerminal(address) => {
-                    let address = address.clone();
-                    this.close_overlay(window, cx);
-                    this.show_or_attach_herdr_session(address, false, window, cx);
-                }
-                MachinesEvent::OpenExisting { address, agent } => {
-                    let (address, agent) = (address.clone(), *agent);
-                    this.close_overlay(window, cx);
-                    this.show_or_attach_herdr_session(address, agent, window, cx);
-                }
-                MachinesEvent::TerminateExisting { address, agent } => {
-                    let (address, agent) = (address.clone(), *agent);
-                    this.close_overlay(window, cx);
-                    this.confirm_terminate_herdr_address(address, agent, window, cx);
-                }
-                MachinesEvent::NewAgent(machine) => {
-                    let machine = machine.clone();
-                    this.close_overlay(window, cx);
-                    match machine {
-                        Some(machine) => {
-                            this.open_remote_directory_picker(machine, window, cx)
-                        }
-                        None => this.pick_local_agent_folder(window, cx),
-                    }
+                MachinesEvent::Changed => {
+                    // Machine registration/removal is confirmed by Herdr Core.
+                    // Re-read its authoritative machine and terminal lists
+                    // outside the GPUI render thread.
+                    cx.spawn(async move |this, cx| {
+                        let result = cx.background_executor().spawn(async {
+                            machine_model::discover()
+                        }).await;
+                        let _ = this.update(cx, |this, cx| {
+                            match result {
+                                Ok(snapshot) => {
+                                    this.machine_snapshot = Some(snapshot);
+                                    this.machine_error = None;
+                                }
+                                Err(error) => this.machine_error = Some(error),
+                            }
+                            cx.notify();
+                        });
+                    }).detach();
                 }
             },
         );
