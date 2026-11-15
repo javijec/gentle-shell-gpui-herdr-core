@@ -13,6 +13,15 @@ pub struct Machine {
     pub state: String,
     pub target: String,
     pub why: Option<String>,
+    /// Herdr's current connection state, including its retry classification.
+    pub since_ms: Option<u64>,
+    /// True for Herdr's custom duplex command transport (not SSH).
+    pub via: bool,
+    pub temporary: bool,
+    pub version: String,
+    /// Explicit warning from remote Core that the OS may end it at logout.
+    pub keeps_running_after_logout: Option<bool>,
+    pub logout_linger_user: Option<String>,
 }
 
 impl Machine {
@@ -83,6 +92,12 @@ pub fn parse_machine(value: &Value) -> Option<Machine> {
         state: str_field(value, "state").to_string(),
         target: str_field(value, "target").to_string(),
         why: optional_str(value, "why"),
+        since_ms: value.get("since_ms").and_then(Value::as_u64),
+        via: value["via"].as_bool().unwrap_or(false),
+        temporary: value["temporary"].as_bool().unwrap_or(false),
+        version: str_field(value, "version").to_string(),
+        keeps_running_after_logout: value["keeps_running_after_logout"].as_bool(),
+        logout_linger_user: optional_str(value, "logout_linger_user"),
     })
 }
 
@@ -227,9 +242,26 @@ pub fn add_machine(
     })
 }
 
-/// Remove only the registered machine profile. Herdr Core deliberately
-/// leaves every remote agent, terminal and saved conversation running.
-pub fn remove_machine(name: &str) -> Result<(), String> {
+/// An explicit reconnection request is supported by Herdr Core through
+/// machine.connect. The Core owns authentication and subsequent automatic
+/// retries; the UI never starts a shell or replaces a live session.
+pub fn reconnect_machine(name: &str) -> Result<Machine, String> {
+    let name = validate_registered_name(name)?;
+    let mut client = client()?;
+    if !client.hello().methods.iter().any(|method| method == "machine.connect") {
+        return Err("This Herdr Core has no machine.connect method. Update hc to reconnect from the app.".into());
+    }
+    let result = client.call("machine.connect", json!({"machine": name}))
+        .map_err(|error| error.to_string())?;
+    let machine = parse_machine(&result)
+        .ok_or_else(|| "Herdr returned an invalid machine state.".to_string())?;
+    if machine.name != name {
+        return Err("Herdr returned a different machine; refresh the list.".into());
+    }
+    Ok(machine)
+}
+
+fn validate_registered_name(name: &str) -> Result<&str, String> {
     let name = name.trim();
     if name.is_empty() || name.len() > 64
         || !name.chars().all(|ch| ch.is_ascii_alphanumeric()
@@ -237,6 +269,13 @@ pub fn remove_machine(name: &str) -> Result<(), String> {
     {
         return Err("Invalid Herdr machine name.".into());
     }
+    Ok(name)
+}
+
+/// Remove only the registered machine profile. Herdr Core deliberately
+/// leaves every remote agent, terminal and saved conversation running.
+pub fn remove_machine(name: &str) -> Result<(), String> {
+    let name = validate_registered_name(name)?;
     let mut client = client()?;
     if !client.hello().methods.iter().any(|method| method == "machine.rm") {
         return Err("The connected Herdr Core does not support machine.rm. Update hc.".into());
@@ -295,7 +334,8 @@ pub fn terminate_session(address: &str, is_agent: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use super::{machine_add_params, parse_machine, parse_terminal, validate_termination};
+    use super::{machine_add_params, parse_machine, parse_terminal, validate_termination,
+        validate_registered_name};
 
     #[test]
     fn machine_registration_uses_ssh_target_and_optional_name() {
@@ -364,6 +404,40 @@ mod tests {
         })).unwrap();
         assert!(!offline.connected());
         assert_eq!(offline.why.as_deref(), Some("ssh unavailable"));
+        assert!(!offline.via);
+        assert_eq!(offline.keeps_running_after_logout, None);
+    }
+
+    #[test]
+    fn parses_retry_status_and_herdr_transport_without_guessing() {
+        let machine = parse_machine(&json!({
+            "name": "wsl",
+            "host": "devbox",
+            "state": "needs_update",
+            "target": "wsl.exe -d Ubuntu -e sh -c",
+            "via": true,
+            "temporary": true,
+            "session": "sandbox",
+            "version": "1.2.3",
+            "since_ms": 12345,
+            "keeps_running_after_logout": false,
+            "logout_linger_user": "dietpi",
+        })).unwrap();
+        assert!(!machine.connected());
+        assert_eq!(machine.state, "needs_update");
+        assert!(machine.via);
+        assert!(machine.temporary);
+        assert_eq!(machine.since_ms, Some(12345));
+        assert_eq!(machine.keeps_running_after_logout, Some(false));
+        assert_eq!(machine.logout_linger_user.as_deref(), Some("dietpi"));
+    }
+
+    #[test]
+    fn rejects_invalid_registered_machine_names_before_a_rpc() {
+        for name in ["", " ", "../x", "bad/name", "bad name", "box\nnext"] {
+            assert!(validate_registered_name(name).is_err());
+        }
+        assert_eq!(validate_registered_name("pi-home").unwrap(), "pi-home");
     }
 
     #[test]

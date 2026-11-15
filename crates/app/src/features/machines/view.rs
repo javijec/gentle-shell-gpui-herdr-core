@@ -1,6 +1,8 @@
 //! Machines management modal: registered computers only.
 //! Never show, open, close or create individual sessions from this screen.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
@@ -19,12 +21,41 @@ impl MachinesView {
     ) -> AnyElement {
         let connected = machine.connected();
         let name = machine.name.clone();
+        let (state_label, state_color) = match machine.state.as_str() {
+            "connected" => ("Connected", ui::accent()),
+            "connecting" => ("Connecting", ui::muted()),
+            "needs_login" => ("Needs login", ui::warning()),
+            "needs_update" => ("Needs update", ui::warning()),
+            "unreachable" => ("Unreachable", ui::warning()),
+            _ => ("Disconnected", ui::warning()),
+        };
+        // Custom commands may contain private arguments. Do not echo them
+        // back into the machine list; Herdr Core retains the connection.
+        let transport = if machine.via { "Custom transport" } else { "SSH transport" };
         let subtitle = if !machine.host.trim().is_empty() {
-            format!("{} · {}", machine.host, machine.target)
+            format!("{transport} · {}", machine.host)
+        } else if machine.via {
+            transport.to_string()
         } else if machine.target.trim().is_empty() {
-            "Registered in Herdr Core".into()
+            "Registered in Herdr Core".to_string()
         } else {
-            machine.target.clone()
+            format!("SSH · {}", machine.target)
+        };
+        let can_retry = !matches!(machine.state.as_str(), "connected" | "connecting" | "needs_update");
+        let offline_age = machine.since_ms.and_then(|since| {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+            let minutes = (now.as_millis() as u64).saturating_sub(since) / 60_000;
+            Some(if minutes == 0 {
+                "Offline less than a minute".to_string()
+            } else {
+                format!("Offline for {minutes} min")
+            })
+        });
+        let logout_warning = match machine.logout_linger_user.as_deref() {
+            Some(user) => format!(
+                "Remote Core may stop at logout. On that machine run: sudo loginctl enable-linger -- {user}"
+            ),
+            None => "Remote Core may stop at logout; enable systemd lingering on that machine.".to_string(),
         };
         h_flex()
             .id(("machines-registered", index))
@@ -53,21 +84,63 @@ impl MachinesView {
                                 div().text_sm().font_weight(FontWeight::SEMIBOLD)
                                     .truncate().child(name.clone()),
                             )
-                            .child(ui::chip(
-                                if connected { "Connected" } else { "Disconnected" },
-                                if connected { ui::accent() } else { ui::warning() },
-                            )),
+                            .child(ui::chip(state_label, state_color)),
                     )
                     .child(
                         div().text_xs().text_color(ui::muted())
                             .truncate().child(subtitle),
                     )
-                    .when_some(machine.why.clone(), |col, why| {
+                    .when(!machine.version.is_empty(), |col| {
+                        col.child(div().text_xs().text_color(ui::faint())
+                            .child(format!("Herdr Core {}", machine.version)))
+                    })
+                    .when(machine.temporary, |col| {
+                        col.child(div().text_xs().text_color(ui::muted())
+                            .child("Temporary machine profile"))
+                    })
+                    .when_some(offline_age, |col, age| {
+                        col.child(div().text_xs().text_color(ui::faint()).child(age))
+                    })
+                    .when(machine.keeps_running_after_logout == Some(false), |col| {
+                        col.child(div().text_xs().text_color(ui::warning())
+                            .child(logout_warning))
+                    })
+                    .when(machine.state == "needs_login", |col| {
+                        col.child(div().text_xs().text_color(ui::warning())
+                            .child("Authentication needed. Configure access or run hc machine login from an interactive terminal."))
+                    })
+                    .when(machine.state == "needs_update", |col| {
+                        col.child(div().text_xs().text_color(ui::warning())
+                            .child("The remote Core is incompatible. Run hc machine update from an interactive terminal."))
+                    })
+                    // Error strings from custom transport programs may echo
+                    // their arguments (including tokens). Avoid displaying
+                    // those command details to the GUI.
+                    .when_some(machine.why.clone().filter(|_| !machine.via), |col, why| {
                         col.child(
                             div().text_xs().text_color(ui::warning()).child(why),
                         )
+                    })
+                    .when(machine.via && machine.why.is_some(), |col| {
+                        col.child(div().text_xs().text_color(ui::warning())
+                            .child("Custom transport failed. Check credentials and the connection command."))
                     }),
             )
+            .when(can_retry, |row| {
+                row.child(
+                    Button::new(("machines-reconnect", index))
+                        .ghost()
+                        .small()
+                        .icon(Icon::new(IconName::RefreshCw))
+                        .label("Retry")
+                        .disabled(self.busy)
+                        .tooltip("Ask Herdr Core to reconnect now; remote sessions are not changed")
+                        .on_click(cx.listener({
+                            let name = name.clone();
+                            move |this, _, _, cx| this.reconnect_machine(name.clone(), cx)
+                        })),
+                )
+            })
             .child(
                 Button::new(("machines-remove", index))
                     .ghost()
@@ -121,7 +194,14 @@ impl Render for MachinesView {
                                 .text_xs().text_color(ui::muted())
                                 .child("Herdr Core · registered computers"),
                         )
-                        .child(ui::chip(format!("{connected_count}/{remote_count} connected"), ui::muted()))
+                        .child(ui::chip(
+                            if self.status_error.is_some() {
+                                "Status unavailable".to_string()
+                            } else {
+                                format!("{connected_count}/{remote_count} connected")
+                            },
+                            if self.status_error.is_some() { ui::warning() } else { ui::muted() },
+                        ))
                         .child(
                             Button::new("machines-register")
                                 .ghost().xsmall()
@@ -175,7 +255,7 @@ impl Render for MachinesView {
                                 h_flex().gap_2()
                                     .child(
                                         Button::new("machines-via")
-                                            .small().label("Herdr connection command")
+                                            .small().label("Custom transport")
                                             .when(self.add_via, |button| button.primary())
                                             .when(!self.add_via, |button| button.ghost())
                                             .disabled(self.busy)
@@ -185,7 +265,7 @@ impl Render for MachinesView {
                                     )
                                     .child(
                                         Button::new("machines-host")
-                                            .small().label("Host")
+                                            .small().label("SSH host")
                                             .when(!self.add_via, |button| button.primary())
                                             .when(self.add_via, |button| button.ghost())
                                             .disabled(self.busy)
@@ -233,9 +313,9 @@ impl Render for MachinesView {
                             .child(
                                 div().text_xs().text_color(ui::muted())
                                     .child(if self.add_via {
-                                        "Herdr runs its remote Core through this command, passing the remote command as the last argument. It must support bidirectional I/O without prompts (for example a configured WSL or provider CLI)."
+                                        "No SSH required: supply a command that runs Herdr's remote shell line over bidirectional stdin/stdout without prompts (e.g. wsl.exe -d Ubuntu -e sh -c). This is not direct IP pairing."
                                     } else {
-                                        "Herdr Core uses its host transport for this address (SSH by default). No agent or terminal is created."
+                                        "Herdr Core connects over SSH using this host. Configure SSH keys first; passwords and host-key prompts cannot be answered in this dialog."
                                     }),
                             )
                             .child(
@@ -269,6 +349,11 @@ impl Render for MachinesView {
                             .text_xs().text_color(ui::danger())
                             .child(format!("Herdr: {error}")),
                     )
+                })
+                .when(self.status_error.is_some() && self.snapshot.is_some(), |panel| {
+                    panel.child(div().mx_4().mb_2().text_xs()
+                        .text_color(ui::warning())
+                        .child("Herdr Core is unavailable. Machine states below are the last known values."))
                 })
                 .child(
                     div()
