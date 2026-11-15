@@ -29,10 +29,29 @@ impl Workspace {
             .map(|t| t.read(cx).commands())
             .unwrap_or_default();
         let workspaces = self.workspace_rows();
+        // An active remote agent is authoritative even if its bridge is
+        // currently disconnected. Never index the Windows working tree as
+        // though it were the remote agent's Files/Branches.
+        let remote = if self.active_agent_is_remote(cx) {
+            self.selected_remote_files(cx).map(|(session, machine, root)| {
+                PaletteRemote {
+                    machine,
+                    root,
+                    process: session.read(cx).remote_fs_process(),
+                }
+            }).or_else(|| Some(PaletteRemote {
+                machine: String::new(),
+                root: String::new(),
+                process: None,
+            }))
+        } else {
+            None
+        };
         let input = PaletteInput {
             commands,
             workspaces,
             root: self.space().root.clone(),
+            remote,
             category,
         };
         let view = cx.new(|cx| PaletteView::new(input, window, cx));
@@ -86,8 +105,12 @@ impl Workspace {
             PaletteAction::Memory => self.open_memory(window, cx),
             PaletteAction::Docs => self.open_docs(window, cx),
             PaletteAction::History => {
-                let cwd = self.active_cwd(cx);
-                self.open_history(cwd, window, cx)
+                if self.active_agent_is_remote(cx) {
+                    self.open_remote_history(window, cx);
+                } else {
+                    let cwd = self.active_cwd(cx);
+                    self.open_history(cwd, window, cx);
+                }
             }
             PaletteAction::Devices => self.devices.update(cx, |panel, cx| panel.show(cx)),
             PaletteAction::Settings => self.open_settings(window, cx),
@@ -137,8 +160,37 @@ impl Workspace {
                 name,
                 pick_folder: true,
             } => self.pick_workspace_folder(name, window, cx),
-            PaletteAction::OpenFile(path) => self.open_file(path, window, cx),
-            PaletteAction::SwitchBranch(branch) => self.confirm_switch_branch(branch, window, cx),
+            PaletteAction::OpenFile(path) => {
+                if self.active_agent_is_remote(cx) {
+                    window.push_notification(Notification::info(
+                        "Local file results cannot be opened for a remote agent. Reopen the palette.",
+                    ), cx);
+                } else {
+                    self.open_file(path, window, cx);
+                }
+            }
+            PaletteAction::OpenRemoteFile { machine, root, path } => {
+                match self.selected_remote_files(cx) {
+                    Some((_, current_machine, current_root))
+                        if machine == current_machine && root == current_root =>
+                            self.open_remote_file(path, window, cx),
+                    _ => window.push_notification(Notification::info(
+                        "The active machine changed. Reopen the remote Files palette.",
+                    ), cx),
+                }
+            }
+            PaletteAction::SwitchBranch(branch) => {
+                if self.active_agent_is_remote(cx) {
+                    window.push_notification(Notification::info(
+                        "Local Git cannot switch a remote branch. Reopen the remote palette.",
+                    ), cx);
+                } else {
+                    self.confirm_switch_branch(branch, window, cx);
+                }
+            }
+            PaletteAction::SwitchRemoteBranch { machine, root, branch } => {
+                self.select_palette_remote_branch(&machine, &root, branch, window, cx);
+            }
         }
     }
 
@@ -202,17 +254,24 @@ impl Workspace {
                 self.open_palette(Category::Commands, window, cx);
             }
             Screen::Changes => {
-                let Some(tree) = self
-                    .sidebar
-                    .clone()
-                    .and_then(|view| view.downcast::<FileTreeView>().ok())
-                else {
-                    return;
-                };
-                if !self.sidebar_visible {
-                    self.toggle_sidebar(cx);
+                let target = session.or_else(|| self.active_session());
+                if target.as_ref().is_some_and(|agent| agent.read(cx).is_remote_herdr()) {
+                    // Use the selected Linux agent's existing RPC bridge.
+                    // Never show the Windows Git tree for a remote command.
+                    self.show_selected_remote_changes(window, cx);
+                } else {
+                    let Some(tree) = self
+                        .sidebar
+                        .clone()
+                        .and_then(|view| view.downcast::<FileTreeView>().ok())
+                    else {
+                        return;
+                    };
+                    if !self.files_sidebar_open {
+                        self.toggle_files_panel(cx);
+                    }
+                    tree.update(cx, |tree, cx| tree.show_changes(window, cx));
                 }
-                tree.update(cx, |tree, cx| tree.show_changes(window, cx));
             }
         }
     }
