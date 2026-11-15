@@ -1143,6 +1143,8 @@ const GIT_MUTATIONS = [
   "herdr_git_stash_push", "herdr_git_stash_apply",
   "herdr_git_stash_pop", "herdr_git_stash_drop",
   "herdr_git_fetch", "herdr_git_pull", "herdr_git_push",
+  "herdr_git_worktree_add", "herdr_git_worktree_remove",
+  "herdr_git_worktree_prune",
 ];
 
 async function checkGitIndexRequest(req, toplevel) {
@@ -1414,6 +1416,76 @@ async function guardedNetworkAction(req, toplevel) {
   }
 }
 
+async function guardedWorktreeAction(req, toplevel) {
+  const root = await fs.realpath(req.root);
+  if (root !== toplevel || root === "/") {
+    throw new Error("Worktree actions require an agent at the repository root");
+  }
+  const base = root + ".worktrees";
+  const verb = req.type;
+  if (verb === "herdr_git_worktree_prune") {
+    await runGitMutation(toplevel, ["worktree", "prune"]);
+    return;
+  }
+  if (verb === "herdr_git_worktree_add") {
+    const branch = validatedBranchName(req.branch);
+    if (req.newBranch !== false && req.newBranch !== true) {
+      throw new Error("Invalid worktree branch-creation mode");
+    }
+    if (!req.newBranch) {
+      await runGit(toplevel, [
+        "show-ref", "--verify", "refs/heads/" + branch,
+      ]);
+    }
+    try { await fs.mkdir(base, { mode: 0o700 }); }
+    catch (error) { if (error.code !== "EEXIST") throw error; }
+    const stat = await fs.lstat(base);
+    if (!stat.isDirectory() || stat.isSymbolicLink() ||
+        (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
+        (stat.mode & 0o077) !== 0) {
+      throw new Error("Unsafe private worktree parent directory");
+    }
+    const stem = branch.replace(/\//g, "-");
+    let destination = null;
+    for (let i = 0; i < 100; i++) {
+      const candidate = path.posix.join(base,
+        i === 0 ? stem : stem + "-" + (i + 1));
+      try { await fs.lstat(candidate); }
+      catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        destination = candidate;
+        break;
+      }
+    }
+    if (!destination) throw new Error("No available worktree directory name");
+    const args = req.newBranch ?
+      ["worktree", "add", "-b", branch, "--", destination] :
+      ["worktree", "add", "--", destination, branch];
+    await runGitMutation(toplevel, args);
+    return { path: destination };
+  }
+  if (verb === "herdr_git_worktree_remove") {
+    const selected = req.path;
+    if (!validLinuxPath(selected) || !within(base, selected) ||
+        selected === base) {
+      throw new Error("Cannot remove worktree outside the private parent");
+    }
+    const real = await fs.realpath(selected);
+    if (!within(base, real)) {
+      throw new Error("Worktree resolves outside the private parent");
+    }
+    const listing = strictUtf8(await runGit(toplevel,
+      ["worktree", "list", "--porcelain"]));
+    if (!listing.split("\n").some((line) => line === "worktree " + real)) {
+      throw new Error("Worktree is not linked to this repository");
+    }
+    // Git itself rejects removal when the linked worktree is dirty.
+    await runGitMutation(toplevel, ["worktree", "remove", "--", real]);
+    return { path: real };
+  }
+  throw new Error("Unsupported worktree command");
+}
+
 async function remoteGitWrite(req) {
   const { toplevel } = await gitRepository(req.root);
   validateGitRefRequest(req, toplevel);
@@ -1478,6 +1550,8 @@ async function remoteGitWrite(req) {
     } else if (["herdr_git_fetch", "herdr_git_pull",
                 "herdr_git_push"].includes(req.type)) {
       await guardedNetworkAction(req, toplevel);
+    } else if (req.type.startsWith("herdr_git_worktree_")) {
+      await guardedWorktreeAction(req, toplevel);
     } else if (req.type === "herdr_git_commit") {
       if (!req.expectedBranch) {
         throw new Error("Cannot commit from a detached HEAD");
