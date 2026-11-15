@@ -3,6 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -121,32 +122,52 @@ impl MachinesView {
             .child(ui::chip(state.to_string(), state_color).flex_shrink_0())
             .child(div().flex_1())
             .when(connected, |bar| {
-                let machine_for_agent = action.clone();
+                let weak = cx.entity().downgrade();
+                let agent_machine = action.clone();
+                let terminal_machine = action.clone();
                 bar.child(
-                    Button::new(("machines-new-agent", index))
-                        .small()
-                        .ghost()
-                        .icon(Icon::new(IconName::Bot))
-                        .label("New agent")
-                        .loading(self.busy)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.new_agent(machine_for_agent.clone(), cx)
-                        })),
-                )
-            })
-            .child(
-                if connected {
-                    Button::new(("machines-new-shell", index))
+                    Button::new(("machines-new-session", index))
                         .small()
                         .ghost()
                         .icon(Icon::new(IconName::Plus))
-                        .label("New shell")
-                        .loading(self.busy)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.new_shell(action.clone(), cx)
-                        }))
-                } else {
-                    let name = machine.expect("non-local machine").name.clone();
+                        .label("New")
+                        .tooltip("Open Gentle Shell or a terminal on this machine")
+                        .dropdown_menu(move |menu, _, _| {
+                            let weak_agent = weak.clone();
+                            let weak_terminal = weak.clone();
+                            let agent_machine = agent_machine.clone();
+                            let terminal_machine = terminal_machine.clone();
+                            menu.min_w(px(210.))
+                                .item(
+                                    PopupMenuItem::element(|_, _| {
+                                        h_flex().gap_2().px_2().py_1p5()
+                                            .child(Icon::new(IconName::Bot).small())
+                                            .child("Gentle Shell")
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        let _ = weak_agent.update(cx, |this, cx| {
+                                            this.new_agent(agent_machine.clone(), cx);
+                                        });
+                                    }),
+                                )
+                                .item(
+                                    PopupMenuItem::element(|_, _| {
+                                        h_flex().gap_2().px_2().py_1p5()
+                                            .child(Icon::new(IconName::SquareTerminal).small())
+                                            .child("Terminal")
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        let _ = weak_terminal.update(cx, |this, cx| {
+                                            this.new_shell(terminal_machine.clone(), cx);
+                                        });
+                                    }),
+                                )
+                        }),
+                )
+            })
+            .when(!connected, |bar| {
+                let name = machine.expect("non-local machine").name.clone();
+                bar.child(
                     Button::new(("machines-connect", index))
                         .small()
                         .ghost()
@@ -154,9 +175,9 @@ impl MachinesView {
                         .loading(self.busy)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.connect_machine(name.clone(), cx)
-                        }))
-                },
-            );
+                        })),
+                )
+            });
 
         v_flex()
             .gap_2()
