@@ -255,15 +255,15 @@ impl Workspace {
             }
             Screen::Changes => {
                 let target = session.or_else(|| self.active_session());
+                // An event emitted by an inactive local *or* remote agent
+                // must never redirect the active machine's Git dock.
+                if target != self.active_session() {
+                    window.push_notification(Notification::info(
+                        "Select the originating agent before opening its Changes.",
+                    ), cx);
+                    return;
+                }
                 if target.as_ref().is_some_and(|agent| agent.read(cx).is_remote_herdr()) {
-                    // An event from a background agent cannot redirect this
-                    // view to a different remote or the Windows worktree.
-                    if target != self.active_session() {
-                        window.push_notification(Notification::info(
-                            "Select the originating remote agent before opening its Changes.",
-                        ), cx);
-                        return;
-                    }
                     self.show_selected_remote_changes(window, cx);
                 } else {
                     let Some(tree) = self
