@@ -566,6 +566,65 @@ impl Workspace {
         }).detach();
     }
 
+    /// Focus an already represented Herdr session, including an agent or
+    /// terminal in another workspace. Only attach a new terminal viewer when
+    /// the address is not represented anywhere in the desktop. No terminal.run.
+    pub(super) fn show_or_attach_herdr_terminal(
+        &mut self,
+        address: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !crate::features::terminal::herdr_enabled() {
+            return;
+        }
+        // A restored pane may not have copied its terminal address into the
+        // chrome yet. Ask its provider as well as its persisted identity.
+        let locate = |this: &Self, cx: &App| -> Option<(usize, usize, PaneId)> {
+            this.spaces.iter().enumerate().find_map(|(space_index, space)| {
+                space.tabs.iter().enumerate().find_map(|(tab_index, tab)| {
+                    tab.tree.leaves().into_iter().find(|id| {
+                        this.panes.get(id).is_some_and(|pane| {
+                            matches!(pane.item.kind, PaneKind::Agent | PaneKind::Terminal)
+                                && (pane.herdr_address.as_deref() == Some(address.as_str())
+                                    || pane.item.terminal_address.as_ref()
+                                        .and_then(|get| get(cx)).as_deref()
+                                        == Some(address.as_str()))
+                        })
+                    }).map(|pane| (space_index, tab_index, pane))
+                })
+            })
+        };
+        if let Some((space, tab, pane)) = locate(self, cx) {
+            if space != self.current {
+                self.switch_workspace(space, window, cx);
+            }
+            self.activate(tab, window, cx);
+            self.focus_pane(pane, window, cx);
+            return;
+        }
+        // Unopened saved workspaces retain the identity of existing agents.
+        // Rebuild the original saved layout rather than misclassifying a
+        // dormant Gentle Shell as a new terminal.
+        let saved_space = self.spaces.iter().enumerate().find_map(|(index, space)| {
+            space.saved.as_ref().and_then(|(tabs, _)| {
+                tabs.iter().any(|tab| tab.layout.leaves().iter().any(|pane| {
+                    matches!(pane.kind, PaneKind::Agent | PaneKind::Terminal)
+                        && pane.herdr_terminal.as_deref() == Some(address.as_str())
+                })).then_some(index)
+            })
+        });
+        if let Some(space) = saved_space {
+            self.switch_workspace(space, window, cx);
+            if let Some((_, tab, pane)) = locate(self, cx) {
+                self.activate(tab, window, cx);
+                self.focus_pane(pane, window, cx);
+                return;
+            }
+        }
+        self.open_herdr_terminal(address, window, cx);
+    }
+
     /// Attach an existing Herdr address as a new GPUI tab without running a
     /// replacement shell. Only available when Herdr is the selected backend.
     pub(super) fn open_herdr_terminal(
