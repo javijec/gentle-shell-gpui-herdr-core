@@ -121,6 +121,12 @@ pub(super) fn screen_rows() -> Vec<Row> {
             PaletteAction::NewTerminalTab,
         ),
         row(
+            IconName::SquareTerminal,
+            "Switch Chat / Terminal",
+            "Show the selected agent's companion terminal or return to chat",
+            PaletteAction::ToggleAgentTerminal,
+        ),
+        row(
             IconName::LayoutDashboard,
             "New pane (tiled)",
             &format!("Same kind of pane, tiled beside the focused one ({cmd}D)"),
