@@ -438,6 +438,14 @@ impl SessionView {
                 })
             })
             .unwrap_or_default();
+        if self.process().is_none() {
+            self.transcript.notice(
+                NoticeLevel::Warning,
+                "The owning agent is offline; the helper cancellation request was not sent.",
+            );
+            cx.notify();
+            return;
+        }
         let text = format!(
             "Stop the subagent task {id} ({agent}) now with subagent_cancel, then tell me what it had done."
         );
