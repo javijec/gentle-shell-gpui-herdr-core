@@ -6,6 +6,35 @@ use gpui_kit::component::Selectable as _;
 /// The title bar's height; overlay screens open below it.
 const TITLE_BAR_HEIGHT: f32 = 36.;
 
+/// Narrow draggable seam between the dock and its workspace. Same native
+/// drag protocol as split-pane dividers, with a grab indicator on hover.
+fn dock_resize_handle(side: DockSide) -> Div {
+    let id = match side {
+        DockSide::Machines => "resize-machines-dock",
+        DockSide::Files => "resize-files-dock",
+    };
+    div()
+        .id(id)
+        .group(id)
+        .w(px(DOCK_HANDLE_WIDTH))
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_col_resize()
+        .on_drag(DockResizeDrag { side }, |_, _, _, cx| cx.new(|_| Invisible))
+        .child(
+            div()
+                .w(px(2.))
+                .h(px(48.))
+                .rounded_full()
+                .bg(ui::border_strong())
+                .opacity(0.)
+                .group_hover(id, |style| style.opacity(1.).bg(ui::petal())),
+        )
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Follow keyboard focus into panes (a terminal focused by its own click).
@@ -36,6 +65,13 @@ impl Render for Workspace {
             None
         };
         let navigator_visible = self.sidebar_visible;
+        let files_visible = files.is_some();
+        let (machines_dock_width, files_dock_width) = self.dock_widths(
+            f32::from(window.viewport_size().width),
+            selected_remote,
+            navigator_visible,
+            files_visible,
+        );
         let has_sidebar = true;
         // Below this the screen buttons fold into one overflow menu.
         let narrow = window.viewport_size().width < px(900.);
@@ -480,12 +516,61 @@ impl Render for Workspace {
                     .px_1p5()
                     .pb_1p5()
                     .gap_1p5()
+                    .on_drag_move(cx.listener(
+                        move |this, event: &DragMoveEvent<DockResizeDrag>, _, cx| {
+                            let side = event.drag(cx).side;
+                            if (side == DockSide::Machines && !this.sidebar_visible)
+                                || (side == DockSide::Files && !this.files_sidebar_open)
+                            {
+                                return;
+                            }
+                            let viewport = f32::from(event.bounds.size.width);
+                            let selected_remote = this.active_session().is_some_and(|session| {
+                                session.read(cx).is_remote_herdr()
+                            });
+                            let files_visible = this.files_sidebar_open
+                                && (this.remote_files.is_some() || this.sidebar.is_some());
+                            let (left, right) = this.dock_widths(
+                                viewport, selected_remote, this.sidebar_visible, files_visible,
+                            );
+                            let pointer = f32::from(
+                                event.event.position.x - event.bounds.left(),
+                            );
+                            // Account for the row's 6px outer padding. The drag
+                            // edge is on the inside of the selected dock.
+                            let desired = match side {
+                                DockSide::Machines => pointer - 6.,
+                                DockSide::Files => viewport - pointer - 6.,
+                            };
+                            let width = resized_dock_width(
+                                viewport, left, right, side, desired,
+                            );
+                            match side {
+                                DockSide::Machines => {
+                                    if (this.machines_dock_width - width).abs() < 0.5 {
+                                        return;
+                                    }
+                                    this.machines_dock_width = width;
+                                }
+                                DockSide::Files => {
+                                    if this.files_dock_width.is_some_and(|old|
+                                        (old - width).abs() < 0.5
+                                    ) {
+                                        return;
+                                    }
+                                    this.files_dock_width = Some(width);
+                                }
+                            }
+                            this.schedule_save(cx);
+                            cx.notify();
+                        },
+                    ))
                     .when(navigator_visible, |row| {
                         row.child(
                             ui::appear(
                                 "machine-navigator-in",
                                 div()
-                                    .w(px(SIDEBAR_WIDTH))
+                                    .w(px(machines_dock_width))
                                     .flex_none()
                                     .h_full()
                                     .rounded_xl()
@@ -496,6 +581,9 @@ impl Render for Workspace {
                                     .child(self.render_machine_navigator(cx)),
                             ),
                         )
+                    })
+                    .when(navigator_visible, |row| {
+                        row.child(dock_resize_handle(DockSide::Machines))
                     })
                     .child(
                         div()
@@ -508,15 +596,14 @@ impl Render for Workspace {
                             .children(self.render_peek(cx)),
                     )
                     .when(devices_docked, |row| row.child(self.devices.clone()))
+                    .when(files_visible, |row| {
+                        row.child(dock_resize_handle(DockSide::Files))
+                    })
                     .children(files.map(|view| {
                         ui::appear(
                             "files-right-in",
                             div()
-                                .w(px(if selected_remote {
-                                    SIDEBAR_WIDTH + 70.
-                                } else {
-                                    SIDEBAR_WIDTH
-                                }))
+                                .w(px(files_dock_width))
                                 .flex_none()
                                 .h_full()
                                 .rounded_xl()
