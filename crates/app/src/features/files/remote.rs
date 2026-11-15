@@ -1746,7 +1746,6 @@ impl RemoteFilesView {
     ) {
         let Some(snapshot) = self.git.as_ref().filter(|s|
             s.writes_enabled && s.head_oid.is_some() && s.index_token.is_some()
-                && !s.worktrees.is_empty()
         ) else { return; };
         let target = branch.as_deref().or(path.as_deref())
             .unwrap_or("prune").to_owned();

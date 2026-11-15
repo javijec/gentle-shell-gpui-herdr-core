@@ -908,6 +908,67 @@ test("Stage 5 guarded stash push/apply/drop checks status and stash OID", {
   }
 });
 
+test("Stage 5 remote worktrees create and refuse dirty removal", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-wt-"));
+  const privateRoot = root + ".worktrees";
+  try {
+    const git = gitInit(root);
+    git("branch", "feature/test");
+    const h = harness(root);
+    const snapshot = await gitSnapshot(h, root, "wt-initial");
+    const add = await gitWrite(h, root, snapshot, "herdr_git_worktree_add",
+      "wt-add", { branch: "feature/test", newBranch: false });
+    assert.equal(add.success, true, add.error);
+    const linked = path.join(privateRoot, "feature-test");
+    assert.equal(fs.existsSync(linked), true);
+    fs.writeFileSync(path.join(linked, "unsaved.txt"), "keep");
+    const reject = await gitWrite(h, root, snapshot, "herdr_git_worktree_remove",
+      "wt-dirty", { path: linked });
+    assert.equal(reject.success, false, "dirty worktree must not be removed");
+    assert.equal(fs.existsSync(path.join(linked, "unsaved.txt")), true);
+    fs.unlinkSync(path.join(linked, "unsaved.txt"));
+    const remove = await gitWrite(h, root, snapshot, "herdr_git_worktree_remove",
+      "wt-remove", { path: linked });
+    assert.equal(remove.success, true, remove.error);
+    assert.equal(fs.existsSync(linked), false);
+    const outside = await gitWrite(h, root, snapshot, "herdr_git_worktree_remove",
+      "wt-escape", { path: root });
+    assert.equal(outside.success, false);
+    assert.equal(h.childWrites.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(privateRoot, { recursive: true, force: true });
+  }
+});
+
+test("Stage 5 Git sync rejects local file and ext transport remotes", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-git-network-"));
+  try {
+    const git = gitInit(root);
+    git("remote", "add", "origin", "file:///tmp/untrusted.git");
+    const h = harness(root);
+    const snapshot = await gitSnapshot(h, root, "sync-initial");
+    const fetch = await gitWrite(h, root, snapshot, "herdr_git_fetch",
+      "sync-file");
+    assert.equal(fetch.success, false);
+    assert.match(fetch.error, /unsupported or unsafe transport/i);
+    git("remote", "set-url", "origin", "ext::echo malicious");
+    const reject = await gitWrite(h, root, snapshot, "herdr_git_push",
+      "sync-ext");
+    assert.equal(reject.success, false);
+    assert.match(reject.error, /unsupported or unsafe transport/i);
+    assert.equal(h.childWrites.length, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("5F bulk Git stage and unstage are bounded and revalidate status", {
   skip: process.platform === "win32",
 }, async () => {
