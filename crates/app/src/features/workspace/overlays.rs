@@ -387,8 +387,11 @@ impl Workspace {
                 MachinesView::new(window, cx)
             }
         });
+        let known = self.known_herdr_agent_addresses(cx);
+        let terminated = self.terminated_herdr_sessions.clone();
         view.update(cx, |view, cx| {
-            view.set_known_agent_addresses(self.known_herdr_agent_addresses(cx), cx)
+            view.set_known_agent_addresses(known, cx);
+            view.set_terminated_sessions(terminated, cx);
         });
         let subscription = cx.subscribe_in(
             &view,
@@ -404,6 +407,11 @@ impl Workspace {
                     let (address, agent) = (address.clone(), *agent);
                     this.close_overlay(window, cx);
                     this.show_or_attach_herdr_session(address, agent, window, cx);
+                }
+                MachinesEvent::TerminateExisting { address, agent } => {
+                    let (address, agent) = (address.clone(), *agent);
+                    this.close_overlay(window, cx);
+                    this.confirm_terminate_herdr_address(address, agent, window, cx);
                 }
                 MachinesEvent::NewAgent(machine) => {
                     let machine = machine.clone();
