@@ -386,6 +386,10 @@ pub struct Workspace {
     machine_snapshot: Option<machine_model::Snapshot>,
     machine_error: Option<String>,
     collapsed_machines: std::collections::HashSet<String>,
+    /// Durable tombstones for sessions explicitly terminated in Machines.
+    terminated_herdr_sessions: std::collections::HashSet<String>,
+    /// Prevent double termination while Herdr confirms terminal.kill.
+    terminating_herdr_sessions: std::collections::HashSet<String>,
     _machine_poll: Task<()>,
     save_task: Option<Task<()>>,
     /// Re-reads every pane's title and busy state once a second (non-agent
@@ -526,6 +530,8 @@ impl Workspace {
             machine_snapshot: None,
             machine_error: None,
             collapsed_machines: std::collections::HashSet::new(),
+            terminated_herdr_sessions: saved.terminated_herdr_sessions.iter().cloned().collect(),
+            terminating_herdr_sessions: std::collections::HashSet::new(),
             _machine_poll: Task::ready(()),
             save_task: None,
             notices: cx.new(|_| Notices::default()),
