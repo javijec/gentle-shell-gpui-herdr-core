@@ -19,18 +19,17 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::changes::{ChangesEvent, ChangesView};
+use super::dock_ui::{file_entry_row, file_row_shell as row_shell, panel_header, panel_shell};
 use super::listing::Entry;
 use super::backend::{WorkspaceBackend, WorkspacePath};
 use super::ops::{self, ClipMode};
 use super::refs::{RefsEvent, RefsView};
 use super::tabs::FilePanelTab as Tab;
-use super::{file_icon, status_color};
+use super::file_icon;
 use crate::features::git::GitSnapshot;
 use crate::shared::ui;
 
 const CONTEXT: &str = "FileTree";
-const ROW_HEIGHT: f32 = 26.;
-const INDENT: f32 = 14.;
 const POLL: Duration = Duration::from_secs(3);
 
 const REVEAL: &str = if cfg!(target_os = "macos") {
@@ -210,10 +209,17 @@ impl FileTreeView {
                 ChangesEvent::OpenDiff(path) => cx.emit(FileTreeEvent::OpenDiff(path.clone())),
                 ChangesEvent::OpenFile(path) => cx.emit(FileTreeEvent::Open(path.clone())),
                 ChangesEvent::Changed => cx.notify(),
+                // The native ChangesView never dispatches Herdr mutations.
+                ChangesEvent::RemoteStage { .. }
+                | ChangesEvent::RemoteOpenDiff(_)
+                | ChangesEvent::RemoteCommit(_)
+                | ChangesEvent::RemoteBulkStage { .. } => {},
             }),
             cx.subscribe(&refs, |_, _, event: &RefsEvent, cx| match event {
                 RefsEvent::OpenAgent(path) => cx.emit(FileTreeEvent::OpenAgent(path.clone())),
                 RefsEvent::Changed => cx.notify(),
+                // A remote action cannot originate in the local RefsView.
+                RefsEvent::SwitchRemoteBranch(_) => {},
             }),
         ];
         let mut this = Self {
@@ -1052,13 +1058,8 @@ impl FileTreeView {
         } else {
             file_icon(&entry.name)
         };
-        let name_color = match status {
-            Some(s) if !cut => status_color(s),
-            _ if dim => ui::faint(),
-            _ => ui::fg(),
-        };
         let id = SharedString::from(entry.path.to_string_lossy().into_owned());
-        let shell = row_shell(id, row.depth, selected || renaming)
+        let shell = row_shell(id.clone(), row.depth, selected || renaming)
             .child(
                 div()
                     .w(px(14.))
@@ -1086,34 +1087,10 @@ impl FileTreeView {
         }
         let click = entry.clone();
         let menu_target = entry.path.clone();
-        shell
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(13.))
-                    .text_color(name_color)
-                    .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
-                    .child(entry.name.clone()),
-            )
-            .when(dirty, |d| {
-                d.child(
-                    div()
-                        .size(px(5.))
-                        .rounded_full()
-                        .bg(ui::warning().opacity(0.8)),
-                )
-            })
-            .when_some(status, |d, s| {
-                d.child(
-                    div()
-                        .font_family(ui::MONO)
-                        .text_size(px(10.5))
-                        .text_color(status_color(s))
-                        .child(status_letter(s).to_string()),
-                )
-            })
+        file_entry_row(
+            id, row.depth, selected, &entry.name, entry.is_dir, open,
+            dim, status, status.map(status_letter), dirty,
+        )
             .cursor_pointer()
             // Bubbles before the context menu opens, so it acts on this row.
             .on_mouse_down(
@@ -1355,12 +1332,10 @@ impl Render for FileTreeView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let files = self.tab == Tab::Files;
         let tree = cx.entity().downgrade();
-        let header = h_flex()
-            .h(px(40.))
+        let header = panel_header()
             .pl_3()
             .pr_1p5()
             .gap_0p5()
-            .flex_none()
             .child(Icon::new(IconName::Folder).small().text_color(ui::muted()))
             .child(
                 div()
@@ -1418,9 +1393,7 @@ impl Render for FileTreeView {
             .child(self.tab_button(Tab::Branches, 0, cx));
         // The workspace's sidebar slot paints the rounded glass; a fill here
         // would show square corners past it (GPUI clips to rectangles).
-        v_flex()
-            .size_full()
-            .min_h_0()
+        panel_shell()
             .child(header)
             .child(tabs)
             .child(match self.tab {
@@ -1440,19 +1413,6 @@ impl Render for FileTreeView {
 }
 
 /// The frame every tree row shares: height, indent, hover and selection.
-fn row_shell(id: SharedString, depth: usize, highlighted: bool) -> Stateful<Div> {
-    h_flex()
-        .id(id)
-        .h(px(ROW_HEIGHT))
-        .w_full()
-        .pl(px(6. + depth as f32 * INDENT))
-        .pr_2()
-        .gap_1p5()
-        .rounded_md()
-        .when(highlighted, |d| d.bg(ui::raised()))
-        .when(!highlighted, |d| d.hover(|s| s.bg(ui::surface_hover())))
-}
-
 fn empty_state(icon: IconName, text: &'static str) -> Div {
     v_flex()
         .flex_1()

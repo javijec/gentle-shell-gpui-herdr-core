@@ -32,6 +32,8 @@ pub enum RefsEvent {
     Changed,
     /// Open an agent tab in this worktree's folder.
     OpenAgent(PathBuf),
+    /// Herdr uses the same Branches UI; its owner executes the guarded switch.
+    SwitchRemoteBranch(String),
 }
 
 #[derive(Clone, PartialEq)]
@@ -51,6 +53,7 @@ enum Line {
         collapsed: bool,
     },
     Ref(Section, usize),
+    RemoteWorktree(usize),
     NewWorktree,
 }
 
@@ -64,10 +67,25 @@ fn matching<T>(items: &[T], hit: impl Fn(&T) -> bool) -> Vec<usize> {
         .collect()
 }
 
+/// Remote worktree metadata is strictly display-only. POSIX paths must
+/// remain strings and are never converted to native Windows PathBuf.
+#[derive(Clone, Debug)]
+pub(super) struct RemoteWorktreeDisplay {
+    pub path: String,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub locked: bool,
+    pub prunable: bool,
+}
+
 pub struct RefsView {
     root: PathBuf,
     /// `None` until the first read, `Some(None)` outside a git work tree.
     repo: Option<Option<Repo>>,
+    remote: bool,
+    remote_refs: Option<RefsSnapshot>,
+    remote_worktrees: Vec<RemoteWorktreeDisplay>,
+    remote_pending_branch: Option<String>,
     filter: Entity<InputState>,
     collapsed: HashSet<Section>,
     /// The list's rows, rebuilt when the refs, filter or collapsed sections change.
@@ -94,6 +112,10 @@ impl RefsView {
         let mut this = Self {
             root,
             repo: None,
+            remote: false,
+            remote_refs: None,
+            remote_worktrees: Vec::new(),
+            remote_pending_branch: None,
             filter,
             collapsed: HashSet::new(),
             lines: Rc::new(Vec::new()),
@@ -107,7 +129,8 @@ impl RefsView {
         this._poll = cx.spawn_in(window, async move |this, cx| {
             loop {
                 let Ok(due) = this.update_in(cx, |this, window, _| {
-                    (this.visible && window.is_window_active()).then(|| this.refs_job())
+                    (this.visible && !this.remote && window.is_window_active())
+                        .then(|| this.refs_job())
                 }) else {
                     break;
                 };
@@ -123,11 +146,50 @@ impl RefsView {
         this
     }
 
+    /// The same RefsView, driven by a Herdr snapshot instead of native Git.
+    /// No Windows Git command or Windows path is used for remote actions.
+    pub(super) fn new_remote(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::new(PathBuf::new(), window, cx);
+        view.remote = true;
+        view
+    }
+
+    pub(super) fn set_remote_refs(
+        &mut self, refs: Option<RefsSnapshot>,
+        worktrees: Vec<RemoteWorktreeDisplay>, cx: &mut Context<Self>,
+    ) {
+        if !self.remote {
+            return;
+        }
+        self.remote_refs = refs;
+        self.remote_worktrees = worktrees;
+        self.remote_pending_branch = None;
+        self.relayout(cx);
+        cx.notify();
+    }
+
+    pub(super) fn mark_remote_switch(
+        &mut self, name: Option<String>, cx: &mut Context<Self>,
+    ) {
+        if self.remote {
+            self.remote_pending_branch = name;
+            cx.notify();
+        }
+    }
+
+    fn refs(&self) -> Option<&RefsSnapshot> {
+        if self.remote {
+            self.remote_refs.as_ref()
+        } else {
+            self.snapshot().map(|repo| &repo.refs)
+        }
+    }
+
     /// Pause polling while hidden; showing the tab re-reads the refs.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         let shown = visible && !self.visible;
         self.visible = visible;
-        if shown {
+        if shown && !self.remote {
             self.refresh(cx);
         }
     }
@@ -137,6 +199,9 @@ impl RefsView {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.remote {
+            return;
+        }
         let job = self.refs_job();
         cx.spawn(async move |this, cx| {
             let repo = cx.background_executor().spawn(job).await;
@@ -173,12 +238,13 @@ impl RefsView {
     /// filter that could be a new branch's name first offers a worktree on it.
     fn relayout(&mut self, cx: &App) {
         let mut lines = Vec::new();
-        if let Some(repo) = self.snapshot() {
+        if let Some(refs) = self.refs() {
             let typed = self.filter.read(cx).value();
             let typed = typed.trim();
             let hit = |text: &str| matches_filter(typed, text);
-            let refs = &repo.refs;
-            if could_be_branch(typed) && !refs.branches.iter().any(|b| b.name == typed) {
+            if !self.remote && could_be_branch(typed)
+                && !refs.branches.iter().any(|b| b.name == typed)
+            {
                 lines.push(Line::NewWorktree);
             }
             let sections = [
@@ -194,9 +260,16 @@ impl RefsView {
                 ),
                 (
                     Section::Worktrees,
-                    matching(&refs.worktrees, |w| {
-                        hit(&w.path.to_string_lossy()) || w.branch.as_deref().is_some_and(hit)
-                    }),
+                    if self.remote {
+                        matching(&self.remote_worktrees, |w| {
+                            hit(&w.path) || w.branch.as_deref().is_some_and(hit)
+                        })
+                    } else {
+                        matching(&refs.worktrees, |w| {
+                            hit(&w.path.to_string_lossy())
+                                || w.branch.as_deref().is_some_and(hit)
+                        })
+                    },
                 ),
                 (
                     Section::Submodules,
@@ -214,7 +287,13 @@ impl RefsView {
                     collapsed,
                 });
                 if !collapsed {
-                    lines.extend(items.into_iter().map(|ix| Line::Ref(section, ix)));
+                    lines.extend(items.into_iter().map(|ix| {
+                        if self.remote && section == Section::Worktrees {
+                            Line::RemoteWorktree(ix)
+                        } else {
+                            Line::Ref(section, ix)
+                        }
+                    }));
                 }
             }
         }
@@ -413,10 +492,28 @@ impl RefsView {
                 collapsed,
             } => return self.render_section_header(section, count, collapsed, cx),
             Line::Ref(section, ix) => (section, ix),
+            Line::RemoteWorktree(ix) => {
+                let Some(tree) = self.remote_worktrees.get(ix) else {
+                    return div().h(px(ROW_HEIGHT)).into_any_element();
+                };
+                let title = tree.branch.clone().or_else(|| tree.head.clone())
+                    .unwrap_or_else(|| "Bare worktree".to_owned());
+                let status = if tree.prunable {
+                    " · prunable"
+                } else if tree.locked {
+                    " · locked"
+                } else {
+                    ""
+                };
+                return row(
+                    SharedString::from(format!("remote-worktree-{ix}")),
+                    IconName::FolderGit, ui::muted(), title, ui::fg(),
+                    Some(detail(format!("{}{}", tree.path, status))),
+                ).into_any_element();
+            }
             Line::NewWorktree => return self.render_new_worktree(cx),
         };
-        let rendered = self.snapshot().and_then(|repo| {
-            let refs = &repo.refs;
+        let rendered = self.refs().and_then(|refs| {
             Some(match section {
                 Section::Branches => self.render_branch(refs.branches.get(ix)?, cx),
                 Section::Remotes => self.render_remote(&refs.remotes.get(ix)?.name, cx),
@@ -461,6 +558,12 @@ impl RefsView {
     }
 
     fn render_remote(&self, remote: &str, cx: &mut Context<Self>) -> AnyElement {
+        if self.remote {
+            return row(
+                SharedString::from(format!("refs-remote-{remote}")),
+                IconName::Cloud, ui::muted(), remote.to_owned(), ui::fg(), None,
+            ).into_any_element();
+        }
         let name = remote.to_string();
         let weak = cx.entity().downgrade();
         row(
@@ -488,6 +591,13 @@ impl RefsView {
     }
 
     fn render_stash(&self, stash: &str, stash_message: &str, cx: &mut Context<Self>) -> AnyElement {
+        if self.remote {
+            return row(
+                SharedString::from(format!("refs-stash-{stash}")),
+                IconName::Archive, ui::muted(), stash_message.to_owned(), ui::fg(),
+                Some(detail(stash.to_owned())),
+            ).into_any_element();
+        }
         let (name, message) = (stash.to_string(), stash_message.to_string());
         let weak = cx.entity().downgrade();
         row(
@@ -640,10 +750,16 @@ impl RefsView {
     }
 
     fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
-        match &self.repo {
-            None => return note("Reading refs…").into_any_element(),
-            Some(None) => return note("Not a git repository").into_any_element(),
-            Some(Some(_)) => {}
+        if self.remote {
+            if self.remote_refs.is_none() {
+                return note("Reading refs from remote agent…").into_any_element();
+            }
+        } else {
+            match &self.repo {
+                None => return note("Reading refs…").into_any_element(),
+                Some(None) => return note("Not a git repository").into_any_element(),
+                Some(Some(_)) => {}
+            }
         }
         if self.lines.is_empty() {
             let value = self.filter.read(cx).value();
@@ -680,6 +796,22 @@ impl RefsView {
     }
 
     fn render_branch(&self, branch: &RefEntry, cx: &mut Context<Self>) -> AnyElement {
+        if self.remote {
+            let name = branch.name.clone();
+            let confirmation = (self.remote_pending_branch.as_deref()
+                == Some(name.as_str()) && !branch.current).then(|| {
+                ui::chip("Click again to confirm", ui::warning()).into_any_element()
+            });
+            return branch_row(
+                SharedString::from(format!("remote-ref-branch-{name}")),
+                BranchDisplay::from_local(branch), confirmation,
+            )
+            .when(!branch.current, |row| row.cursor_pointer())
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(RefsEvent::SwitchRemoteBranch(name.clone()));
+            }))
+            .into_any_element();
+        }
         let name = branch.name.clone();
         let menu_name = branch.name.clone();
         let current = branch.current;
@@ -731,6 +863,25 @@ impl RefsView {
     }
 
     fn render_footer(&self) -> Option<Div> {
+        if self.remote {
+            let head = &self.remote_refs.as_ref()?.head;
+            let name = head.branch.clone().unwrap_or_else(|| {
+                head.sha.as_ref().map_or_else(
+                    || "No commits yet".to_owned(),
+                    |sha| format!("Detached at {sha}"),
+                )
+            });
+            return Some(v_flex()
+                .flex_none().px_3().py_2p5().gap_0p5()
+                .child(h_flex().gap_2()
+                    .child(Icon::new(IconName::GitBranch)
+                        .small().text_color(ui::muted()))
+                    .child(div().flex_1().min_w_0().truncate()
+                        .text_size(px(13.5)).font_weight(FontWeight::MEDIUM)
+                        .text_color(ui::fg()).child(name)))
+                .child(div().pl(px(22.)).text_size(px(12.))
+                    .text_color(ui::muted()).child("Herdr · remote repository")));
+        }
         let head = &self.snapshot()?.refs.head;
         let title = match (&head.branch, &head.sha) {
             (Some(branch), _) => branch.clone(),

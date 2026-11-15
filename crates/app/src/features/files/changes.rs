@@ -40,6 +40,11 @@ pub enum ChangesEvent {
     OpenFile(PathBuf),
     /// [`ChangesView::change_count`] changed.
     Changed,
+    /// Routed by the owning Herdr controller, not native Git.
+    RemoteStage { path: String, index: char, worktree: char, stage: bool },
+    RemoteOpenDiff(String),
+    RemoteCommit(String),
+    RemoteBulkStage { stage: bool },
 }
 
 #[derive(Clone, PartialEq)]
@@ -90,6 +95,11 @@ pub struct ChangesView {
     root: PathBuf,
     /// `None` until the first read, `Some(None)` outside a git work tree.
     repo: Option<Option<Repo>>,
+    remote: bool,
+    remote_tree: Option<WorkTree>,
+    remote_writable: bool,
+    remote_busy: bool,
+    remote_confirm_commit: Option<String>,
     tree_mode: bool,
     collapsed: HashSet<(Side, String)>,
     selected: Option<(Side, String)>,
@@ -132,6 +142,11 @@ impl ChangesView {
         let mut this = Self {
             root,
             repo: None,
+            remote: false,
+            remote_tree: None,
+            remote_writable: false,
+            remote_busy: false,
+            remote_confirm_commit: None,
             tree_mode: false,
             collapsed: HashSet::new(),
             selected: None,
@@ -154,7 +169,8 @@ impl ChangesView {
             loop {
                 // Only while shown and the window is in front.
                 let Ok(due) = this.update_in(cx, |this, window, _| {
-                    (this.visible && window.is_window_active()).then(|| this.status_job())
+                    (this.visible && !this.remote && window.is_window_active())
+                        .then(|| this.status_job())
                 }) else {
                     break;
                 };
@@ -170,11 +186,32 @@ impl ChangesView {
         this
     }
 
+    /// The native ChangesView can also consume a typed Herdr WorkTree.
+    /// Every mutating event is routed back to the owning remote session.
+    pub(super) fn new_remote(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::new(PathBuf::new(), window, cx);
+        view.remote = true;
+        view
+    }
+
+    pub(super) fn set_remote_tree(
+        &mut self, tree: Option<WorkTree>, writable: bool, cx: &mut Context<Self>,
+    ) {
+        if !self.remote {
+            return;
+        }
+        self.remote_tree = tree;
+        self.remote_writable = writable;
+        self.remote_confirm_commit = None;
+        self.relayout();
+        cx.notify();
+    }
+
     /// Pause polling while hidden; showing the tab re-reads status.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         let shown = visible && !self.visible;
         self.visible = visible;
-        if shown {
+        if shown && !self.remote {
             self.refresh(cx);
         }
     }
@@ -184,8 +221,19 @@ impl ChangesView {
         self.tree().map_or(0, |tree| tree.entries.len())
     }
 
+    pub(super) fn set_remote_busy(&mut self, busy: bool, cx: &mut Context<Self>) {
+        if self.remote {
+            self.remote_busy = busy;
+            cx.notify();
+        }
+    }
+
     fn tree(&self) -> Option<&WorkTree> {
-        self.repo.as_ref()?.as_ref().map(|repo| &repo.tree)
+        if self.remote {
+            self.remote_tree.as_ref()
+        } else {
+            self.repo.as_ref()?.as_ref().map(|repo| &repo.tree)
+        }
     }
 
     fn repository_path(&self) -> Option<String> {
@@ -200,6 +248,9 @@ impl ChangesView {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.remote {
+            return;
+        }
         let job = self.status_job();
         cx.spawn(async move |this, cx| {
             let repo = cx.background_executor().spawn(job).await;
@@ -323,6 +374,16 @@ impl ChangesView {
     }
 
     fn toggle(&mut self, entry: &StatusEntry, side: Side, cx: &mut Context<Self>) {
+        if self.remote {
+            if !self.remote_writable || self.remote_busy { return; }
+            cx.emit(ChangesEvent::RemoteStage {
+                path: entry.path.clone(),
+                index: entry.index,
+                worktree: entry.worktree,
+                stage: side == Side::Unstaged,
+            });
+            return;
+        }
         let Some(toplevel) = self.toplevel() else { return; };
         let action = match side {
             Side::Unstaged => GitFileAction::Stage,
@@ -363,6 +424,12 @@ impl ChangesView {
     }
 
     fn click_entry(&mut self, path: &str, side: Side, cx: &mut Context<Self>) {
+        if self.remote {
+            self.selected = Some((side, path.to_owned()));
+            cx.emit(ChangesEvent::RemoteOpenDiff(path.to_owned()));
+            cx.notify();
+            return;
+        }
         let Some(toplevel) = self.toplevel() else {
             return;
         };
@@ -651,7 +718,7 @@ impl ChangesView {
                     .xsmall()
                     .icon(Icon::new(IconName::Archive))
                     .tooltip("Stash all changes")
-                    .disabled(!has_changes)
+                    .disabled(!has_changes || self.remote)
                     .on_click(cx.listener(|this, _, window, cx| this.open_stash(window, cx))),
             )
     }
@@ -661,6 +728,35 @@ impl ChangesView {
             Side::Unstaged => ("Stage all", "changes-stage-all"),
             Side::Staged => ("Unstage all", "changes-unstage-all"),
         };
+        if self.remote {
+            let enabled = self.remote_writable && !self.remote_busy
+                && self.tree().is_some_and(|tree| tree.entries.len() <= 80);
+            let stage = side == Side::Unstaged;
+            let weak = cx.entity().downgrade();
+            return section_header(
+                side, count,
+                Checkbox::new(SharedString::from(format!("remote-{id}-check")))
+                    .small().checked(!stage).disabled(!enabled)
+                    .tooltip(action)
+                    .on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            cx.emit(ChangesEvent::RemoteBulkStage { stage });
+                            this.remote_confirm_commit = None;
+                        });
+                    }),
+                Button::new(format!("remote-{id}"))
+                    .outline().xsmall().label(action).disabled(!enabled)
+                    .tooltip(if enabled {
+                        "Applies only to the exact reviewed Git snapshot"
+                    } else {
+                        "Refresh status: bulk changes require at most 80 files"
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.remote_confirm_commit = None;
+                        cx.emit(ChangesEvent::RemoteBulkStage { stage });
+                    })),
+            );
+        }
         let all = move |this: &mut Self, cx: &mut Context<Self>| match side {
             Side::Unstaged => this.git_op(git::stage_all, cx),
             Side::Staged => this.git_op(git::unstage_all, cx),
@@ -796,6 +892,35 @@ impl ChangesView {
             .selected
             .as_ref()
             .is_some_and(|(s, path)| *s == side && *path == entry.path);
+        if self.remote {
+            let id = format!("remote-change-{side:?}-{}", entry.path);
+            let weak = cx.entity().downgrade();
+            let selection = entry.clone();
+            let control = div()
+                .id(SharedString::from(format!("{id}-check-wrap")))
+                .flex_none()
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(
+                    Checkbox::new(SharedString::from(format!("{id}-check")))
+                        .small()
+                        .checked(side == Side::Staged)
+                        .disabled(entry.kind == EntryKind::Conflict
+                            || !self.remote_writable || self.remote_busy)
+                        .on_click(move |_, _, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.toggle(&selection, side, cx)
+                            });
+                        }),
+                );
+            let path = entry.path.clone();
+            return change_row(
+                SharedString::from(id), &entry.path, badge, selected, indent, control,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.click_entry(&path, side, cx)
+            }))
+            .into_any_element();
+        }
         let id = format!("change-{side:?}-{}", entry.path);
         let weak = cx.entity().downgrade();
         let check = {
@@ -877,10 +1002,17 @@ impl ChangesView {
     }
 
     fn render_list(&self, cx: &mut Context<Self>) -> AnyElement {
-        let tree = match &self.repo {
-            None => return empty_state(IconName::RefreshCw, "Reading git status…"),
-            Some(None) => return empty_state(IconName::GitBranch, "Not a git repository"),
-            Some(Some(repo)) => &repo.tree,
+        let tree = if self.remote {
+            match &self.remote_tree {
+                Some(tree) => tree,
+                None => return empty_state(IconName::RefreshCw, "Reading remote git status…"),
+            }
+        } else {
+            match &self.repo {
+                None => return empty_state(IconName::RefreshCw, "Reading git status…"),
+                Some(None) => return empty_state(IconName::GitBranch, "Not a git repository"),
+                Some(Some(repo)) => &repo.tree,
+            }
         };
         if tree.entries.is_empty() {
             return empty_state(IconName::CircleCheck, "Working tree clean");
@@ -909,7 +1041,48 @@ impl ChangesView {
             .into_any_element()
     }
 
+    fn submit_remote_commit(&mut self, cx: &mut Context<Self>) {
+        if !self.remote || !self.tree().is_some_and(|tree| {
+            tree.entries.iter().any(|entry| entry.staged().is_some())
+        }) {
+            return;
+        }
+        let summary = self.summary_text(cx);
+        if summary.is_empty() {
+            return;
+        }
+        if self.remote_confirm_commit.as_deref() == Some(summary.as_str()) {
+            self.remote_confirm_commit = None;
+            cx.emit(ChangesEvent::RemoteCommit(summary));
+        } else {
+            self.remote_confirm_commit = Some(summary);
+        }
+        cx.notify();
+    }
+
     fn render_commit(&self, cx: &mut Context<Self>) -> Div {
+        if self.remote {
+            let summary = self.summary_text(cx);
+            let staged = self.tree().is_some_and(|tree| {
+                tree.entries.iter().any(|entry| entry.staged().is_some())
+            });
+            let confirmed = !summary.is_empty()
+                && self.remote_confirm_commit.as_deref() == Some(summary.as_str());
+            return v_flex()
+                .flex_none().mx_2().mb_2().mt_1().px_3().py_2().gap_1()
+                .rounded_xl().bg(ui::surface())
+                .child(Input::new(&self.summary).appearance(false))
+                .child(Button::new("changes-remote-commit")
+                    .primary().small().w_full()
+                    .label(if confirmed { "Confirm commit" } else { "Commit" })
+                    .disabled(!staged || summary.is_empty() || summary.len() > 120
+                        || !self.remote_writable || self.remote_busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.submit_remote_commit(cx))))
+                .when(confirmed, |row| row.child(
+                    div().text_xs().text_color(ui::warning())
+                        .child("Review staged changes before confirming the remote commit"),
+                ));
+        }
         let ready = matches!(self.repo, Some(Some(_)));
         let staged = self
             .tree()
@@ -1062,7 +1235,7 @@ impl Render for ChangesView {
                 )
             })
             .child(self.render_list(cx))
-            .when(matches!(self.repo, Some(Some(_))), |d| {
+            .when(self.remote_tree.is_some() || matches!(self.repo, Some(Some(_))), |d| {
                 d.child(self.render_commit(cx))
             })
     }

@@ -4,9 +4,11 @@
 
 mod changes;
 mod changes_ui;
+mod dock_ui;
 mod branches_ui;
 mod backend;
 mod remote;
+mod remote_tree;
 mod remote_git;
 mod tabs;
 pub use remote::{RemoteFilesEvent, RemoteFilesView};

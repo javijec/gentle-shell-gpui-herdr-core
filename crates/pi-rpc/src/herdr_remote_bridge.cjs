@@ -202,6 +202,9 @@ async function remoteWrite(req) {
   // Work only on the resolved, in-root location: aliases through allowed
   // parent symlinks cannot redirect or bypass the per-file write guard.
   const selected = await fs.realpath(validated);
+  if (protectedGitPath(await fs.realpath(req.root), selected)) {
+    throw new Error("Cannot edit Git metadata or private bridge temporary files");
+  }
   if (typeof req.content !== "string" || !validRevision(req.expectedRevision)) {
     throw new Error("Write requires text and a matching SHA-256 revision");
   }
@@ -277,6 +280,190 @@ async function remoteWrite(req) {
   }
 }
 
+// Explicit, no-clobber creation inside an already validated directory.
+// The selected parent must belong to the exact running agent root.
+async function remoteCreate(req) {
+  if (await fs.realpath(process.cwd()) === "/") {
+    throw new Error("Remote creation requires a project directory, not /");
+  }
+  const name = req.name;
+  if (typeof name !== "string" || name.length === 0 || name.length > 255 ||
+      name === "." || name === ".." || name.includes("/") ||
+      name.includes("\\") || /[\x00-\x1f\x7f]/.test(name) ||
+      name === ".git" || name.startsWith(".herdr-save-")) {
+    throw new Error("Invalid remote entry name");
+  }
+  if (req.kind !== "file" && req.kind !== "directory") {
+    throw new Error("Invalid new entry type");
+  }
+  const parent = await safeRemotePath(req.root, req.path);
+  if (protectedGitPath(await fs.realpath(req.root), parent)) {
+    throw new Error("Cannot create entries inside Git metadata");
+  }
+  const stat = await fs.lstat(parent);
+  if (!stat.isDirectory()) throw new Error("Selected parent is not a directory");
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+    throw new Error("Cannot create in a directory not owned by the agent");
+  }
+  const destination = path.posix.join(parent, name);
+  if (!within(await fs.realpath(req.root), destination)) {
+    throw new Error("New entry is outside the project");
+  }
+  if (req.kind === "directory") {
+    await fs.mkdir(destination, { mode: 0o700 });
+  } else {
+    const handle = await fs.open(destination,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT |
+      fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    await handle.close();
+  }
+  return { path: destination, kind: req.kind };
+}
+
+// File operations are deliberately separate from the Pi agent and Git.
+// No replacement, shell, symlink traversal, or mutations of .git metadata.
+function validEntryName(name) {
+  return typeof name === "string" && name.length > 0 && name.length <= 255 &&
+    name !== "." && name !== ".." && name !== ".git" &&
+    !name.startsWith(".herdr-save-") && !name.includes("/") &&
+    !name.includes("\\") && !/[\x00-\x1f\x7f]/.test(name);
+}
+
+function protectedGitPath(root, selected) {
+  const parts = path.posix.relative(root, selected).split("/");
+  return parts.includes(".git") ||
+    parts.some((part) => part.startsWith(".herdr-save-"));
+}
+
+async function exclusiveFileCopy(source, destination) {
+  const handle = await fs.open(source,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  let created = false;
+  try {
+    const st = await handle.stat();
+    if (!st.isFile() || st.nlink !== 1 || st.size > 16 * 1024 * 1024 ||
+        (typeof process.getuid === "function" && st.uid !== process.getuid())) {
+      throw new Error("Only owned, unlinked regular files up to 16 MiB can be duplicated");
+    }
+    const output = await fs.open(destination,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT |
+      fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    created = true;
+    try {
+      const buffer = Buffer.alloc(64 * 1024);
+      let position = 0;
+      while (position < st.size) {
+        const { bytesRead } = await handle.read(buffer, 0,
+          Math.min(buffer.length, st.size - position), position);
+        if (!bytesRead) throw new Error("Source changed during copy");
+        let done = 0;
+        while (done < bytesRead) {
+          const written = await output.write(buffer, done, bytesRead - done);
+          if (!written.bytesWritten) throw new Error("Incomplete file copy");
+          done += written.bytesWritten;
+        }
+        position += bytesRead;
+      }
+    } catch (error) {
+      await output.close();
+      throw error;
+    }
+    await output.close();
+    created = false;
+  } finally {
+    await handle.close();
+    if (created) {
+      try { await fs.unlink(destination); } catch {}
+    }
+  }
+}
+
+async function remoteEntry(req) {
+  const root = await fs.realpath(req.root);
+  if (root === "/" || root !== await fs.realpath(process.cwd())) {
+    throw new Error("Remote operations require the selected agent project root");
+  }
+  const source = await safeRemotePath(req.root, req.path);
+  if (source === root || protectedGitPath(root, source)) {
+    throw new Error("Cannot modify the project root or Git internals");
+  }
+  const stat = await fs.lstat(source);
+  const directory = stat.isDirectory();
+  if ((!directory && !stat.isFile()) ||
+      (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+    throw new Error("Only owned regular files or directories may be modified");
+  }
+  const op = req.operation;
+  if (!["rename", "duplicate", "move", "copy"].includes(op)) {
+    throw new Error("Unsupported file operation");
+  }
+  if ((op === "duplicate" || op === "copy") && directory) {
+    throw new Error("Recursive folder duplication is not supported yet");
+  }
+  let destinationDir = path.posix.dirname(source);
+  let newName = path.posix.basename(source);
+  if (op === "rename") {
+    newName = req.name;
+    if (!validEntryName(newName)) throw new Error("Invalid new name");
+  } else if (op === "move" || op === "copy") {
+    destinationDir = await safeRemotePath(req.root, req.destinationDir);
+    const targetStat = await fs.lstat(destinationDir);
+    if (!targetStat.isDirectory()) throw new Error("Destination is not a folder");
+    if (op === "move" && directory && within(source, destinationDir)) {
+      throw new Error("Cannot move a directory inside itself");
+    }
+  }
+  if (op === "duplicate" || op === "copy") {
+    const base = newName;
+    const dot = base.lastIndexOf(".");
+    const stem = dot > 0 ? base.slice(0, dot) : base;
+    const ext = dot > 0 ? base.slice(dot) : "";
+    let found = false;
+    for (let i = 0; i <= 100; i++) {
+      const candidate = path.posix.join(destinationDir,
+        i === 0 && op === "copy" ? base :
+        stem + " copy" + (i <= 1 ? "" : " " + i) + ext);
+      try {
+        await fs.lstat(candidate);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        newName = path.posix.basename(candidate);
+        found = true;
+        break;
+      }
+    }
+    if (!found) throw new Error("No available duplicate name");
+  }
+  if (!validEntryName(newName)) throw new Error("Invalid destination name");
+  const destination = path.posix.join(destinationDir, newName);
+  if (!within(root, destination) || protectedGitPath(root, destination)) {
+    throw new Error("Destination is outside the allowed project");
+  }
+  if (source === destination) return { path: source, operation: op };
+  if (op === "duplicate" || op === "copy") {
+    await exclusiveFileCopy(source, destination);
+  } else {
+    // POSIX rename can overwrite. Reserve a directory's destination first;
+    // files use an exclusive hard-link followed by unlink.
+    if (directory) {
+      await fs.mkdir(destination, { mode: 0o700 });
+      try {
+        await fs.rename(source, destination);
+      } catch (error) {
+        try { await fs.rmdir(destination); } catch {}
+        throw error;
+      }
+    } else {
+      if (stat.nlink !== 1) throw new Error("Cannot move a hard-linked file");
+      await fs.link(source, destination);
+      try { await fs.unlink(source); } catch (error) {
+        throw new Error("Move left a destination copy; verify files: " + error.message);
+      }
+    }
+  }
+  return { path: destination, operation: op };
+}
+
 async function remoteFilesRequest(req) {
   const command = req.type;
   const response = (success, data, error) => emit("O", JSON.stringify({
@@ -287,11 +474,20 @@ async function remoteFilesRequest(req) {
     if (typeof req.id !== "string" || req.id.length > 128) {
       throw new Error("Missing request identifier");
     }
-    if (!["herdr_fs_list", "herdr_fs_read", "herdr_fs_write"].includes(command)) {
+    if (!["herdr_fs_list", "herdr_fs_read", "herdr_fs_write", "herdr_fs_create",
+          "herdr_fs_entry"].includes(command)) {
       throw new Error("Unsupported filesystem operation");
     }
     if (command === "herdr_fs_write") {
       response(true, await remoteWrite(req));
+      return;
+    }
+    if (command === "herdr_fs_create") {
+      response(true, await remoteCreate(req));
+      return;
+    }
+    if (command === "herdr_fs_entry") {
+      response(true, await remoteEntry(req));
       return;
     }
     const selected = await safeRemotePath(req.root, req.path);
@@ -338,6 +534,9 @@ const MAX_GIT_LIST = 200;
 const MAX_GIT_BRANCHES = 120;
 const MAX_GIT_TAGS = 120;
 const MAX_GIT_STASHES = 120;
+const MAX_GIT_REF_DETAILS = 360;
+const MAX_GIT_WORKTREE_LINES = 600;
+const MAX_GIT_SUBMODULES = 120;
 const MAX_GIT_DIFF = 96 * 1024;
 
 function strictUtf8(bytes) {
@@ -583,7 +782,7 @@ async function gitRefState(toplevel) {
 async function remoteGit(req) {
   const { toplevel } = await gitRepository(req.root);
   if (req.type === "herdr_git_snapshot") {
-    const [status, branches, index, tags, stashes] = await Promise.all([
+    const [status, branches, index, tags, stashes, details, worktrees, submodules] = await Promise.all([
       runGitListing(toplevel, ["status", "--porcelain=v1", "-z",
         "--no-renames", "--untracked-files=all", "--ignore-submodules=all"],
         0, MAX_GIT_LIST),
@@ -596,6 +795,15 @@ async function remoteGit(req) {
         "--format=%(refname:short)", "refs/tags"], 10, MAX_GIT_TAGS),
       runGitListing(toplevel, ["stash", "list",
         "--format=%gd%x00%gs"], 10, MAX_GIT_STASHES),
+      runGitListing(toplevel, ["for-each-ref",
+        "--format=%(HEAD)%00%(refname)%00%(upstream:short)%00%(upstream:track)%00%(objectname:short)%00%(subject)",
+        "refs/heads", "refs/remotes", "refs/tags"], 10, MAX_GIT_REF_DETAILS),
+      runGitListing(toplevel, ["worktree", "list", "--porcelain"],
+        10, MAX_GIT_WORKTREE_LINES),
+      runGitListing(toplevel, ["submodule", "status"],
+        10, MAX_GIT_SUBMODULES).catch(() => ({
+          output: Buffer.alloc(0), truncated: false,
+        })),
     ]);
     const files = parseGitEntries(status.output);
     const refs = parseGitBranches(branches.output);
@@ -610,6 +818,12 @@ async function remoteGit(req) {
       branchesTruncated: refs.truncated || branches.truncated,
       tags: extraTags.tags, tagsTruncated: tags.truncated,
       stashes: extraStashes.stashes, stashesTruncated: stashes.truncated,
+      refDetails: strictUtf8(details.output),
+      refDetailsTruncated: details.truncated,
+      worktreeData: strictUtf8(worktrees.output),
+      worktreesTruncated: worktrees.truncated,
+      submoduleData: strictUtf8(submodules.output),
+      submodulesTruncated: submodules.truncated,
       readOnly: true, writesEnabled: true,
     };
   }
@@ -681,12 +895,14 @@ async function remoteGit(req) {
 
 
 // Only explicit mutations below may change a repo. Each request names the
-// exact repo and the HEAD/branch displayed by the UI. No stage-all or
-// unstage-all, no discard, reset, push, pull, fetch or forced checkout.
+// exact repo and HEAD/branch/index displayed by the UI. Bulk stage and
+// unstage require exact full status equality and only regular files; no
+// discard, reset, push, pull, fetch or forced checkout.
 const gitWriteInFlight = new Set();
 const GIT_MUTATIONS = [
   "herdr_git_stage", "herdr_git_unstage", "herdr_git_commit",
   "herdr_git_create_branch", "herdr_git_switch_branch",
+  "herdr_git_stage_all", "herdr_git_unstage_all",
 ];
 
 async function checkGitIndexRequest(req, toplevel) {
@@ -781,6 +997,67 @@ function validatedBranchName(name) {
   return name;
 }
 
+// A bulk change is allowed only when the complete current status is
+// byte-for-byte equivalent to the small snapshot the user reviewed.
+// Pathspecs are literal; no symlinks or submodules, and no `git add -A .`.
+async function checkedBulkPaths(req, toplevel, stage) {
+  if (!Array.isArray(req.expectedFiles) || req.expectedFiles.length === 0 ||
+      req.expectedFiles.length > 80) {
+    throw new Error("Bulk Git action requires 1-80 reviewed paths");
+  }
+  const listing = await runGitListing(toplevel, [
+    "status", "--porcelain=v1", "-z", "--no-renames",
+    "--untracked-files=all", "--ignore-submodules=all",
+  ], 0, MAX_GIT_LIST);
+  if (listing.truncated) {
+    throw new Error("Refusing bulk Git action with a truncated status");
+  }
+  const current = parseGitEntries(listing.output);
+  if (current.truncated || current.entries.length !== req.expectedFiles.length) {
+    throw new Error("Conflict: Git file list changed. Refresh before bulk action");
+  }
+  for (let i = 0; i < current.entries.length; i++) {
+    const actual = current.entries[i];
+    const expected = req.expectedFiles[i];
+    if (!expected || expected.path !== actual.path ||
+        expected.index !== actual.index ||
+        expected.worktree !== actual.worktree) {
+      throw new Error("Conflict: Git file status changed. Refresh before bulk action");
+    }
+  }
+  const entries = current.entries.filter((entry) => stage ?
+    (entry.worktree !== " " || entry.index === "?") :
+    (entry.index !== " " && entry.index !== "?"));
+  if (entries.length === 0) {
+    throw new Error(stage ? "Nothing to stage" : "Nothing to unstage");
+  }
+  let totalPathBytes = 0;
+  for (const entry of entries) {
+    if (!safeGitRelative(entry.path) || entry.path.split("/").includes(".git")) {
+      throw new Error("Unsafe Git path for bulk operation");
+    }
+    totalPathBytes += Buffer.byteLength(entry.path, "utf8");
+    if (totalPathBytes > 16000) {
+      throw new Error("Bulk Git paths exceed the safe argument limit");
+    }
+    const target = path.posix.join(toplevel, entry.path);
+    const parent = await fs.realpath(path.posix.dirname(target));
+    if (!within(toplevel, parent)) {
+      throw new Error("Git path parent resolves outside repository");
+    }
+    let stat = null;
+    try { stat = await fs.lstat(target); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    if (stat && (!stat.isFile() || stat.isSymbolicLink())) {
+      throw new Error("Only regular files and tracked deletions can be changed");
+    }
+    if (stat && !within(toplevel, await fs.realpath(target))) {
+      throw new Error("Git file resolves outside repository");
+    }
+  }
+  return entries.map((entry) => ":(literal)" + entry.path);
+}
+
 async function remoteGitWrite(req) {
   const { toplevel } = await gitRepository(req.root);
   validateGitRefRequest(req, toplevel);
@@ -808,6 +1085,17 @@ async function remoteGitWrite(req) {
         } else {
           await runGitMutation(toplevel, ["restore", "--staged", "--", literal]);
         }
+      }
+    } else if (req.type === "herdr_git_stage_all" ||
+               req.type === "herdr_git_unstage_all") {
+      const stage = req.type === "herdr_git_stage_all";
+      const paths = await checkedBulkPaths(req, toplevel, stage);
+      if (stage) {
+        await runGitMutation(toplevel, ["add", "-A", "--", ...paths]);
+      } else if (req.expectedHead === null) {
+        await runGitMutation(toplevel, ["rm", "--cached", "-q", "--", ...paths]);
+      } else {
+        await runGitMutation(toplevel, ["restore", "--staged", "--", ...paths]);
       }
     } else if (req.type === "herdr_git_commit") {
       if (!req.expectedBranch) {
@@ -918,7 +1206,9 @@ function inputLine() {
         try { request = JSON.parse(requestLine.toString("utf8")); } catch {}
         if (request && (request.type === "herdr_fs_list" ||
                         request.type === "herdr_fs_read" ||
-                        request.type === "herdr_fs_write")) {
+                        request.type === "herdr_fs_write" ||
+                        request.type === "herdr_fs_create" ||
+                        request.type === "herdr_fs_entry")) {
           void remoteFilesRequest(request);
         } else if (request && (request.type === "herdr_git_snapshot" ||
                                request.type === "herdr_git_diff" ||
