@@ -320,19 +320,233 @@ async function remoteCreate(req) {
   return { path: destination, kind: req.kind };
 }
 
+// Stage 7 binary-safe transfers. Each RPC carries at most 24 KiB; Herdr's
+// existing framed PTY is the only transport. Never invoke a shell, overwrite
+// an existing file, traverse symlinks or write into Git control directories.
+const MAX_TRANSFER_BYTES = 16 * 1024 * 1024;
+const TRANSFER_CHUNK_BYTES = 24 * 1024;
+const MAX_TRANSFER_UPLOADS = 2;
+const uploads = new Map();
+
+function transferEpoch(stat) {
+  return sha256(Buffer.from(JSON.stringify([
+    stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs,
+  ])));
+}
+
+async function transferRead(req) {
+  const selected = await safeRemotePath(req.root, req.path);
+  if (protectedGitPath(await fs.realpath(req.root), selected)) {
+    throw new Error("Transfers cannot read Git metadata or private temporary files");
+  }
+  const offset = req.offset;
+  if (!Number.isSafeInteger(offset) || offset < 0 ||
+      offset > MAX_TRANSFER_BYTES) {
+    throw new Error("Invalid transfer offset");
+  }
+  const file = await fs.open(selected,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.size > MAX_TRANSFER_BYTES ||
+        stat.nlink !== 1 || offset > stat.size) {
+      throw new Error("Only regular, non-linked files up to 16 MiB may be transferred");
+    }
+    const epoch = transferEpoch(stat);
+    if (req.epoch !== null && req.epoch !== undefined &&
+        req.epoch !== epoch) {
+      throw new Error("Remote file changed during download; local partial file is incomplete");
+    }
+    const length = Math.min(TRANSFER_CHUNK_BYTES, stat.size - offset);
+    const buffer = Buffer.alloc(length);
+    let received = 0;
+    while (received < length) {
+      const { bytesRead } = await file.read(buffer, received,
+        length - received, offset + received);
+      if (bytesRead === 0) {
+        throw new Error("Remote file changed during transfer");
+      }
+      received += bytesRead;
+    }
+    const after = await file.stat();
+    if (transferEpoch(after) !== epoch) {
+      throw new Error("Remote file changed during download");
+    }
+    return { path: selected, offset, size: stat.size, epoch,
+      content: buffer.toString("base64"), chunkHash: sha256(buffer),
+      complete: offset + length === stat.size };
+  } finally {
+    await file.close();
+  }
+}
+
+async function transferClean(transfer) {
+  try { await transfer.handle.close(); } catch {}
+  try { await fs.unlink(transfer.temp); } catch {}
+}
+
+async function transferBegin(req) {
+  if (await fs.realpath(process.cwd()) === "/") {
+    throw new Error("Upload requires a project directory, not /");
+  }
+  if (uploads.size >= MAX_TRANSFER_UPLOADS) {
+    throw new Error("Too many simultaneous remote uploads");
+  }
+  if (!validEntryName(req.name) ||
+      req.name.startsWith(".herdr-upload-")) {
+    throw new Error("Invalid upload file name");
+  }
+  const size = req.size;
+  if (!Number.isSafeInteger(size) || size < 0 || size > MAX_TRANSFER_BYTES ||
+      !validRevision(req.sha256)) {
+    throw new Error("Upload size or SHA-256 is invalid (16 MiB maximum)");
+  }
+  const parent = await safeRemotePath(req.root, req.path);
+  const actualRoot = await fs.realpath(req.root);
+  if (protectedGitPath(actualRoot, parent) ||
+      !(await fs.lstat(parent)).isDirectory()) {
+    throw new Error("Upload requires a project directory outside Git metadata");
+  }
+  const info = await fs.stat(parent);
+  if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
+    throw new Error("Cannot upload to a directory not owned by this agent");
+  }
+  const destination = path.posix.join(parent, req.name);
+  if (!within(actualRoot, destination) || protectedGitPath(actualRoot, destination)) {
+    throw new Error("Destination is outside the agent project");
+  }
+  // No clobber, even if a file appears between begin and commit.
+  try {
+    await fs.lstat(destination);
+    throw new Error("Destination already exists");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const id = randomBytes(16).toString("hex");
+  const temp = path.posix.join(parent, ".herdr-upload-" + id + ".tmp");
+  const handle = await fs.open(temp,
+    fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY |
+    fsConstants.O_NOFOLLOW, 0o600);
+  uploads.set(id, { handle, temp, destination, parent, root: actualRoot,
+    sha256: req.sha256, size, offset: 0, busy: false,
+    deadline: Date.now() + 10 * 60 * 1000 });
+  return { transfer: id, chunkBytes: TRANSFER_CHUNK_BYTES, size };
+}
+
+async function transferChunk(req) {
+  const transfer = uploads.get(req.transfer);
+  if (!transfer || transfer.busy || Date.now() > transfer.deadline) {
+    throw new Error("Upload token expired or already in use");
+  }
+  if (req.offset !== transfer.offset || typeof req.content !== "string" ||
+      req.content.length > TRANSFER_CHUNK_BYTES * 2 ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(req.content)) {
+    throw new Error("Invalid upload offset or base64 chunk");
+  }
+  const bytes = Buffer.from(req.content, "base64");
+  if (bytes.toString("base64") !== req.content ||
+      bytes.length === 0 || bytes.length > TRANSFER_CHUNK_BYTES ||
+      transfer.offset + bytes.length > transfer.size ||
+      sha256(bytes) !== req.chunkHash) {
+    throw new Error("Upload chunk failed integrity or size check");
+  }
+  transfer.busy = true;
+  try {
+    let written = 0;
+    while (written < bytes.length) {
+      const result = await transfer.handle.write(bytes, written,
+        bytes.length - written, transfer.offset + written);
+      if (result.bytesWritten === 0) throw new Error("Upload write stopped");
+      written += result.bytesWritten;
+    }
+    transfer.offset += bytes.length;
+    transfer.deadline = Date.now() + 10 * 60 * 1000;
+    return { transfer: req.transfer, offset: transfer.offset };
+  } finally {
+    transfer.busy = false;
+  }
+}
+
+async function transferFinish(req) {
+  const transfer = uploads.get(req.transfer);
+  if (!transfer || transfer.busy) throw new Error("Unknown or busy upload token");
+  transfer.busy = true;
+  uploads.delete(req.transfer);
+  try {
+    if (transfer.offset !== transfer.size || req.root !== transfer.root) {
+      throw new Error("Upload is incomplete or belongs to another root");
+    }
+    await transfer.handle.sync();
+    await transfer.handle.close();
+    const bytes = await fs.readFile(transfer.temp);
+    if (bytes.length !== transfer.size || sha256(bytes) !== transfer.sha256) {
+      throw new Error("Upload SHA-256 mismatch");
+    }
+    const actualParent = await safeRemotePath(req.root, transfer.parent);
+    if (actualParent !== transfer.parent) {
+      throw new Error("Upload destination moved");
+    }
+    // Hard linking is atomic and refuses a destination that already exists.
+    // rename() would overwrite an unrelated file and is not used here.
+    await fs.link(transfer.temp, transfer.destination);
+    await fs.unlink(transfer.temp);
+    return { path: transfer.destination, size: transfer.size,
+      revision: transfer.sha256 };
+  } catch (error) {
+    await transferClean(transfer);
+    throw error;
+  }
+}
+
+async function transferAbort(req) {
+  const transfer = uploads.get(req.transfer);
+  if (!transfer || transfer.busy) throw new Error("Unknown or busy upload token");
+  uploads.delete(req.transfer);
+  await transferClean(transfer);
+  return { aborted: true };
+}
+
+async function remoteTransferRequest(req) {
+  const command = req.type;
+  const respond = (success, data, error) => emit("O", JSON.stringify({
+    type: "response", command, id: req.id, success,
+    ...(success ? { data } : { error }),
+  }) + "\n");
+  try {
+    if (typeof req.id !== "string" || req.id.length > 128) {
+      throw new Error("Missing transfer request id");
+    }
+    const handlers = {
+      herdr_fs_transfer_read: transferRead,
+      herdr_fs_transfer_begin: transferBegin,
+      herdr_fs_transfer_chunk: transferChunk,
+      herdr_fs_transfer_commit: transferFinish,
+      herdr_fs_transfer_abort: transferAbort,
+    };
+    const handler = handlers[command];
+    if (!handler) throw new Error("Unsupported remote transfer");
+    respond(true, await handler(req));
+  } catch (error) {
+    respond(false, null, error && error.message ? error.message :
+      "Remote transfer failed");
+  }
+}
+
 // File operations are deliberately separate from the Pi agent and Git.
 // No replacement, shell, symlink traversal, or mutations of .git metadata.
 function validEntryName(name) {
   return typeof name === "string" && name.length > 0 && name.length <= 255 &&
     name !== "." && name !== ".." && name !== ".git" &&
-    !name.startsWith(".herdr-save-") && !name.includes("/") &&
+    !name.startsWith(".herdr-save-") &&
+    !name.startsWith(".herdr-upload-") && !name.includes("/") &&
     !name.includes("\\") && !/[\x00-\x1f\x7f]/.test(name);
 }
 
 function protectedGitPath(root, selected) {
   const parts = path.posix.relative(root, selected).split("/");
   return parts.includes(".git") ||
-    parts.some((part) => part.startsWith(".herdr-save-"));
+    parts.some((part) => part.startsWith(".herdr-save-") ||
+      part.startsWith(".herdr-upload-"));
 }
 
 async function exclusiveFileCopy(source, destination) {
@@ -754,7 +968,8 @@ async function remoteFilesRequest(req) {
       const entries = await fs.readdir(selected, { withFileTypes: true });
       const sorted = entries
         .filter((entry) => entry.name !== ".git" &&
-          !entry.name.startsWith(".herdr-save-"))
+          !entry.name.startsWith(".herdr-save-") &&
+           !entry.name.startsWith(".herdr-upload-"))
         .map((entry) => ({
           name: entry.name,
           kind: entry.isDirectory() ? "directory" :
@@ -1883,6 +2098,12 @@ function inputLine() {
                         request.type === "herdr_fs_trash" ||
                         request.type === "herdr_fs_restore")) {
           void remoteFilesRequest(request);
+        } else if (request && (request.type === "herdr_fs_transfer_read" ||
+                               request.type === "herdr_fs_transfer_begin" ||
+                               request.type === "herdr_fs_transfer_chunk" ||
+                               request.type === "herdr_fs_transfer_commit" ||
+                               request.type === "herdr_fs_transfer_abort")) {
+          void remoteTransferRequest(request);
         } else if (request && (request.type === "herdr_palette_snapshot" ||
                                request.type === "herdr_git_head" ||
                                request.type === "herdr_git_history" ||
