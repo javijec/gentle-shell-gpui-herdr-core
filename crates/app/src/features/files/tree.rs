@@ -19,7 +19,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::changes::{ChangesEvent, ChangesView};
-use super::listing::{Entry, list_dir};
+use super::listing::Entry;
+use super::backend::{WorkspaceBackend, WorkspacePath};
 use super::ops::{self, ClipMode};
 use super::refs::{RefsEvent, RefsView};
 use super::tabs::FilePanelTab as Tab;
@@ -335,12 +336,23 @@ impl FileTreeView {
 
     fn load_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         let show_ignored = self.show_ignored;
+        let backend = WorkspaceBackend::local(self.root.clone());
         cx.spawn(async move |this, cx| {
             let listed = dir.clone();
-            let entries = cx
-                .background_executor()
-                .spawn(async move { list_dir(&listed, show_ignored) })
-                .await;
+            let response = cx.background_executor().spawn(
+                backend.list(WorkspacePath::Local(listed.clone()), show_ignored)
+            ).await;
+            let Ok(listing) = response else { return; };
+            let entries: Vec<Entry> = listing.entries.into_iter().map(|item| {
+                let name = item.name;
+                Entry {
+                    path: listed.join(&name),
+                    is_dir: item.kind == "directory",
+                    hidden: name.starts_with('.'),
+                    ignored: item.ignored,
+                    name,
+                }
+            }).collect();
             let _ = this.update(cx, |this, cx| {
                 // A listing from before the ignored toggle flipped is stale.
                 if this.show_ignored == show_ignored && this.children.get(&dir) != Some(&entries) {
