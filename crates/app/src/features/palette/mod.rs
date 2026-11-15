@@ -75,10 +75,10 @@ pub enum PaletteAction {
     OpenFile(PathBuf),
     /// Remote Linux paths are POSIX strings, never Windows paths. Include
     /// the originating machine/root to reject stale palette selections.
-    OpenRemoteFile { machine: String, root: String, path: String },
+    OpenRemoteFile { machine: String, root: String, terminal: String, path: String },
     /// Asks for confirmation before running `git switch`.
     SwitchBranch(String),
-    SwitchRemoteBranch { machine: String, root: String, branch: String },
+    SwitchRemoteBranch { machine: String, root: String, terminal: String, branch: String },
 }
 
 pub enum PaletteEvent {
@@ -138,6 +138,7 @@ pub struct Activity {
 pub struct PaletteRemote {
     pub machine: String,
     pub root: String,
+    pub terminal: String,
     pub process: Option<Arc<pi_rpc::RpcProcess>>,
 }
 
