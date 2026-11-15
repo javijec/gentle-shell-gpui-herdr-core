@@ -581,7 +581,7 @@ impl Workspace {
                 let discovered = cx.background_executor().spawn(async {
                     pi_rpc::HerdrAgentProcess::discover_live_remote_agents()
                 }).await;
-                let _ = this.update_in(cx, |this, window, cx| {
+                let _ = this.update_in(cx, |this, _window, cx| {
                     match discovered {
                         Ok(addresses) if addresses.is_empty() => {
                             this.remote_agent_recovery = RemoteAgentRecovery::Empty;
