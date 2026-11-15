@@ -567,18 +567,30 @@ impl Workspace {
                                             v_flex()
                                                 .gap(px(1.))
                                                 .children(group.sessions.into_iter().map(|session| {
-                                                    let active = session.tab_index == self.space().active;
-                                                    let tab_index = session.tab_index;
-                                                    let close_index = tab_index;
-                                                    let renaming = self.renaming.as_ref().filter(|rename| {
-                                                        self.space().tabs.get(tab_index).is_some_and(|tab| {
-                                                            tab.tree.leaves().contains(&rename.pane)
-                                                        })
-                                                    });
-                                                    let group_name = format!("nav-session-{}", session.tab_id);
+                                                    let source = session.source.clone();
+                                                    let active = matches!(&source,
+                                                        NavigatorSessionSource::Open { space, tab, pane, .. }
+                                                            if *space == self.current
+                                                                && *tab == self.space().active
+                                                                && self.tab().is_some_and(|t| t.focused == *pane)
+                                                    );
+                                                    let close_target = match &source {
+                                                        NavigatorSessionSource::Open { space, tab, .. }
+                                                            if *space == self.current => Some(*tab),
+                                                        _ => None,
+                                                    };
+                                                    let renaming = match &source {
+                                                        NavigatorSessionSource::Open { space, pane, .. }
+                                                            if *space == self.current =>
+                                                                self.renaming.as_ref()
+                                                                    .filter(|rename| rename.pane == *pane),
+                                                        _ => None,
+                                                    };
+                                                    let group_name = format!("nav-session-{}", session.row_id);
+                                                    let close_id = format!("nav-close-{}", session.row_id);
                                                     let details = format!(
-                                                        "{}{}{}",
-                                                        session.title,
+                                                        "{} · {}{}{}",
+                                                        session.kind, session.title,
                                                         session.address.as_ref()
                                                             .map(|a| format!(" · {a}"))
                                                             .unwrap_or_default(),
@@ -588,12 +600,16 @@ impl Workspace {
                                                     );
                                                     let details = match &session.directory {
                                                         Some(path) => format!("{details} · cwd: {path}"),
-                                                        None => format!("{details} · remote cwd unavailable"),
+                                                        None => details,
                                                     };
-                                                    let directory_label = session.directory.clone()
-                                                        .unwrap_or_else(|| "Remote cwd unavailable".into());
+                                                    let directory_label = format!(
+                                                        "{} · {}",
+                                                        session.kind,
+                                                        session.directory.as_deref()
+                                                            .unwrap_or("cwd unavailable"),
+                                                    );
                                                     h_flex()
-                                                        .id(("navigator-session", session.tab_id))
+                                                        .id(SharedString::from(format!("nav-row-{}", session.row_id)))
                                                         .group(SharedString::from(group_name.clone()))
                                                         .h(px(48.))
                                                         .ml(px(14.))
@@ -615,10 +631,28 @@ impl Workspace {
                                                             Tooltip::new(details.clone()).build(window, cx)
                                                         })
                                                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                                                            if event.click_count() >= 2 {
-                                                                this.start_tab_rename(tab_index, window, cx);
-                                                            } else {
-                                                                this.activate(tab_index, window, cx);
+                                                            match &source {
+                                                                NavigatorSessionSource::Open { space, tab, pane, .. } => {
+                                                                    if *space != this.current {
+                                                                        this.switch_workspace(*space, window, cx);
+                                                                    }
+                                                                    this.activate(*tab, window, cx);
+                                                                    this.focus_pane(*pane, window, cx);
+                                                                    if event.click_count() >= 2 {
+                                                                        this.start_tab_rename(*tab, window, cx);
+                                                                    }
+                                                                }
+                                                                NavigatorSessionSource::Saved { space, tab } => {
+                                                                    this.switch_workspace(*space, window, cx);
+                                                                    this.activate(*tab, window, cx);
+                                                                }
+                                                                NavigatorSessionSource::Herdr { address, live } => {
+                                                                    if *live {
+                                                                        this.show_or_attach_herdr_terminal(
+                                                                            address.clone(), window, cx,
+                                                                        );
+                                                                    }
+                                                                }
                                                             }
                                                         }))
                                                         .child(
@@ -626,6 +660,8 @@ impl Workspace {
                                                                 .small()
                                                                 .text_color(if active {
                                                                     ui::petal()
+                                                                } else if session.running {
+                                                                    ui::accent()
                                                                 } else {
                                                                     ui::muted()
                                                                 }),
@@ -640,7 +676,6 @@ impl Workspace {
                                                                 .items_center()
                                                                 .rounded(px(5.))
                                                                 .bg(ui::well())
-                                                                // Editing the name must not activate the row.
                                                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                                                     cx.stop_propagation();
                                                                 })
@@ -683,33 +718,35 @@ impl Workspace {
                                                                     .bg(ui::accent()),
                                                             )
                                                         })
-                                                        .child(
-                                                            div()
-                                                                .id(("navigator-close", session.tab_id))
-                                                                .size(px(20.))
-                                                                .flex_none()
-                                                                .flex()
-                                                                .items_center()
-                                                                .justify_center()
-                                                                .rounded(px(4.))
-                                                                .text_color(ui::muted())
-                                                                .invisible()
-                                                                .group_hover(
-                                                                    SharedString::from(group_name),
-                                                                    |button| button.visible(),
-                                                                )
-                                                                .hover(|button| {
-                                                                    button.bg(ui::surface_hover())
-                                                                        .text_color(ui::fg())
-                                                                })
-                                                                .on_click(cx.listener(
-                                                                    move |this, _, window, cx| {
-                                                                        cx.stop_propagation();
-                                                                        this.close_tab(close_index, window, cx);
-                                                                    },
-                                                                ))
-                                                                .child(Icon::new(IconName::X).xsmall()),
-                                                        )
+                                                        .when_some(close_target, |row, close_index| {
+                                                            row.child(
+                                                                div()
+                                                                    .id(SharedString::from(close_id))
+                                                                    .size(px(20.))
+                                                                    .flex_none()
+                                                                    .flex()
+                                                                    .items_center()
+                                                                    .justify_center()
+                                                                    .rounded(px(4.))
+                                                                    .text_color(ui::muted())
+                                                                    .invisible()
+                                                                    .group_hover(
+                                                                        SharedString::from(group_name),
+                                                                        |button| button.visible(),
+                                                                    )
+                                                                    .hover(|button| {
+                                                                        button.bg(ui::surface_hover())
+                                                                            .text_color(ui::fg())
+                                                                    })
+                                                                    .on_click(cx.listener(
+                                                                        move |this, _, window, cx| {
+                                                                            cx.stop_propagation();
+                                                                            this.close_tab(close_index, window, cx);
+                                                                        },
+                                                                    ))
+                                                                    .child(Icon::new(IconName::X).xsmall()),
+                                                            )
+                                                        })
                                                 })),
                                         )
                                     })
