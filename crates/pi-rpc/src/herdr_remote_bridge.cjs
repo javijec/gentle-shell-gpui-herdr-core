@@ -386,7 +386,19 @@ async function transferClean(transfer) {
   if (transfer.original) writeInFlight.delete(transfer.destination);
 }
 
+async function reapExpiredUploads() {
+  for (const [id, transfer] of uploads) {
+    if (!transfer.busy && Date.now() > transfer.deadline) {
+      uploads.delete(id);
+      await transferClean(transfer);
+    }
+  }
+}
+
 async function transferBegin(req) {
+  // Release abandoned upload slots and temporary files before admitting a
+  // new transfer. A reconnect never inherits another agent's upload token.
+  await reapExpiredUploads();
   if (await fs.realpath(process.cwd()) === "/") {
     throw new Error("Upload requires a project directory, not /");
   }
@@ -498,6 +510,11 @@ async function transferChunk(req) {
 async function transferFinish(req) {
   const transfer = uploads.get(req.transfer);
   if (!transfer || transfer.busy) throw new Error("Unknown or busy upload token");
+  if (Date.now() > transfer.deadline) {
+    uploads.delete(req.transfer);
+    await transferClean(transfer);
+    throw new Error("Expired remote upload token");
+  }
   transfer.busy = true;
   uploads.delete(req.transfer);
   try {
