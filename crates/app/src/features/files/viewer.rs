@@ -199,8 +199,13 @@ impl FileView {
             Ok((text, size)) => {
                 meta.size = Some(size);
                 meta.lines = Some(line_count(&text));
-                let preview =
-                    is_markdown(&path).then(|| cx.new(|cx| TextViewState::markdown(&text, cx)));
+                let diagrams = Arc::new(mermaid::Diagrams::default());
+                let preview = is_markdown(&path).then(|| {
+                    let prepared =
+                        diagrams.prepare(&text, dark_theme(cx), renderer_cli(cx).as_ref());
+                    (drawing, diagram_blocks) = (prepared.jobs, prepared.blocks);
+                    cx.new(|cx| TextViewState::markdown(&prepared.text, cx))
+                });
                 let editor = cx.new(|cx| super::source_editor(&path, text, window, cx));
                 let edit = Editing {
                     saved: editor.read(cx).text().clone(),
