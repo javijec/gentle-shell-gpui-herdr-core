@@ -18,6 +18,8 @@ pub enum MachinesEvent {
     /// Reattach the selected terminal.list record according to its Herdr
     /// RPC-agent label. Does not create a new Herdr terminal.
     OpenExisting { address: String, agent: bool },
+    /// Explicitly terminate a listed Herdr session after confirmation.
+    TerminateExisting { address: String, agent: bool },
     /// Explicitly launch a Pi agent on the local computer (None) or a
     /// connected registered remote machine (Some). Nothing auto-spawns.
     NewAgent(Option<String>),
