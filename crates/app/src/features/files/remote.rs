@@ -824,6 +824,14 @@ impl RemoteFilesView {
             generation: 0,
             _wait_for_agent: Task::ready(()),
         };
+        if super::backend::remote_fs_trace_enabled() {
+            eprintln!(
+                "[herdr-fs-trace] UI view created machine={} root={} rpc_ready={}",
+                view.machine,
+                view.root,
+                view.session.read(cx).remote_fs_process().is_some(),
+            );
+        }
         if view.root.is_empty() {
             view.error = Some(
                 "This restored agent has no known remote working directory yet. Refresh after Herdr discovers its terminal, or open a new agent."
@@ -1021,6 +1029,14 @@ impl RemoteFilesView {
         if !self.can_leave_preview(cx) { return; }
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
+        let trace = super::backend::remote_fs_trace_enabled();
+        let started = std::time::Instant::now();
+        if trace {
+            eprintln!(
+                "[herdr-fs-trace] UI load start machine={} path={} generation={generation}",
+                self.machine, directory,
+            );
+        }
         self.current = directory.clone();
         self.preview = None;
         self.editor = None;
@@ -1040,6 +1056,12 @@ impl RemoteFilesView {
         let Some(process) = self.session.read(cx).remote_fs_process() else {
             self.loading = false;
             self.error = Some("Waiting for this remote agent to connect…".into());
+            if trace {
+                eprintln!(
+                    "[herdr-fs-trace] UI load waiting path={} rpc_ready=false",
+                    self.current,
+                );
+            }
             cx.notify();
             return;
         };
@@ -1059,6 +1081,15 @@ impl RemoteFilesView {
                         this.truncated = listing.truncated;
                     }
                     Err(error) => this.error = Some(friendly_error(&error.to_string())),
+                }
+                if trace {
+                    eprintln!(
+                        "[herdr-fs-trace] UI load finished path={} generation={generation} elapsed_ms={} rows={} error={}",
+                        this.current,
+                        started.elapsed().as_millis(),
+                        this.tree_rows.len(),
+                        this.error.as_deref().unwrap_or("none"),
+                    );
                 }
                 cx.notify();
             });
