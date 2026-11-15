@@ -447,9 +447,10 @@ impl Workspace {
                     pane.herdr_address.as_deref() == Some(address)
                         || pane.item.terminal_address.as_ref()
                             .and_then(|get| get(cx)).as_deref() == Some(address)
-                        || pane.linked_session.as_ref()
-                            .and_then(|session| session.read(cx).herdr_terminal())
-                            .as_deref() == Some(address)
+                        || (matches!(pane.item.kind, PaneKind::File | PaneKind::History)
+                            && pane.linked_session.as_ref()
+                                .and_then(|session| session.read(cx).herdr_terminal())
+                                .as_deref() == Some(address))
                 });
                 (same_address || selected_pane == Some(*id)).then_some(*id)
             })
@@ -483,12 +484,21 @@ impl Workspace {
                         pane_index += 1;
                         let same_address = address.is_some_and(|addr| {
                             pane.herdr_terminal.as_deref() == Some(addr)
-                                || pane.remote_owner.as_deref() == Some(addr)
+                                || (matches!(pane.kind, PaneKind::File | PaneKind::History)
+                                    && pane.remote_owner.as_deref() == Some(addr))
                         });
                         let selected = selected_saved == Some((
                             space_index, original_tab, original_pane,
                         ));
-                        (!same_address && !selected).then_some(pane.clone())
+                        (!same_address && !selected).then(|| {
+                            let mut kept = pane.clone();
+                            if address.is_some_and(|addr| {
+                                kept.remote_owner.as_deref() == Some(addr)
+                            }) {
+                                kept.remote_owner = None;
+                            }
+                            kept
+                        })
                     }) else {
                         return false;
                     };
@@ -501,6 +511,17 @@ impl Workspace {
         }
         for id in matching {
             self.panes.remove(&id);
+        }
+        // Independent terminals may have been opened beside the agent.
+        // Keep their own Herdr sessions alive and drop only the dead parent link.
+        for pane in self.panes.values_mut() {
+            if address.is_some_and(|addr| {
+                pane.linked_session.as_ref()
+                    .and_then(|session| session.read(cx).herdr_terminal())
+                    .as_deref() == Some(addr)
+            }) {
+                pane.linked_session = None;
+            }
         }
         // Undo records intentionally omit dead Herdr addresses, so there is
         // no reliable way to pick only this one's old close snapshots.
