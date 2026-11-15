@@ -18,7 +18,6 @@ pub struct Machine {
     /// True for Herdr's custom duplex command transport (not SSH).
     pub via: bool,
     pub temporary: bool,
-    pub session: Option<String>,
     pub version: String,
     /// Explicit warning from remote Core that the OS may end it at logout.
     pub keeps_running_after_logout: Option<bool>,
@@ -96,7 +95,6 @@ pub fn parse_machine(value: &Value) -> Option<Machine> {
         since_ms: value.get("since_ms").and_then(Value::as_u64),
         via: value["via"].as_bool().unwrap_or(false),
         temporary: value["temporary"].as_bool().unwrap_or(false),
-        session: optional_str(value, "session"),
         version: str_field(value, "version").to_string(),
         keeps_running_after_logout: value["keeps_running_after_logout"].as_bool(),
         logout_linger_user: optional_str(value, "logout_linger_user"),
@@ -429,7 +427,6 @@ mod tests {
         assert_eq!(machine.state, "needs_update");
         assert!(machine.via);
         assert!(machine.temporary);
-        assert_eq!(machine.session.as_deref(), Some("sandbox"));
         assert_eq!(machine.since_ms, Some(12345));
         assert_eq!(machine.keeps_running_after_logout, Some(false));
         assert_eq!(machine.logout_linger_user.as_deref(), Some("dietpi"));
