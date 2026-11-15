@@ -72,7 +72,7 @@ pub(super) fn resized_dock_width(
         DockSide::Machines => files,
         DockSide::Files => machines,
     };
-    let maximum = (remaining - other).max(0.).min(MAX_DOCK_WIDTH);
+    let maximum = (remaining - other).clamp(0., MAX_DOCK_WIDTH);
     let minimum = MIN_DOCK_WIDTH.min(maximum);
     pointer.clamp(minimum, maximum)
 }
