@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -349,7 +349,8 @@ impl Render for MachinesView {
                                     .disabled(self.busy)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.submit_add_machine(cx)
-                                    }))),
+                                    })))
+                            ),
                     )
                 })
                 .when_some(self.info.clone(), |panel, info| {
