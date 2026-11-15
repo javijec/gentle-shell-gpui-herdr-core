@@ -1,5 +1,5 @@
-//! Machines: discover the local Herdr Core's registered remote machines,
-//! inspect persistent terminal addresses, and open existing/new shell panels.
+//! Machine registration and removal through the local Herdr Core API.
+//! Sessions belong exclusively to the Machines navigator, never this modal.
 
 pub(crate) mod model;
 mod directory_picker;
@@ -8,33 +8,25 @@ mod view;
 pub use directory_picker::{RemoteDirectoryEvent, RemoteDirectoryPicker};
 
 use gpui_kit::*;
-use std::collections::HashSet;
 use gpui_kit::component::input::InputState;
 
 pub enum MachinesEvent {
     Close,
-    /// Attach the existing Herdr terminal address in a new GPUI tab.
-    OpenTerminal(String),
-    /// Reattach the selected terminal.list record according to its Herdr
-    /// RPC-agent label. Does not create a new Herdr terminal.
-    OpenExisting { address: String, agent: bool },
-    /// Explicitly terminate a listed Herdr session after confirmation.
-    TerminateExisting { address: String, agent: bool },
-    /// Explicitly launch a Pi agent on the local computer (None) or a
-    /// connected registered remote machine (Some). Nothing auto-spawns.
-    NewAgent(Option<String>),
+    /// The registered machine list changed; refresh the workspace navigator.
+    Changed,
 }
 
 pub struct MachinesView {
     snapshot: Option<model::Snapshot>,
-    known_agents: HashSet<String>,
-    terminated_sessions: HashSet<String>,
     loading: bool,
     busy: bool,
     error: Option<String>,
     info: Option<String>,
     show_add_form: bool,
-    add_target: Entity<InputState>,
+    /// true: custom command reaching a remote Herdr Core; false: host target.
+    add_via: bool,
+    add_host: Entity<InputState>,
+    add_command: Entity<InputState>,
     add_name: Entity<InputState>,
     _load: Task<()>,
     _action: Task<()>,
@@ -44,56 +36,32 @@ impl EventEmitter<MachinesEvent> for MachinesView {}
 
 impl MachinesView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let add_target = cx.new(|cx| InputState::new(window, cx)
-            .placeholder("SSH Host or user@host[:port]"));
+        let add_host = cx.new(|cx| InputState::new(window, cx)
+            .placeholder("Host or user@host[:port]"));
+        let add_command = cx.new(|cx| InputState::new(window, cx)
+            .placeholder("e.g. wsl.exe -d Ubuntu -e sh -c"));
         let add_name = cx.new(|cx| InputState::new(window, cx)
-            .placeholder("Optional display name"));
-        let mut this = Self {
+            .placeholder("Name for this machine in Herdr"));
+        let mut view = Self {
             snapshot: None,
-            known_agents: HashSet::new(),
-            terminated_sessions: HashSet::new(),
             loading: false,
             busy: false,
             error: None,
             info: None,
             show_add_form: false,
-            add_target,
+            add_via: true,
+            add_host,
+            add_command,
             add_name,
             _load: Task::ready(()),
             _action: Task::ready(()),
         };
-        // Defense in depth: even a programmatic view construction must never
-        // connect to Herdr while the native/local backend is selected.
         if crate::features::terminal::herdr_enabled() {
-            this.refresh(cx);
+            view.refresh(cx);
         }
-        this
+        view
     }
 
-    /// Mark exact Herdr addresses that are known to be Gentle Shell panes,
-    /// including agents in other or not-yet-restored workspaces.
-    pub(crate) fn set_known_agent_addresses(
-        &mut self, addresses: HashSet<String>, cx: &mut Context<Self>,
-    ) {
-        if self.known_agents != addresses {
-            self.known_agents = addresses;
-            cx.notify();
-        }
-    }
-
-    /// Persistent tombstones hide finished Herdr terminal records that
-    /// the user permanently terminated from Machines.
-    pub(crate) fn set_terminated_sessions(
-        &mut self, addresses: HashSet<String>, cx: &mut Context<Self>,
-    ) {
-        if self.terminated_sessions != addresses {
-            self.terminated_sessions = addresses;
-            cx.notify();
-        }
-    }
-
-    /// Open Machines directly on the registration form when the header +
-    /// was used. This is never a new-agent operation.
     pub fn new_for_registration(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut view = Self::new(window, cx);
         view.begin_add_machine(window, cx);
@@ -106,7 +74,22 @@ impl MachinesView {
         }
         self.show_add_form = true;
         self.error = None;
-        self.add_target.update(cx, |target, cx| target.focus(window, cx));
+        self.info = None;
+        self.add_name.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    fn set_add_via(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.add_via = enabled;
+        self.error = None;
+        if enabled {
+            self.add_command.update(cx, |input, cx| input.focus(window, cx));
+        } else {
+            self.add_host.update(cx, |input, cx| input.focus(window, cx));
+        }
         cx.notify();
     }
 
@@ -118,25 +101,33 @@ impl MachinesView {
         }
     }
 
-    /// Register an SSH machine in Herdr. No agent or terminal is launched.
     fn submit_add_machine(&mut self, cx: &mut Context<Self>) {
         if !crate::features::terminal::herdr_enabled()
             || !self.show_add_form || self.busy
         {
             return;
         }
-        let target = self.add_target.read(cx).value().trim().to_owned();
+        let via = self.add_via;
+        let connection = if via {
+            self.add_command.read(cx).value().trim().to_owned()
+        } else {
+            self.add_host.read(cx).value().trim().to_owned()
+        };
         let name = self.add_name.read(cx).value().trim().to_owned();
-        if target.is_empty() {
-            self.error = Some("Enter an SSH target, for example dietpi@javipi.".into());
+        if connection.is_empty() || (via && name.is_empty()) {
+            self.error = Some(if via {
+                "Enter a machine name and a Herdr connection command.".into()
+            } else {
+                "Enter a host or network target for Herdr.".into()
+            });
             cx.notify();
             return;
         }
         self.busy = true;
         self.error = None;
-        self.info = Some(format!("Registering {target} in Herdr..."));
+        self.info = Some("Adding machine to Herdr Core...".into());
         let job = cx.background_executor().spawn(async move {
-            model::add_machine(&target, (!name.is_empty()).then_some(name.as_str()))
+            model::add_machine(&connection, (!name.is_empty()).then_some(name.as_str()), via)
         });
         self._action = cx.spawn(async move |this, cx| {
             let result = job.await;
@@ -146,7 +137,8 @@ impl MachinesView {
                 match result {
                     Ok(()) => {
                         this.show_add_form = false;
-                        this.info = Some("Machine added to Herdr Core.".into());
+                        this.info = Some("Machine registered in Herdr Core.".into());
+                        cx.emit(MachinesEvent::Changed);
                         this.refresh(cx);
                     }
                     Err(error) => this.error = Some(error),
@@ -157,14 +149,14 @@ impl MachinesView {
         cx.notify();
     }
 
-    /// Background discovery must never block UI painting or key handling.
+    /// List only machine profiles, not the potentially large terminal list.
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        if !crate::features::terminal::herdr_enabled() || self.busy {
+        if !crate::features::terminal::herdr_enabled() || self.busy || self.loading {
             return;
         }
         self.loading = true;
         self.error = None;
-        let job = cx.background_executor().spawn(async { model::discover() });
+        let job = cx.background_executor().spawn(async { model::discover_registered_machines() });
         self._load = cx.spawn(async move |this, cx| {
             let result = job.await;
             let _ = this.update(cx, |this, cx| {
@@ -179,83 +171,50 @@ impl MachinesView {
         cx.notify();
     }
 
-    /// Open exactly this address; no terminal.run and no process duplication.
-    fn open_terminal(&mut self, address: String, cx: &mut Context<Self>) {
-        if !crate::features::terminal::herdr_enabled() {
-            return;
-        }
-        if self.snapshot.as_ref().is_some_and(|snapshot| {
-            snapshot.terminals.iter().any(|t| t.address == address && t.live())
+    /// Confirmation is required, including when a registered machine is
+    /// disconnected. Forgetting it leaves its remote programs running.
+    fn confirm_remove_machine(
+        &mut self, name: String, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if self.busy || !self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.machines.iter().any(|machine| machine.name == name)
         }) {
-            let agent = self.snapshot.as_ref()
-                .and_then(|snapshot| snapshot.terminals.iter()
-                    .find(|terminal| terminal.address == address))
-                .is_some_and(|terminal| terminal.gentle_shell)
-                || self.known_agents.contains(&address);
-            cx.emit(MachinesEvent::OpenExisting { address, agent });
-        }
-    }
-
-    /// 4C: the machine picker only emits an explicit new-agent choice.
-    /// The workspace owns the tab and enforces isolation from other agents.
-    fn new_agent(&mut self, machine: Option<String>, cx: &mut Context<Self>) {
-        if !crate::features::terminal::herdr_enabled() || self.busy {
             return;
         }
-        let available = match machine.as_deref() {
-            None => true,
-            Some(name) => self.snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot.machines.iter().any(|m| m.name == name && m.connected())
-            }),
-        };
-        if available {
-            cx.emit(MachinesEvent::NewAgent(machine));
-        } else {
-            self.error = Some("This machine is not connected; agent not launched".into());
-            cx.notify();
-        }
+        let title = format!("Remove machine {name} from Herdr?");
+        let description = format!(
+            "This forgets the connection to {name} in Herdr Core. \
+             Its remote agents, terminals and files are NOT deleted or stopped. \
+             You can register the machine again later."
+        );
+        let weak = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let weak = weak.clone();
+            let name = name.clone();
+            alert
+                .title(title.clone())
+                .description(description.clone())
+                .ok_text("Remove machine")
+                .ok_variant(ButtonVariant::Danger)
+                .show_cancel(true)
+                .on_ok(move |_, _, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.remove_machine(name.clone(), cx);
+                    });
+                    true
+                })
+        });
     }
 
-    /// All shells in Machines use Herdr Core. This action is unavailable
-    /// under the native/local backend.
-    fn new_shell(&mut self, machine: Option<String>, cx: &mut Context<Self>) {
+    fn remove_machine(&mut self, name: String, cx: &mut Context<Self>) {
         if !crate::features::terminal::herdr_enabled() || self.busy {
             return;
         }
         self.busy = true;
         self.error = None;
-        self.info = Some(match &machine {
-            Some(name) => format!("Starting a shell on {name}..."),
-            None => "Starting a local Herdr shell...".into(),
-        });
+        self.info = Some(format!("Removing {name} from Herdr..."));
         let job = cx.background_executor().spawn(async move {
-            model::create_shell(machine.as_deref())
-        });
-        self._action = cx.spawn(async move |this, cx| {
-            let result = job.await;
-            let _ = this.update(cx, |this, cx| {
-                this.busy = false;
-                this.info = None;
-                match result {
-                    Ok(address) => cx.emit(MachinesEvent::OpenTerminal(address)),
-                    Err(error) => this.error = Some(error),
-                }
-                cx.notify();
-            });
-        });
-        cx.notify();
-    }
-
-    /// Explicitly request a machine connection; do not SSH from GPUI itself.
-    fn connect_machine(&mut self, name: String, cx: &mut Context<Self>) {
-        if !crate::features::terminal::herdr_enabled() || self.busy {
-            return;
-        }
-        self.busy = true;
-        self.error = None;
-        self.info = Some(format!("Connecting to {name}..."));
-        let job = cx.background_executor().spawn(async move {
-            model::connect_machine(&name)
+            model::remove_machine(&name)
         });
         self._action = cx.spawn(async move |this, cx| {
             let result = job.await;
@@ -264,7 +223,8 @@ impl MachinesView {
                 this.info = None;
                 match result {
                     Ok(()) => {
-                        this.info = Some("Machine connection requested".into());
+                        this.info = Some("Machine removed. Remote sessions remain running.".into());
+                        cx.emit(MachinesEvent::Changed);
                         this.refresh(cx);
                     }
                     Err(error) => this.error = Some(error),
