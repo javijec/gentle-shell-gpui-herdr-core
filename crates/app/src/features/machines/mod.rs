@@ -151,7 +151,7 @@ impl MachinesView {
 
     /// List only machine profiles, not the potentially large terminal list.
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        if !crate::features::terminal::herdr_enabled() || self.busy || self.loading {
+        if !crate::features::terminal::herdr_enabled() || self.busy {
             return;
         }
         self.loading = true;
@@ -176,8 +176,8 @@ impl MachinesView {
     fn confirm_remove_machine(
         &mut self, name: String, window: &mut Window, cx: &mut Context<Self>,
     ) {
-        if self.busy || !self.snapshot.as_ref().is_some_and(|snapshot| {
-            snapshot.machines.iter().any(|machine| machine.name == name)
+        if self.busy || self.snapshot.as_ref().is_none_or(|snapshot| {
+            !snapshot.machines.iter().any(|machine| machine.name == name)
         }) {
             return;
         }
