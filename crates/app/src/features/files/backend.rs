@@ -8,6 +8,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use pi_rpc::RpcProcess;
 use serde_json::json;
@@ -18,6 +19,12 @@ use super::{listing, ops};
 
 pub(super) type BackendFuture<T> =
     Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'static>>;
+
+/// Enable opt-in filesystem tracing in the Windows GPUI process. The remote
+/// Node bridge receives only an explicit per-request diagnostics flag.
+pub(super) fn remote_fs_trace_enabled() -> bool {
+    std::env::var("GENTLE_SHELL_HERDR_FS_TRACE").is_ok_and(|value| value == "1")
+}
 
 #[derive(Clone)]
 pub(super) enum WorkspacePath {
@@ -116,10 +123,52 @@ impl WorkspaceBackend {
                 }
                 (Self::Herdr { root, process }, WorkspacePath::Herdr(directory)) => {
                     ensure_herdr_path(&root, &directory)?;
-                    let reply = process.request(json!({
+                    let trace = remote_fs_trace_enabled();
+                    let started = Instant::now();
+                    if trace {
+                        eprintln!(
+                            "[herdr-fs-trace] RPC start path={directory} ignored={show_ignored}"
+                        );
+                    }
+                    let result = process.request(json!({
                         "type": "herdr_fs_list", "root": root, "path": directory,
-                        "showIgnored": show_ignored
-                    })).await.map_err(|error| error.to_string())?;
+                        "showIgnored": show_ignored, "diagnostics": trace
+                    })).await;
+                    if trace {
+                        match &result {
+                            Ok(reply) => {
+                                let timing = &reply.data["diagnostics"];
+                                if timing.is_object() {
+                                    eprintln!(
+                                        "[herdr-fs-trace] RPC done path={directory} client_ms={} remote_ms={} resolve_ms={} readdir_ms={} classify_ms={} gitignore_ms={} filter_ms={} scanned={} returned={} git_batches={} git_errors={}",
+                                        started.elapsed().as_millis(),
+                                        timing["totalMs"],
+                                        timing["resolveMs"],
+                                        timing["readdirMs"],
+                                        timing["classifyMs"],
+                                        timing["gitIgnoreMs"],
+                                        timing["filterMs"],
+                                        timing["scannedEntries"],
+                                        timing["returnedEntries"],
+                                        timing["ignoreBatches"],
+                                        timing["ignoreErrors"],
+                                    );
+                                } else {
+                                    eprintln!(
+                                        "[herdr-fs-trace] RPC done path={directory} client_ms={} remote_timings=unavailable (restart the remote agent with the updated bridge)",
+                                        started.elapsed().as_millis(),
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "[herdr-fs-trace] RPC error path={directory} client_ms={} error={error}",
+                                    started.elapsed().as_millis(),
+                                );
+                            }
+                        }
+                    }
+                    let reply = result.map_err(|error| error.to_string())?;
                     let data = reply.data;
                     let entries = data["entries"].as_array()
                         .ok_or("Invalid remote directory listing")?
@@ -170,8 +219,30 @@ impl WorkspaceBackend {
                     ensure_herdr_path(&root, &path)?;
                     let reply = process.request(json!({
                         "type": "herdr_fs_read", "root": root, "path": path,
-                    })).await.map_err(|error| error.to_string())?;
-                    let data = reply.data;
+                    })).await;
+                    let data = match reply {
+                        Ok(reply) => reply.data,
+                        Err(error) if error.to_string().contains("128 KiB") => {
+                            // Large text uses the same binary chunk stream,
+                            // then verifies UTF-8 and computes the SHA-256
+                            // required for optimistic conflict protection.
+                            let bytes = super::transfers::fetch(
+                                root, process, path.clone(),
+                            ).await?;
+                            if bytes.len() > 2 * 1024 * 1024 || bytes.contains(&0) {
+                                return Err(
+                                    "Files above 2 MiB or binary files can be transferred                                      with Download but cannot be edited as text".into()
+                                );
+                            }
+                            let revision = format!("{:x}", Sha256::digest(&bytes));
+                            let content = String::from_utf8(bytes)
+                                .map_err(|_| "Use Download for binary or non-UTF-8 files")?;
+                            return Ok(WorkspaceText {
+                                path, content, revision: Some(revision),
+                            });
+                        }
+                        Err(error) => return Err(error.to_string()),
+                    };
                     let content = data["content"].as_str()
                         .ok_or("Invalid remote file content")?.to_owned();
                     if content.len() > 128 * 1024 || content.contains('\0') {
@@ -427,12 +498,15 @@ impl WorkspaceBackend {
             {
                 return Err("Missing or invalid file revision".into());
             }
-            if content.len() > 128 * 1024 || content.contains('\0') {
-                return Err("Only UTF-8 text under 128 KiB can be saved".into());
+            if content.len() > 2 * 1024 * 1024 || content.contains('\0') {
+                return Err("Only UTF-8 text up to 2 MiB can be saved".into());
             }
             match (self, path) {
                 (Self::Local { root }, WorkspacePath::Local(path)) => {
                     ensure_local_path(&root, &path)?;
+                    if content.len() > 128 * 1024 {
+                        return Err("Native backend text saves are limited to 128 KiB".into());
+                    }
                     let metadata = std::fs::symlink_metadata(&path)
                         .map_err(|error| error.to_string())?;
                     if !metadata.is_file() || metadata.len() > 128 * 1024 {
@@ -452,11 +526,25 @@ impl WorkspaceBackend {
                 }
                 (Self::Herdr { root, process }, WorkspacePath::Herdr(path)) => {
                     ensure_herdr_path(&root, &path)?;
+                    if content.len() > 128 * 1024 {
+                        return super::transfers::replace_text(
+                            root, process, path, content, expected_revision,
+                        ).await;
+                    }
                     let reply = process.request(json!({
                         "type": "herdr_fs_write", "root": root,
                         "path": path, "content": content,
                         "expectedRevision": expected_revision,
-                    })).await.map_err(|error| error.to_string())?;
+                    })).await;
+                    let reply = match reply {
+                        Ok(reply) => reply,
+                        Err(error) if error.to_string().contains("128 KiB") => {
+                            return super::transfers::replace_text(
+                                root, process, path, content, expected_revision,
+                            ).await;
+                        }
+                        Err(error) => return Err(error.to_string()),
+                    };
                     let revision = reply.data["revision"].as_str()
                         .filter(|value| value.len() == 64
                             && value.bytes().all(|byte| byte.is_ascii_hexdigit()))

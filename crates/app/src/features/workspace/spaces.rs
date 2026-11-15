@@ -18,12 +18,11 @@ impl Workspace {
         self.spaces.len() - 1
     }
 
-    /// Build a restored workspace's panes; with `fill`, give an empty one an
-    /// agent tab.
+    /// Restore saved panes without creating a new agent. Only an explicit
+    /// user action (Machines + or an explicit new-session command) may launch.
     pub(super) fn ensure_open(
         &mut self,
         index: usize,
-        fill: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -32,9 +31,26 @@ impl Workspace {
         if let Some((tabs, active)) = self.spaces[index].saved.take() {
             for saved in tabs {
                 let leaves = saved.layout.leaves();
+                // Recover the owner agents first, regardless of their visual
+                // order in the split tree. File/History panes can then bind
+                // to the same restored Herdr addresses without spawning a
+                // replacement agent or treating Linux paths as Windows files.
+                let agents: Vec<Option<PaneId>> = leaves.iter().map(|pane| {
+                    if pane.kind == PaneKind::Agent {
+                        self.restore_pane(pane, window, cx)
+                    } else {
+                        None
+                    }
+                }).collect();
+                let mut next = 0;
                 let mut built = Vec::new();
                 let tree = saved.layout.filter_map(&mut |pane: &SavedPane| {
-                    let id = self.restore_pane(pane, window, cx);
+                    let id = if pane.kind == PaneKind::Agent {
+                        agents[next]
+                    } else {
+                        self.restore_pane(pane, window, cx)
+                    };
+                    next += 1;
                     built.push(id);
                     id
                 });
@@ -51,12 +67,6 @@ impl Workspace {
             let space = &mut self.spaces[index];
             space.active = active.min(space.tabs.len().saturating_sub(1));
         }
-        if fill && self.spaces[index].tabs.is_empty()
-            && self.remote_agent_recovery.may_create_default_agent()
-        {
-            let root = self.spaces[index].root.clone();
-            self.open_tab(PaneKind::Agent, root, None, None, window, cx);
-        }
         self.current = previous;
     }
 
@@ -69,7 +79,7 @@ impl Workspace {
         if index >= self.spaces.len() {
             return;
         }
-        self.ensure_open(index, true, window, cx);
+        self.ensure_open(index, window, cx);
         let changed = index != self.current;
         self.current = index;
         self.space_mut().last_active = workspaces::now();
@@ -91,6 +101,37 @@ impl Workspace {
     ) {
         let index = self.push_space(name.filter(|n| !n.trim().is_empty()), root);
         self.switch_workspace(index, window, cx);
+    }
+
+    /// Prompt for a local project folder before starting a new agent.
+    /// Cancelling the native chooser does not open any pane or Pi session.
+    /// Reuses the same GPUI path prompt as workspace creation.
+    pub(super) fn pick_local_agent_folder(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose a folder for Gentle Shell".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.pop() else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                if path.is_dir() {
+                    this.open_local_agent_in_directory(path, window, cx);
+                } else {
+                    window.push_notification(Notification::info(
+                        "Choose an existing local folder before creating the agent.",
+                    ), cx);
+                }
+            });
+        }).detach();
     }
 
     pub(super) fn pick_workspace_folder(

@@ -18,6 +18,16 @@ mod tests;
 pub use gentle_core::workspaces::unique_name;
 pub use store::{load, save};
 
+/// User edits made to a remote file before the window closed. The original
+/// SHA-256 is retained: a restored draft must never use a newer server
+/// revision to overwrite changes made while the desktop was closed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedRemoteDraft {
+    pub path: String,
+    pub content: String,
+    pub revision: String,
+}
+
 /// One pane as saved: enough to build it again.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedPane {
@@ -35,6 +45,15 @@ pub struct SavedPane {
     /// Per-agent machine selection. None preserves legacy 4B environment behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_target: Option<pi_rpc::AgentTarget>,
+    /// POSIX file path, serialized separately from a Windows file path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_path: Option<String>,
+    /// Exact Herdr terminal of the parent agent, not a machine name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_owner: Option<String>,
+    /// Private unsaved text draft. Stored under the local per-user data dir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_draft: Option<SavedRemoteDraft>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -77,6 +96,10 @@ pub struct SavedState {
     /// original local/remote widths until the user actually drags the edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files_dock_width: Option<f32>,
+    /// Herdr terminal identities intentionally terminated from Machines.
+    /// Persisted because terminal.list can retain finished history records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terminated_herdr_sessions: Vec<String>,
 }
 
 fn shown() -> bool {
@@ -97,11 +120,12 @@ impl Default for SavedState {
             sidebar: true,
             machines_dock_width: default_machines_dock_width(),
             files_dock_width: None,
+            terminated_herdr_sessions: Vec::new(),
         }
     }
 }
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 pub fn now() -> u64 {
     SystemTime::now()

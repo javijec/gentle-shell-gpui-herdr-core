@@ -423,14 +423,65 @@ impl Workspace {
             }
             PaneKind::Terminal => {
                 PaneFactories::get(cx).terminal.as_ref()?;
-                self.new_factory_pane_restored(PaneKind::Terminal, cwd, saved.herdr_terminal.clone(), window, cx)
+                let id = self.new_factory_pane_restored(
+                    PaneKind::Terminal, cwd, saved.herdr_terminal.clone(), window, cx,
+                )?;
+                if let Some(owner) = saved.remote_owner.as_deref() {
+                    let agent = self.panes.values().find_map(|pane| {
+                        (pane.herdr_address.as_deref() == Some(owner))
+                            .then(|| pane.session.clone()).flatten()
+                    });
+                    if let Some(pane) = self.panes.get_mut(&id) {
+                        pane.linked_session = agent;
+                        pane.agent_target = saved.agent_target.clone();
+                    }
+                }
+                Some(id)
             }
             PaneKind::File => {
+                if let Some(path) = saved.remote_path.clone() {
+                    let Some(pi_rpc::AgentTarget::Remote { machine, cwd: root }) =
+                        saved.agent_target.as_ref() else {
+                        return None;
+                    };
+                    if !super::remote_files::remote_file_in_root(root, &path) {
+                        return None;
+                    }
+                    let owner = saved.remote_owner.as_deref()?;
+                    let session = self.panes.values().find_map(|pane| {
+                        (pane.herdr_address.as_deref() == Some(owner))
+                            .then(|| pane.session.clone()).flatten()
+                    })?;
+                    let id = self.build_remote_file_pane(
+                        session, machine.clone(), root.clone(),
+                        path, window, cx,
+                    );
+                    if let Some(draft) = saved.remote_draft.clone()
+                        && let Some(view) = self.panes.get(&id)
+                            .and_then(|pane| pane.item.view.clone()
+                                .downcast::<RemoteFilesView>().ok())
+                    {
+                        view.update(cx, |view, cx| view.restore_draft(draft, cx));
+                    }
+                    return Some(id);
+                }
                 let path = saved.path.clone().filter(|p| p.is_file())?;
                 PaneFactories::get(cx).file.as_ref()?;
                 self.new_factory_pane(PaneKind::File, path, window, cx)
             }
             PaneKind::History => {
+                if let Some(pi_rpc::AgentTarget::Remote { machine, cwd: root }) =
+                    saved.agent_target.as_ref()
+                {
+                    let owner = saved.remote_owner.as_deref()?;
+                    let session = self.panes.values().find_map(|pane| {
+                        (pane.herdr_address.as_deref() == Some(owner))
+                            .then(|| pane.session.clone()).flatten()
+                    })?;
+                    return Some(self.build_remote_history_pane(
+                        session, machine.clone(), root.clone(), cx,
+                    ));
+                }
                 PaneFactories::get(cx).history.as_ref()?;
                 self.new_factory_pane(PaneKind::History, cwd, window, cx)
             }
@@ -462,6 +513,10 @@ impl Workspace {
             self.tab().map(|tab| (tab.id, tab.focused, axis))
         });
         let local_cwd = self.active_cwd(cx);
+        let owner = session.clone();
+        let agent_target = Some(pi_rpc::AgentTarget::Remote {
+            machine: machine.clone(), cwd: root.clone(),
+        });
         let task = cx.background_executor().spawn(async move {
             machine_model::create_shell_in(Some(&machine), Some(&root))
         });
@@ -484,6 +539,10 @@ impl Workspace {
                                 Some(address.clone()), window, cx,
                             )
                         {
+                            if let Some(created) = this.panes.get_mut(&pane) {
+                                created.linked_session = Some(owner.clone());
+                                created.agent_target = agent_target.clone();
+                            }
                             if let Some(tab) = this.tab_mut() {
                                 tab.tree.split(&focused, pane, axis);
                             }
@@ -492,11 +551,107 @@ impl Workspace {
                             return;
                         }
                         this.open_herdr_terminal(address, window, cx);
+                        if let Some(id) = this.focused_pane()
+                            && let Some(created) = this.panes.get_mut(&id)
+                            && created.item.kind == PaneKind::Terminal
+                        {
+                            created.linked_session = Some(owner.clone());
+                            created.agent_target = agent_target.clone();
+                            this.schedule_save(cx);
+                        }
                     }
                     Err(error) => window.push_notification(Notification::error(error), cx),
                 }
             });
         }).detach();
+    }
+
+    /// Focus an already represented Herdr session, including an agent or
+    /// terminal in another workspace. Only attach a new terminal viewer when
+    /// the address is not represented anywhere in the desktop. No terminal.run.
+    pub(super) fn show_or_attach_herdr_session(
+        &mut self,
+        address: String,
+        is_agent: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !crate::features::terminal::herdr_enabled() {
+            return;
+        }
+        if self.terminated_herdr_sessions.contains(&address)
+            || self.terminating_herdr_sessions.contains(&address)
+        {
+            window.push_notification(Notification::info(
+                "This Herdr session has been terminated and cannot be reopened.",
+            ), cx);
+            return;
+        }
+        // A restored pane may not have copied its terminal address into the
+        // chrome yet. Ask its provider as well as its persisted identity.
+        let locate = |this: &Self, cx: &App| -> Option<(usize, usize, PaneId)> {
+            this.spaces.iter().enumerate().find_map(|(space_index, space)| {
+                space.tabs.iter().enumerate().find_map(|(tab_index, tab)| {
+                    tab.tree.leaves().into_iter().find(|id| {
+                        this.panes.get(id).is_some_and(|pane| {
+                            matches!(pane.item.kind, PaneKind::Agent | PaneKind::Terminal)
+                                && (pane.herdr_address.as_deref() == Some(address.as_str())
+                                    || pane.item.terminal_address.as_ref()
+                                        .and_then(|get| get(cx)).as_deref()
+                                        == Some(address.as_str()))
+                        })
+                    }).map(|pane| (space_index, tab_index, pane))
+                })
+            })
+        };
+        if let Some((space, tab, pane)) = locate(self, cx) {
+            if space != self.current {
+                self.switch_workspace(space, window, cx);
+            }
+            self.activate(tab, window, cx);
+            self.focus_pane(pane, window, cx);
+            return;
+        }
+        // Unopened saved workspaces retain the identity of existing agents.
+        // Rebuild the original saved layout rather than misclassifying a
+        // dormant Gentle Shell as a new terminal.
+        let saved_space = self.spaces.iter().enumerate().find_map(|(index, space)| {
+            space.saved.as_ref().and_then(|(tabs, _)| {
+                tabs.iter().any(|tab| tab.layout.leaves().iter().any(|pane| {
+                    matches!(pane.kind, PaneKind::Agent | PaneKind::Terminal)
+                        && pane.herdr_terminal.as_deref() == Some(address.as_str())
+                })).then_some(index)
+            })
+        });
+        if let Some(space) = saved_space {
+            self.switch_workspace(space, window, cx);
+            if let Some((_, tab, pane)) = locate(self, cx) {
+                self.activate(tab, window, cx);
+                self.focus_pane(pane, window, cx);
+                return;
+            }
+        }
+        if is_agent {
+            // This address was tagged gentle-shell=rpc-agent by Herdr Core.
+            // Restore its Pi bridge in a new pane; NEVER call terminal.run.
+            let cwd = self.active_cwd(cx);
+            let pane = self.new_agent_pane(
+                cwd,
+                AgentPaneInit {
+                    restored_herdr: Some(address),
+                    // Explicit user selection requests an immediate REATTACH,
+                    // even if the global discovery pass previously failed.
+                    // The restored address is never replaced by terminal.run.
+                    start_now: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            self.push_pane_tab(pane, window, cx);
+        } else {
+            self.open_herdr_terminal(address, window, cx);
+        }
     }
 
     /// Attach an existing Herdr address as a new GPUI tab without running a
@@ -518,98 +673,29 @@ impl Workspace {
         }
     }
 
-    /// One-time recovery of agents started by older 4B builds, before agent
-    /// pane addresses were saved. This only opens new views of known live
-    /// Herdr RPC terminals; no terminal.run or second Pi agent is issued.
-    pub(super) fn recover_untracked_agents(
+    /// Create a local agent only after the user has selected its actual
+    /// working directory. The explicit Local target prevents inheriting the
+    /// previously focused (possibly remote) agent's machine.
+    pub(super) fn open_local_agent_in_directory(
         &mut self,
-        addresses: Vec<String>,
+        directory: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut known: std::collections::HashSet<String> = self.panes.values()
-            .filter(|pane| pane.item.kind == PaneKind::Agent)
-            .filter_map(|pane| {
-                pane.herdr_address.clone().or_else(|| {
-                    pane.item.terminal_address.as_ref().and_then(|get| get(cx))
-                })
-            })
-            .collect();
-        // Other workspaces may not have been instantiated yet; keep their
-        // saved identities reserved to prevent duplicate recovered tabs.
-        for space in &self.spaces {
-            if let Some((tabs, _)) = &space.saved {
-                for tab in tabs {
-                    for pane in tab.layout.leaves() {
-                        if pane.kind == PaneKind::Agent
-                            && let Some(address) = pane.herdr_terminal
-                        {
-                            known.insert(address);
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut first_recovered = None;
-        for address in addresses {
-            if !known.insert(address.clone()) {
-                continue;
-            }
-            let cwd = self.space().root.clone();
+        if crate::features::terminal::herdr_enabled() {
             let pane = self.new_agent_pane(
-                cwd,
-                AgentPaneInit { restored_herdr: Some(address), ..Default::default() },
+                directory,
+                AgentPaneInit {
+                    agent_target: Some(pi_rpc::AgentTarget::Local),
+                    start_now: true,
+                    ..Default::default()
+                },
                 window,
                 cx,
             );
-            let id = self.alloc_id();
-            let space = self.space_mut();
-            if first_recovered.is_none() {
-                first_recovered = Some(space.tabs.len());
-            }
-            space.tabs.push(Tab {
-                id,
-                tree: PaneTree::Leaf(pane),
-                focused: pane,
-            });
-        }
-        if let Some(index) = first_recovered {
-            // After upgrading from 4B's address-less layout, show a recovered
-            // agent rather than starting an unwanted replacement Pi process.
-            self.space_mut().active = index;
-            self.focus_active(window, cx);
-            self.schedule_save(cx);
-            cx.notify();
-        }
-    }
-
-    /// If all live agents were already present in saved workspaces, the
-    /// recovery pass adds no tabs. Do not leave a legacy address-less pane
-    /// active: focus an existing live agent instead.
-    pub(super) fn focus_existing_remote_agent(
-        &mut self,
-        addresses: &[String],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let live: std::collections::HashSet<&str> =
-            addresses.iter().map(String::as_str).collect();
-        let existing_tab = self.space().tabs.iter().position(|tab| {
-            tab.tree.leaves().iter().any(|id| {
-                self.panes
-                    .get(id)
-                    .and_then(|pane| pane.herdr_address.as_deref())
-                    .is_some_and(|address| live.contains(address))
-            })
-        });
-        if let Some(index) = existing_tab
-            && self.space().active != index
-        {
-            self.space_mut().active = index;
-            self.focus_active(window, cx);
-            self.schedule_save(cx);
-            cx.notify();
+            self.push_pane_tab(pane, window, cx);
+        } else {
+            self.open_tab(PaneKind::Agent, directory, None, None, window, cx);
         }
     }
 
@@ -691,6 +777,79 @@ impl Workspace {
         }
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    /// Chat ⇄ Terminal for an agent on Windows or another Herdr machine.
+    /// The companion terminal is a separate shell in the same project, not
+    /// the underlying Pi RPC process. Switching never restarts the agent.
+    pub(super) fn toggle_agent_terminal(
+        &mut self, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        let Some(current) = self.focused_pane() else { return };
+        let Some(current_pane) = self.panes.get(&current) else { return };
+        let in_terminal = current_pane.item.kind == PaneKind::Terminal;
+        let Some(owner) = current_pane.session.clone()
+            .or_else(|| current_pane.linked_session.clone())
+            // A standalone Machines shell has no agent owner. Never guess
+            // which chat it belongs to from a different focused tab.
+            .or_else(|| if in_terminal { None } else { self.active_session() })
+        else {
+            window.push_notification(Notification::info(
+                "Select an agent chat before opening its terminal.",
+            ), cx);
+            return;
+        };
+        if in_terminal {
+            let chat = self.panes.iter().find_map(|(id, pane)| {
+                (pane.session.as_ref() == Some(&owner)).then_some(*id)
+            });
+            if let Some(chat) = chat {
+                self.reveal_pane(chat, window, cx);
+            } else {
+                window.push_notification(Notification::info(
+                    "The originating agent chat is no longer open.",
+                ), cx);
+            }
+            return;
+        }
+        let companion = self.panes.iter().find_map(|(id, pane)| {
+            (pane.item.kind == PaneKind::Terminal
+                && pane.linked_session.as_ref() == Some(&owner)).then_some(*id)
+        });
+        if let Some(companion) = companion {
+            self.reveal_pane(companion, window, cx);
+            return;
+        }
+        if owner.read(cx).is_remote_herdr() {
+            self.open_shell_on_selected_machine(Some(SplitAxis::Horizontal), window, cx);
+            return;
+        }
+        let cwd = owner.read(cx).cwd().clone();
+        let Some(created) = self.new_factory_pane(
+            PaneKind::Terminal, cwd, window, cx,
+        ) else {
+            window.push_notification(Notification::error(
+                "The local terminal backend is unavailable.",
+            ), cx);
+            return;
+        };
+        if let Some(pane) = self.panes.get_mut(&created) {
+            pane.linked_session = Some(owner);
+        }
+        let can_split = self.pane_sizes(window).into_iter()
+            .find(|(id, ..)| *id == current)
+            .is_some_and(|(_, width, height)| fits_split(
+                SplitAxis::Horizontal, width, height,
+            ));
+        if can_split {
+            if let Some(tab) = self.tab_mut() {
+                tab.tree.split(&current, created, SplitAxis::Horizontal);
+            }
+            self.focus_pane(created, window, cx);
+            self.schedule_save(cx);
+        } else {
+            self.push_pane_tab(created, window, cx);
+        }
     }
 
     /// Show the pane wherever it lives: its workspace, its tab, then focus.

@@ -27,10 +27,43 @@ fn require_valid_name(name: &str) -> Result<(), String> {
     }
 }
 
+/// The orchestrator workflow a profile opts into (`OrchestratorMode` in
+/// gentle-pi `lib/agent-profiles.ts`). It lives in the file's top-level
+/// `workflow` map, keyed by profile, never inside the routing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OrchestratorMode {
+    /// Today's behaviour: the orchestrator may implement inline.
+    #[default]
+    Organic,
+    /// The orchestrator never implements; every change goes to a bounded
+    /// writer.
+    FullDelegation,
+}
+
+impl OrchestratorMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Organic => "organic",
+            Self::FullDelegation => "full-delegation",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "organic" => Some(Self::Organic),
+            "full-delegation" => Some(Self::FullDelegation),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProfilesFile {
     pub active: Option<String>,
     pub profiles: Vec<(String, Routing)>,
+    /// Profiles whose mode is not the default; an all-organic file has no
+    /// `workflow` key at all.
+    workflow: Vec<(String, OrchestratorMode)>,
     /// Top-level keys this version does not know, written back unchanged.
     extra: Map<String, Value>,
 }
@@ -50,6 +83,23 @@ impl ProfilesFile {
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.profiles.iter().map(|(n, _)| n.as_str())
     }
+
+    /// `readProfileWorkflow`: the profile's mode, the default when it has
+    /// none (or does not exist).
+    pub fn orchestrator_mode(&self, name: &str) -> OrchestratorMode {
+        self.workflow
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or_else(OrchestratorMode::default, |(_, mode)| *mode)
+    }
+
+    /// Set `name`'s mode in place; the default removes its entry.
+    fn put_mode(&mut self, name: &str, mode: OrchestratorMode) {
+        self.workflow.retain(|(n, _)| n != name);
+        if mode != OrchestratorMode::Organic {
+            self.workflow.push((name.to_string(), mode));
+        }
+    }
 }
 
 /// What normalization dropped while reading, so the screen can say so.
@@ -58,6 +108,9 @@ pub struct Drops {
     pub profiles: Vec<String>,
     pub agents: Vec<(String, String)>,
     pub active: Option<String>,
+    /// `workflow` entries naming no surviving profile or no known mode, as
+    /// (profile, mode as written).
+    pub workflow: Vec<(String, String)>,
 }
 
 /// `normalizeProfilesFile`, keeping unknown top-level keys aside.
@@ -104,23 +157,65 @@ pub fn parse_profiles(text: &str) -> Option<(ProfilesFile, Drops)> {
             None
         }
     };
+    let workflow = normalize_workflow(object.get("workflow"), &profiles, &mut drops);
     let extra = object
         .iter()
-        .filter(|(k, _)| !matches!(k.as_str(), "kind" | "version" | "profiles" | "active"))
+        .filter(|(k, _)| {
+            !matches!(
+                k.as_str(),
+                "kind" | "version" | "profiles" | "active" | "workflow"
+            )
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     Some((
         ProfilesFile {
             active,
             profiles,
+            workflow,
             extra,
         },
         drops,
     ))
 }
 
-/// `serializeProfilesFile` (kind, version, profiles, active), then any
-/// unknown top-level keys the file carried.
+/// `normalizeWorkflowMap`: keeps opt-ins that name a surviving profile and a
+/// known mode, reports the rest, and forgets default (organic) entries.
+fn normalize_workflow(
+    value: Option<&Value>,
+    profiles: &[(String, Routing)],
+    drops: &mut Drops,
+) -> Vec<(String, OrchestratorMode)> {
+    let Some(map) = value.and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut workflow = Vec::new();
+    for (name, entry) in map {
+        let raw = entry.get("orchestratorMode");
+        let mode = raw
+            .and_then(Value::as_str)
+            .and_then(OrchestratorMode::parse);
+        match mode {
+            Some(mode) if profiles.iter().any(|(n, _)| n == name) => {
+                if mode != OrchestratorMode::Organic {
+                    workflow.push((name.clone(), mode));
+                }
+            }
+            _ => drops.workflow.push((
+                name.clone(),
+                match raw {
+                    Some(Value::String(text)) => text.clone(),
+                    Some(other) => other.to_string(),
+                    None => entry.to_string(),
+                },
+            )),
+        }
+    }
+    workflow
+}
+
+/// `serializeProfilesFile` (kind, version, profiles, active, workflow), then
+/// any unknown top-level keys the file carried.
 pub fn serialize_profiles(file: &ProfilesFile) -> String {
     let mut map = Map::new();
     map.insert("kind".into(), json!(PROFILES_KIND));
@@ -136,6 +231,17 @@ pub fn serialize_profiles(file: &ProfilesFile) -> String {
     );
     if let Some(active) = &file.active {
         map.insert("active".into(), json!(active));
+    }
+    if !file.workflow.is_empty() {
+        map.insert(
+            "workflow".into(),
+            Value::Object(
+                file.workflow
+                    .iter()
+                    .map(|(n, mode)| (n.clone(), json!({"orchestratorMode": mode.as_str()})))
+                    .collect(),
+            ),
+        );
     }
     for (k, v) in &file.extra {
         map.insert(k.clone(), v.clone());
@@ -173,6 +279,7 @@ pub fn update_profile(
     Ok(next)
 }
 
+/// `duplicateProfile`: the copy carries the source's mode too.
 pub fn duplicate_profile(
     file: &ProfilesFile,
     from: &str,
@@ -183,7 +290,9 @@ pub fn duplicate_profile(
         .get(from)
         .cloned()
         .ok_or_else(|| format!("Profile does not exist: {from}."))?;
-    create_profile(file, to, config)
+    let mut next = create_profile(file, to, config)?;
+    next.put_mode(to, file.orchestrator_mode(from));
+    Ok(next)
 }
 
 pub fn rename_profile(file: &ProfilesFile, from: &str, to: &str) -> Result<ProfilesFile, String> {
@@ -196,7 +305,9 @@ pub fn rename_profile(file: &ProfilesFile, from: &str, to: &str) -> Result<Profi
         return Err(format!("Profile already exists: {to}."));
     }
     let mut next = file.clone();
-    for (name, _) in &mut next.profiles {
+    // `renameProfile`: the mode follows the profile to its new name.
+    let names = next.profiles.iter_mut().map(|(n, _)| n);
+    for name in names.chain(next.workflow.iter_mut().map(|(n, _)| n)) {
         if name == from {
             *name = to.to_string();
         }
@@ -219,6 +330,23 @@ pub fn delete_profile(file: &ProfilesFile, name: &str) -> Result<ProfilesFile, S
     }
     let mut next = file.clone();
     next.profiles.retain(|(n, _)| n != name);
+    next.workflow.retain(|(n, _)| n != name);
+    Ok(next)
+}
+
+/// `setProfileOrchestratorMode`: opt one existing profile into a mode; the
+/// default removes its entry.
+pub fn set_orchestrator_mode(
+    file: &ProfilesFile,
+    name: &str,
+    mode: OrchestratorMode,
+) -> Result<ProfilesFile, String> {
+    require_valid_name(name)?;
+    if !file.has(name) {
+        return Err(format!("Profile does not exist: {name}."));
+    }
+    let mut next = file.clone();
+    next.put_mode(name, mode);
     Ok(next)
 }
 
@@ -240,6 +368,7 @@ pub fn bootstrap_profiles(current: &Routing) -> ProfilesFile {
     ProfilesFile {
         active,
         profiles: vec![("current".into(), config)],
+        workflow: Vec::new(),
         extra: Map::new(),
     }
 }
@@ -438,5 +567,68 @@ mod tests {
                 .unwrap_err()
                 .contains("is active")
         );
+    }
+
+    const SHELL: &str = r#"{
+      "kind": "gentle-pi.agent_model_profiles", "version": 1,
+      "profiles": {"deep": {}, "fast": {}, "plain": {}},
+      "workflow": {
+        "deep": {"orchestratorMode": "full-delegation"},
+        "plain": {"orchestratorMode": "organic"},
+        "gone": {"orchestratorMode": "full-delegation"},
+        "fast": {"orchestratorMode": "turbo"}
+      }
+    }"#;
+
+    #[test]
+    fn reads_gentle_shells_workflow_map_and_names_what_it_drops() {
+        let (file, drops) = parse_profiles(SHELL).unwrap();
+        assert_eq!(
+            file.orchestrator_mode("deep"),
+            OrchestratorMode::FullDelegation
+        );
+        assert_eq!(file.orchestrator_mode("plain"), OrchestratorMode::Organic);
+        assert_eq!(file.orchestrator_mode("fast"), OrchestratorMode::Organic);
+        assert_eq!(
+            drops.workflow,
+            [
+                ("gone".to_string(), "full-delegation".to_string()),
+                ("fast".to_string(), "turbo".to_string()),
+            ]
+        );
+        // Only non-default modes of surviving profiles are written back.
+        let text = serialize_profiles(&file);
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            value["workflow"],
+            json!({"deep": {"orchestratorMode": "full-delegation"}})
+        );
+    }
+
+    #[test]
+    fn the_mode_follows_its_profile_through_every_edit() {
+        let (file, _) = parse_profiles(SHELL).unwrap();
+        let renamed = rename_profile(&file, "deep", "deeper").unwrap();
+        assert_eq!(
+            renamed.orchestrator_mode("deeper"),
+            OrchestratorMode::FullDelegation
+        );
+        assert_eq!(renamed.orchestrator_mode("deep"), OrchestratorMode::Organic);
+
+        let copied = duplicate_profile(&renamed, "deeper", "copy").unwrap();
+        assert_eq!(
+            copied.orchestrator_mode("copy"),
+            OrchestratorMode::FullDelegation
+        );
+
+        let deleted = delete_profile(&copied, "deeper").unwrap();
+        let cleared = set_orchestrator_mode(&deleted, "copy", OrchestratorMode::Organic).unwrap();
+        let value: Value = serde_json::from_str(&serialize_profiles(&cleared)).unwrap();
+        assert!(
+            value.get("workflow").is_none(),
+            "an all-organic file has no map"
+        );
+
+        assert!(set_orchestrator_mode(&file, "missing", OrchestratorMode::FullDelegation).is_err());
     }
 }

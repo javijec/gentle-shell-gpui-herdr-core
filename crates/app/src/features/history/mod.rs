@@ -10,13 +10,14 @@ mod view;
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use gpui_kit::*;
 
 use crate::features::git::{self, Commit, Graph, History};
+use crate::features::session::SessionView;
 
 /// Remote history is a read-only query on this same agent's existing Herdr
 /// RPC bridge. Linux paths remain POSIX strings, never passed to Windows Git.
@@ -24,7 +25,7 @@ use crate::features::git::{self, Commit, Graph, History};
 struct RemoteHistory {
     machine: String,
     root: String,
-    process: Arc<pi_rpc::RpcProcess>,
+    session: Entity<SessionView>,
 }
 
 /// Decode the same structured Git history that the native History screen
@@ -184,12 +185,12 @@ impl HistoryView {
     pub fn new_remote(
         machine: String,
         root: String,
-        process: Arc<pi_rpc::RpcProcess>,
+        session: Entity<SessionView>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self {
             toplevel: PathBuf::new(),
-            remote: Some(RemoteHistory { machine, root, process }),
+            remote: Some(RemoteHistory { machine, root, session }),
             error: None,
             branch: None,
             limit: PAGE,
@@ -230,12 +231,26 @@ impl HistoryView {
             let limit = self.limit;
             self.loading = true;
             self._load = cx.spawn(async move |this, cx| {
-                let reply = remote.process.request(json!({
-                    "type": "herdr_git_history",
-                    "root": remote.root,
-                    "branch": branch,
-                    "limit": limit,
-                })).await;
+                // A restored History pane can open before its owning Pi
+                // connects. Wait for this same agent instead of ever using
+                // the Windows Git installation as a fallback.
+                let mut process = None;
+                for _ in 0..45 {
+                    process = this.update(cx, |_, cx| {
+                        remote.session.read(cx).remote_fs_process()
+                    }).ok().flatten();
+                    if process.is_some() { break; }
+                    cx.background_executor().timer(Duration::from_secs(2)).await;
+                }
+                let reply = match process {
+                    Some(process) => process.request(json!({
+                        "type": "herdr_git_history",
+                        "root": remote.root,
+                        "branch": branch,
+                        "limit": limit,
+                    })).await.map_err(|error| error.to_string()),
+                    None => Err("The original remote agent is not connected".to_owned()),
+                };
                 let (history, error) = match reply {
                     Ok(response) => {
                         let parsed = parse_remote_history(&response.data, &remote.root);

@@ -16,6 +16,7 @@ use gpui_kit::*;
 use serde_json::json;
 
 use crate::features::session::SessionView;
+use crate::features::workspaces::SavedRemoteDraft;
 use crate::features::git::{RefEntry, RefsSnapshot, WorkTree, StashAction};
 use gentle_core::git::refs::{HeadInfo, RefKind, Stash, Submodule, parse_refs, parse_submodules};
 use super::refs::{RefsEvent, RefsView, RemoteWorktreeDisplay, RemoteWorktreeAction};
@@ -29,6 +30,7 @@ use super::backend::{
 use gentle_core::git::status::{BranchStatus, StatusEntry as RemoteGitFile};
 use super::dock_ui::{file_entry_row, panel_header, panel_shell};
 use super::remote_tree::{RemoteTreeRow, visible_rows};
+use super::transfers;
 use super::tabs::FilePanelTab as RemoteTab;
 use super::viewer::MdMode;
 use crate::shared::ui;
@@ -39,6 +41,8 @@ pub enum RemoteFilesEvent {
     OpenFile(String),
     /// Request a native central diff for a changed Linux file.
     OpenDiff(String),
+    /// Copy a regular remote file directly to another selected Herdr agent.
+    RelayFile { path: String, target_terminal: String },
     Close,
 }
 
@@ -457,7 +461,7 @@ mod remote_git_snapshot_tests {
     }
 }
 
-const MAX_EDIT_BYTES: usize = 128 * 1024;
+const MAX_EDIT_BYTES: usize = 2 * 1024 * 1024;
 const CONTEXT: &str = "GentleRemoteFileView";
 const TREE_CONTEXT: &str = "GentleRemoteFilesTree";
 const SAVE_HINT: &str = if cfg!(target_os = "macos") { "⌘S" } else { "Ctrl+S" };
@@ -507,12 +511,20 @@ pub struct RemoteFilesView {
     file_clipboard: Option<(String, bool)>,
     entry_name: Entity<InputState>,
     entry_busy: bool,
+    transfer_busy: bool,
+    transfer_feedback: Option<String>,
+    /// Human-readable destination and exact Herdr terminal address.
+    transfer_targets: Vec<(String, String)>,
     trash_confirm: Option<String>,
     last_trash: Option<(String, String)>,
     create_name: Entity<InputState>,
     creating: bool,
     preview: Option<RemotePreview>,
     editor: Option<Entity<EditorState>>,
+    /// A persisted unsaved buffer is applied only to its original path and
+    /// always retains the original server revision for conflict detection.
+    pending_draft: Option<SavedRemoteDraft>,
+    restored_revision: Option<String>,
     /// Markdown uses the same Edit / Split / Preview mode as FileView.
     markdown: Option<(MdMode, Entity<TextViewState>)>,
     _markdown_debounce: Task<()>,
@@ -547,6 +559,17 @@ fn remote_parent(root: &str, directory: &str) -> Option<String> {
                 && candidate.starts_with('/'))
                 || candidate.starts_with(&(root.to_owned() + "/"))
         })
+}
+
+/// Retry transport startup failures, not filesystem permission/path errors.
+fn retryable_remote_loading_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("waiting for this remote agent to connect")
+        || error.contains("rpc bridge is not connected")
+        || error.contains("rpc bridge exited before replying")
+        || error.contains("remote agent is disconnected")
+        || error.contains("connection interrupted")
+        || error.contains("connection reset")
 }
 
 fn friendly_error(error: &str) -> String {
@@ -780,12 +803,17 @@ impl RemoteFilesView {
             file_clipboard: None,
             entry_name,
             entry_busy: false,
+            transfer_busy: false,
+            transfer_feedback: None,
+            transfer_targets: Vec::new(),
             trash_confirm: None,
             last_trash: None,
             create_name,
             creating: false,
             preview: None,
             editor: None,
+            pending_draft: None,
+            restored_revision: None,
             markdown: None,
             _markdown_debounce: Task::ready(()),
             _editor_events: None,
@@ -796,6 +824,14 @@ impl RemoteFilesView {
             generation: 0,
             _wait_for_agent: Task::ready(()),
         };
+        if super::backend::remote_fs_trace_enabled() {
+            eprintln!(
+                "[herdr-fs-trace] UI view created machine={} root={} rpc_ready={}",
+                view.machine,
+                view.root,
+                view.session.read(cx).remote_fs_process().is_some(),
+            );
+        }
         if view.root.is_empty() {
             view.error = Some(
                 "This restored agent has no known remote working directory yet. Refresh after Herdr discovers its terminal, or open a new agent."
@@ -804,31 +840,43 @@ impl RemoteFilesView {
             return view;
         }
         view.load_directory(view.root.clone(), cx);
-        // A newly launched remote Pi may still be connecting when the
-        // right panel appears. Wait for the SAME agent to become ready.
-        if view.error.is_some() {
-            view._wait_for_agent = cx.spawn_in(window, async move |this, cx| {
-                for _ in 0..45 {
-                    cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
-                    let ready = this.update_in(cx, |this, window, cx| {
-                        if this.session.read(cx).remote_fs_process().is_some() {
-                            if let Some(path) = this.pane_path.clone() {
-                                this.open(path, false, window, cx);
-                            } else {
-                                this.load_directory(this.root.clone(), cx);
-                            }
-                            true
-                        } else {
-                            false
+        // A newly launched Pi can expose a process before the bridge is
+        // ready. Retry only transient transport errors, including failures
+        // that arrive asynchronously after the initial directory request.
+        view._wait_for_agent = cx.spawn_in(window, async move |this, cx| {
+            for _ in 0..45 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(2))
+                    .await;
+                let finished = this.update_in(cx, |this, window, cx| {
+                    if this.pane_path.is_some() {
+                        if this.preview.is_some() {
+                            return true;
                         }
-                    });
-                    match ready {
-                        Ok(true) | Err(_) => break,
-                        Ok(false) => {}
+                    } else if this.tree_children.contains_key(&this.current) {
+                        return true;
                     }
+                    if this.loading {
+                        return false;
+                    }
+                    if !this.error.as_deref().is_some_and(retryable_remote_loading_error) {
+                        return true;
+                    }
+                    if this.session.read(cx).remote_fs_process().is_none() {
+                        return false;
+                    }
+                    if let Some(path) = this.pane_path.clone() {
+                        this.open(path, false, window, cx);
+                    } else {
+                        this.load_directory(this.current.clone(), cx);
+                    }
+                    false
+                });
+                if !matches!(finished, Ok(false)) {
+                    break;
                 }
-            });
-        }
+            }
+        });
         view
     }
 
@@ -854,6 +902,75 @@ impl RemoteFilesView {
         view
     }
 
+    pub fn remote_path(&self) -> Option<&str> {
+        self.pane_path.as_deref()
+    }
+
+    pub fn draft_snapshot(&self, cx: &App) -> Option<SavedRemoteDraft> {
+        let path = self.pane_path.as_deref()?;
+        if let Some(saved) = self.pending_draft.as_ref() {
+            return (saved.path == path).then(|| saved.clone());
+        }
+        let (Some(preview), Some(editor)) = (&self.preview, &self.editor) else {
+            return None;
+        };
+        let content = editor.read(cx).text().to_string();
+        let revision = self.restored_revision.as_deref()
+            .or(preview.revision.as_deref())?;
+        if content == preview.content && self.restored_revision.is_none() {
+            return None;
+        }
+        if content.len() > MAX_EDIT_BYTES || content.contains('\0') ||
+            revision.len() != 64 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        Some(SavedRemoteDraft {
+            path: path.to_owned(), content, revision: revision.to_owned(),
+        })
+    }
+
+    /// Called only for the original recovered remote pane; the draft stays
+    /// local until the owning Herdr process has returned the real file.
+    pub fn restore_draft(&mut self, draft: SavedRemoteDraft, cx: &mut Context<Self>) {
+        if self.pane_path.as_deref() != Some(draft.path.as_str())
+            || draft.content.len() > MAX_EDIT_BYTES
+            || draft.content.contains('\0')
+            || draft.revision.len() != 64
+            || !draft.revision.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            self.error = Some("Skipped an invalid recovered remote draft.".into());
+            cx.notify();
+            return;
+        }
+        self.pending_draft = Some(draft);
+        cx.notify();
+    }
+
+    fn apply_pending_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(draft) = self.pending_draft.take() else { return };
+        let (Some(preview), Some(editor)) = (&self.preview, &self.editor) else {
+            self.pending_draft = Some(draft);
+            return;
+        };
+        if preview.path != draft.path {
+            self.pending_draft = Some(draft);
+            return;
+        }
+        let changed_while_closed =
+            preview.revision.as_deref() != Some(draft.revision.as_str());
+        self.restored_revision = Some(draft.revision);
+        editor.update(cx, |editor, cx| {
+            editor.set_value(draft.content, window, cx);
+        });
+        if changed_while_closed {
+            self.error = Some(
+                "Remote file changed while GPUI was closed. Your local draft is restored,                  but saving requires its original revision. Copy or reconcile your edits first."
+                    .into(),
+            );
+        }
+    }
+
     pub fn file_title(&self, cx: &App) -> SharedString {
         let Some(path) = self.pane_path.as_ref() else {
             return "Remote Files".into();
@@ -864,7 +981,8 @@ impl RemoteFilesView {
     }
 
     pub fn has_unsaved(&self, cx: &App) -> bool {
-        self.saving || self.editor.as_ref().zip(self.preview.as_ref()).is_some_and(
+        self.pending_draft.is_some() || self.saving
+            || self.editor.as_ref().zip(self.preview.as_ref()).is_some_and(
             |(editor, preview)| *editor.read(cx).text() != preview.content
         )
     }
@@ -877,7 +995,17 @@ impl RemoteFilesView {
     /// A draft is private to this view and can only save through its own
     /// original SessionView. Unchanged editor mode is retained as well.
     pub fn has_draft(&self) -> bool {
-        self.editor.is_some() || self.saving
+        self.editor.is_some() || self.saving || self.transfer_busy
+            || self.pending_draft.is_some()
+    }
+
+    pub fn set_transfer_targets(
+        &mut self, targets: Vec<(String, String)>, cx: &mut Context<Self>,
+    ) {
+        if self.transfer_targets != targets {
+            self.transfer_targets = targets;
+            cx.notify();
+        }
     }
 
     /// Navigation must not silently discard a typed edit.
@@ -901,6 +1029,14 @@ impl RemoteFilesView {
         if !self.can_leave_preview(cx) { return; }
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
+        let trace = super::backend::remote_fs_trace_enabled();
+        let started = std::time::Instant::now();
+        if trace {
+            eprintln!(
+                "[herdr-fs-trace] UI load start machine={} path={} generation={generation}",
+                self.machine, directory,
+            );
+        }
         self.current = directory.clone();
         self.preview = None;
         self.editor = None;
@@ -920,6 +1056,12 @@ impl RemoteFilesView {
         let Some(process) = self.session.read(cx).remote_fs_process() else {
             self.loading = false;
             self.error = Some("Waiting for this remote agent to connect…".into());
+            if trace {
+                eprintln!(
+                    "[herdr-fs-trace] UI load waiting path={} rpc_ready=false",
+                    self.current,
+                );
+            }
             cx.notify();
             return;
         };
@@ -940,6 +1082,15 @@ impl RemoteFilesView {
                     }
                     Err(error) => this.error = Some(friendly_error(&error.to_string())),
                 }
+                if trace {
+                    eprintln!(
+                        "[herdr-fs-trace] UI load finished path={} generation={generation} elapsed_ms={} rows={} error={}",
+                        this.current,
+                        started.elapsed().as_millis(),
+                        this.tree_rows.len(),
+                        this.error.as_deref().unwrap_or("none"),
+                    );
+                }
                 cx.notify();
             });
         }).detach();
@@ -948,17 +1099,16 @@ impl RemoteFilesView {
 
     fn rebuild_remote_rows(&mut self) {
         self.tree_rows = Rc::new(visible_rows(
-            &self.root, &self.tree_children, &self.tree_expanded, &self.tree_loading,
+            &self.current, &self.tree_children, &self.tree_expanded, &self.tree_loading,
         ));
     }
 
     fn toggle_ignored(&mut self, cx: &mut Context<Self>) {
+        if !self.can_leave_preview(cx) {
+            return;
+        }
         self.show_ignored = !self.show_ignored;
-        self.tree_children.clear();
-        self.tree_expanded.clear();
-        self.tree_loading.clear();
-        self.rebuild_remote_rows();
-        self.toggle_remote_directory(self.root.clone(), cx);
+        self.load_directory(self.current.clone(), cx);
     }
 
     fn refresh_tree_folder(&mut self, folder: String, cx: &mut Context<Self>) {
@@ -1154,6 +1304,117 @@ impl RemoteFilesView {
             });
         }).detach();
         cx.notify();
+    }
+
+    /// Upload a user-selected Windows/macOS/Linux regular file to the
+    /// selected agent's directory. No OS path is ever sent to the remote Pi.
+    fn upload_local_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.transfer_busy || self.root == "/" { return; }
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: true, directories: false, multiple: false,
+            prompt: Some("Upload to remote project".into()),
+        });
+        let root = self.root.clone();
+        let parent = self.tree_selected_directory.clone()
+            .unwrap_or_else(|| root.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = picker.await else { return };
+            let Some(local) = paths.pop() else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.transfer_busy { return; }
+                let Some(process) = this.session.read(cx).remote_fs_process() else {
+                    this.error = Some("Remote agent is disconnected; upload cancelled.".into());
+                    cx.notify();
+                    return;
+                };
+                this.transfer_busy = true;
+                this.transfer_feedback = None;
+                this.error = None;
+                let task = cx.background_executor().spawn(
+                    transfers::upload(root, process, parent.clone(), local),
+                );
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.transfer_busy = false;
+                        match result {
+                            Ok(path) => {
+                                this.transfer_feedback = Some(format!(
+                                    "Uploaded to remote agent: {path}"
+                                ));
+                                this.refresh_tree_folder(parent, cx);
+                            }
+                            Err(error) => this.error = Some(error),
+                        }
+                        cx.notify();
+                    });
+                }).detach();
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Choose a local directory explicitly. The downloader verifies every
+    /// block and uses create_new: it never overwrites local work.
+    fn download_remote_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.transfer_busy { return; }
+        let path = self.pane_path.clone().or_else(|| {
+            self.tree_selected_entry.as_ref()
+                .and_then(|(path, is_directory)| (!*is_directory).then(|| path.clone()))
+        });
+        let Some(path) = path else {
+            self.error = Some("Select a regular remote file to download.".into());
+            cx.notify();
+            return;
+        };
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: false, directories: true, multiple: false,
+            prompt: Some("Download remote file to local directory".into()),
+        });
+        let root = self.root.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut dirs))) = picker.await else { return };
+            let Some(destination) = dirs.pop() else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.transfer_busy { return; }
+                let Some(process) = this.session.read(cx).remote_fs_process() else {
+                    this.error = Some("Remote agent is disconnected; download cancelled.".into());
+                    cx.notify();
+                    return;
+                };
+                this.transfer_busy = true;
+                this.transfer_feedback = None;
+                this.error = None;
+                let task = cx.background_executor().spawn(
+                    transfers::download(root, process, path, destination),
+                );
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.transfer_busy = false;
+                        match result {
+                            Ok(path) => this.transfer_feedback = Some(format!(
+                                "Downloaded to {}", path.display()
+                            )),
+                            Err(error) => this.error = Some(error),
+                        }
+                        cx.notify();
+                    });
+                }).detach();
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn relay_selected_file(&mut self, target_terminal: String, cx: &mut Context<Self>) {
+        if self.transfer_busy { return; }
+        let Some((path, false)) = self.tree_selected_entry.clone() else { return };
+        if !self.transfer_targets.iter().any(|(_, terminal)| terminal == &target_terminal) {
+            self.error = Some("Target agent is no longer available.".into());
+            cx.notify();
+            return;
+        }
+        cx.emit(RemoteFilesEvent::RelayFile { path, target_terminal });
     }
 
     fn create_remote_entry(
@@ -1418,10 +1679,11 @@ impl RemoteFilesView {
                 }
             }));
         self.editor = Some(editor);
+        self.error = None;
+        self.apply_pending_draft(window, cx);
         if self.markdown.as_ref().is_some_and(|(mode, _)| *mode == MdMode::Preview) {
             self.focus.focus(window, cx);
         }
-        self.error = None;
         cx.notify();
     }
 
@@ -1461,6 +1723,8 @@ impl RemoteFilesView {
 
     fn cancel_edit(&mut self, cx: &mut Context<Self>) {
         if self.saving { return; }
+        self.pending_draft = None;
+        self.restored_revision = None;
         self.editor = None;
         self._editor_events = None;
         self.error = None;
@@ -1470,10 +1734,11 @@ impl RemoteFilesView {
     fn save_edit(&mut self, cx: &mut Context<Self>) {
         if self.saving || self.loading { return; }
         let (Some(preview), Some(editor)) = (&self.preview, &self.editor) else { return };
-        let Some(revision) = preview.revision.clone() else { return };
+        let Some(revision) = self.restored_revision.clone()
+            .or_else(|| preview.revision.clone()) else { return };
         let text = editor.read(cx).text().to_string();
         if text.len() > MAX_EDIT_BYTES || text.contains('\0') {
-            self.error = Some("Only UTF-8 text up to 128 KiB can be saved.".into());
+            self.error = Some("Only UTF-8 text up to 2 MiB can be saved.".into());
             cx.notify();
             return;
         }
@@ -1505,6 +1770,7 @@ impl RemoteFilesView {
                 this.saving = false;
                 match result {
                     Ok(new_revision) => {
+                        this.restored_revision = None;
                         this.preview = Some(RemotePreview {
                             path, content: text, revision: Some(new_revision),
                         });
@@ -2191,7 +2457,14 @@ impl Render for RemoteFilesView {
         }
         let parent = remote_parent(&self.root, &self.current);
         let central = self.pane_path.is_some();
-        let mut content = v_flex().gap(px(1.)).flex_1().min_h_0();
+        // This must be a direct flex child of panel_shell. An extra plain
+        // div wrapper makes the inner uniform_list resolve a zero-height
+        // viewport on some GPUI/Windows layouts, even with loaded rows.
+        let mut content = v_flex()
+            .gap(px(1.))
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden();
         if let Some(preview) = &self.preview {
             let copied = preview.path.clone();
             let rows: Vec<String> = preview.content.lines().take(600).map(str::to_owned).collect();
@@ -2309,7 +2582,7 @@ impl Render for RemoteFilesView {
                             )
                             .child(div().flex_1())
                             .child(div().text_xs().text_color(ui::muted())
-                                .child("128 KiB maximum")),
+                                .child("UTF-8 text · 2 MiB maximum; binary via Download")),
                     )
                     .children(rows.into_iter().enumerate().map(|(i, text)| {
                         h_flex()
@@ -2366,7 +2639,15 @@ impl Render for RemoteFilesView {
                         .child(if let Some(path) = &self.pane_path {
                             format!("{} · {}", self.machine, path)
                         } else {
-                            format!("Remote Files · {}", self.machine)
+                            if super::backend::remote_fs_trace_enabled() {
+                                format!(
+                                    "Remote Files · {} · {} rows",
+                                    self.machine,
+                                    self.tree_rows.len(),
+                                )
+                            } else {
+                                format!("Remote Files · {}", self.machine)
+                            }
                         }))
                     .when(!central, |bar| bar.child(
                         Button::new("remote-show-ignored")
@@ -2446,6 +2727,21 @@ impl Render for RemoteFilesView {
                         .disabled(self.creating || self.entry_busy || self.root == "/")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.create_remote_entry(true, window, cx)
+                        })))
+                    .child(Button::new("remote-transfer-upload")
+                        .ghost().xsmall().label("Upload")
+                        .tooltip("Upload a local file (binary-safe, 16 MiB maximum)")
+                        .disabled(self.transfer_busy || self.root == "/")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.upload_local_file(window, cx)
+                        })))
+                    .child(Button::new("remote-transfer-download")
+                        .ghost().xsmall().label("Download")
+                        .tooltip("Download selected remote file to a local folder")
+                        .disabled(self.transfer_busy || self.tree_selected_entry.as_ref()
+                            .is_none_or(|(_, directory)| *directory))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.download_remote_file(window, cx)
                         }))),
             ))
             .when(!central, |panel| panel.child(
@@ -2537,6 +2833,31 @@ impl Render for RemoteFilesView {
                                     .unwrap_or(&self.root).clone())),
                     ),
             ))
+            .when(!central && !self.transfer_targets.is_empty(), |panel| {
+                panel.child(
+                    h_flex().px_2().pb_1().gap_1().flex_wrap().children(
+                        self.transfer_targets.iter().enumerate().map(|(index, (label, address))| {
+                            let address = address.clone();
+                            Button::new(("remote-relay", index))
+                                .ghost().xsmall().label(format!("Send to {label}"))
+                                .tooltip("Copy selected remote file to another live agent; never overwrite")
+                                .disabled(self.transfer_busy || self.tree_selected_entry.as_ref()
+                                    .is_none_or(|(_, directory)| *directory))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.relay_selected_file(address.clone(), cx)
+                                }))
+                        })
+                    ),
+                )
+            })
+            .when(self.transfer_busy, |panel| panel.child(
+                div().px_3().py_1().text_xs().text_color(ui::muted())
+                    .child("Transferring file over Herdr…"),
+            ))
+            .when_some(self.transfer_feedback.clone(), |panel, feedback| panel.child(
+                div().px_3().py_1().text_xs().text_color(ui::muted())
+                    .child(feedback),
+            ))
             .when(self.loading, |panel| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child("Reading from remote agent…"),
@@ -2545,12 +2866,10 @@ impl Render for RemoteFilesView {
                 div().px_3().py_2().text_xs().text_color(ui::warning())
                     .child(error),
             ))
-            .child(
-                div()
-                    .id("remote-file-tree-scroll")
-                    .flex_1().min_h_0().overflow_hidden()
-                    .child(content),
-            )
+            // Preserve flex sizing all the way into the lazy tree. The
+            // previous unstyled div wrapper had no flex layout and could
+            // collapse the list's viewport despite successful RPC results.
+            .child(content)
             .when(self.truncated, |panel| panel.child(
                 div().px_3().py_2().text_xs().text_color(ui::muted())
                     .child("Showing first 500 entries"),
@@ -2561,9 +2880,9 @@ impl Render for RemoteFilesView {
                     .px_3().text_size(px(10.))
                     .text_color(ui::muted())
                     .child(if self.editor.is_some() {
-                        "Editing · SHA-256 conflict protection · 128 KiB"
+                        "Editing · SHA-256 conflict protection · 2 MiB"
                     } else {
-                        "Files · preview first · 128 KiB maximum"
+                        "Files · edit ≤2 MiB · transfer ≤16 MiB"
                     }),
             )
             .into_any_element()
@@ -2572,7 +2891,26 @@ impl Render for RemoteFilesView {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_git_snapshot, remote_child, remote_parent};
+    use super::{
+        parse_git_snapshot, remote_child, remote_parent, retryable_remote_loading_error,
+    };
+
+    #[test]
+    fn remote_listing_retries_only_transport_failures() {
+        assert!(retryable_remote_loading_error(
+            "Waiting for this remote agent to connect…"
+        ));
+        assert!(retryable_remote_loading_error(
+            "Herdr RPC bridge is not connected"
+        ));
+        assert!(!retryable_remote_loading_error(
+            "The requested root does not match this agent's working directory"
+        ));
+        assert!(!retryable_remote_loading_error(
+            "Permission denied"
+        ));
+    }
+
     #[test]
     fn remote_paths_remain_under_root() {
         assert_eq!(remote_child("/srv/workspaces/demo", "Cargo.toml"),

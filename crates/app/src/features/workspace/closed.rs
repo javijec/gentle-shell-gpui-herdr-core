@@ -22,7 +22,7 @@ fn snapshot_for_reopen(mut saved: SavedPane, herdr_enabled: bool) -> SavedPane {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Slot {
     Open(PaneId),
-    Closed(SavedPane),
+    Closed(Box<SavedPane>),
 }
 
 /// One close, to undo.
@@ -49,7 +49,7 @@ impl Workspace {
         let layout = tab.tree.filter_map(&mut |id: &PaneId| {
             if closing.contains(id) {
                 self.saved_pane(*id, cx)
-                    .map(|saved| Slot::Closed(snapshot_for_reopen(saved, herdr_enabled)))
+                    .map(|saved| Slot::Closed(Box::new(snapshot_for_reopen(saved, herdr_enabled))))
             } else {
                 Some(Slot::Open(*id))
             }
@@ -224,6 +224,9 @@ mod tests {
                 machine: "javipi".into(),
                 cwd: "/srv/workspaces/JaviPi".into(),
             }),
+            remote_path: None,
+            remote_owner: None,
+            remote_draft: None,
         }
     }
 

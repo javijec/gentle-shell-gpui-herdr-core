@@ -247,18 +247,22 @@ mod tests {
                 Terminal {
                     address: "javipi/t1".into(), title: "".into(),
                     cwd: "/srv/workspaces/PoeTradePlus2".into(), state: "live".into(),
+                    gentle_shell: false,
                 },
                 Terminal {
                     address: "javipi/t2".into(), title: "".into(),
                     cwd: "/srv/workspaces/PoeTradePlus2".into(), state: "live".into(),
+                    gentle_shell: false,
                 },
                 Terminal {
                     address: "other/t3".into(), title: "".into(),
                     cwd: "/data/other".into(), state: "live".into(),
+                    gentle_shell: false,
                 },
                 Terminal {
                     address: "javipi/t4".into(), title: "".into(),
                     cwd: r"C:\\Users\\test".into(), state: "live".into(),
+                    gentle_shell: false,
                 },
             ],
         };

@@ -154,7 +154,7 @@ impl RefsView {
                 };
                 if let Some(job) = due {
                     let repo = cx.background_executor().spawn(job).await;
-                    if this.update(cx, |this, cx| this.apply(repo, cx)).is_err() {
+                    if this.update(cx, |this, cx| this.observe(repo, cx)).is_err() {
                         break;
                     }
                 }
@@ -233,7 +233,7 @@ impl RefsView {
         let job = self.refs_job();
         cx.spawn(async move |this, cx| {
             let repo = cx.background_executor().spawn(job).await;
-            let _ = this.update(cx, |this, cx| this.apply(repo, cx));
+            let _ = this.update(cx, |this, cx| this.observe(repo, cx));
         })
         .detach();
     }
@@ -248,9 +248,21 @@ impl RefsView {
         }
     }
 
-    fn apply(&mut self, repo: Option<Repo>, cx: &mut Context<Self>) {
+    /// Only clear a previous Git-operation error if an external ref refresh
+    /// really changed the displayed snapshot. An unchanged snapshot must
+    /// preserve an actionable failure message.
+    fn observe(&mut self, repo: Option<Repo>, cx: &mut Context<Self>) {
+        if self.apply(repo, cx) {
+            self.error = None;
+        }
+    }
+
+    /// Adopt a local repository snapshot. Herdr remote refs are handled by
+    /// set_remote_refs(), never through native Windows Git.
+    /// Returns whether the displayed refs actually changed.
+    fn apply(&mut self, repo: Option<Repo>, cx: &mut Context<Self>) -> bool {
         if self.repo.as_ref() == Some(&repo) {
-            return;
+            return false;
         }
         let first = self.repo.is_none();
         self.repo = Some(repo);
@@ -259,6 +271,7 @@ impl RefsView {
             cx.emit(RefsEvent::Changed);
         }
         cx.notify();
+        true
     }
 
     /// Rebuild the flat row model: each section with a match gets a header

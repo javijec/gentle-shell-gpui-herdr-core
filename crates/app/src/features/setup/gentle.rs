@@ -10,8 +10,13 @@ use super::probe::{
     Version, capture, go_version, output_of, parse_version, run_logged, show_version,
 };
 use super::{
-    Fix, Log, MIN_GO, MIN_PI, Status, prefix_bin, refresh_paths, toolchain_dir, user_home,
+    Fix, Log, MIN_GENTLE_SHELL, MIN_GO, MIN_PI, Status, prefix_bin, refresh_paths, toolchain_dir,
+    user_home,
 };
+
+/// The first launcher with `gentle-shell upgrade`: an older install is
+/// replaced with npm instead.
+const UPGRADE_SINCE: Version = (4, 1, 0);
 
 /// What `gentle-shell --version` reported.
 #[derive(Debug, Clone, PartialEq)]
@@ -88,15 +93,32 @@ pub fn check_gentle_shell(launcher: &Result<Launcher, String>) -> (Status, Fix) 
             Fix::Auto,
         );
     };
+    launcher_status(version)
+}
+
+/// What a launcher's `--version` says about it: Pi next to it, Pi's floor,
+/// and Gentle Shell's own floor (Gentle Desktop). A version that doesn't
+/// parse (a source checkout) is not called outdated.
+fn launcher_status(version: &LauncherVersion) -> (Status, Fix) {
     let Some(pi) = &version.pi else {
         return (
             Status::Failed("Pi wasn't found next to gentle-shell".into()),
             Fix::Auto,
         );
     };
+    let shell = &version.gentle_shell;
+    if parse_version(shell).is_some_and(|v| v < MIN_GENTLE_SHELL) {
+        return (
+            Status::Outdated(format!(
+                "gentle-shell {shell} — needs {} or newer for Gentle Desktop",
+                show_version(MIN_GENTLE_SHELL)
+            )),
+            Fix::Auto,
+        );
+    }
     match parse_version(pi) {
         Some(v) if v >= MIN_PI => (
-            Status::Ok(format!("gentle-shell {} · pi {pi}", version.gentle_shell)),
+            Status::Ok(format!("gentle-shell {shell} · pi {pi}")),
             Fix::None,
         ),
         _ => (
@@ -158,7 +180,16 @@ pub fn install_prefix(npm: &Path) -> Option<PathBuf> {
     )
 }
 
+/// Install gentle-pi with npm, or, when a launcher that can upgrade itself is
+/// already there (npm, pnpm or the self-contained install), let it: a second
+/// npm copy could sit behind the one the app keeps running.
 pub fn install_gentle_shell(log: &Log) -> Result<(), String> {
+    if let Ok(found) = launcher()
+        && let Some(version) = &found.version
+        && parse_version(&version.gentle_shell).is_some_and(|v| v >= UPGRADE_SINCE)
+    {
+        return upgrade_gentle_shell(&found.spec, log);
+    }
     if cfg!(windows) {
         let go = pi_rpc::find_program("go")
             .and_then(|go| output_of(&go, &["version"]))
@@ -196,6 +227,30 @@ pub fn install_gentle_shell(log: &Log) -> Result<(), String> {
     })?;
     log(format!("gentle-shell is at {}.", spec.program.display()));
     Ok(())
+}
+
+/// `gentle-shell upgrade` along the launcher's own channel, then the same
+/// check again against the launcher the app resolves now.
+fn upgrade_gentle_shell(spec: &pi_rpc::LaunchSpec, log: &Log) -> Result<(), String> {
+    log(format!(
+        "Updating Gentle Shell with {} upgrade…",
+        spec.program.display()
+    ));
+    run_logged(
+        launcher_command(spec, &["upgrade"]),
+        "gentle-shell upgrade",
+        log,
+    )?;
+    refresh_paths();
+    match check_gentle_shell(&launcher()) {
+        (Status::Ok(found), _) => {
+            log(format!("Now running {found}."));
+            Ok(())
+        }
+        (Status::Missing(why) | Status::Outdated(why) | Status::Failed(why), _) => Err(format!(
+            "gentle-shell upgrade finished, but the launcher the app runs still reports: {why}"
+        )),
+    }
 }
 
 // ── Setup marker ───────────────────────────────────────────────────────────
@@ -445,6 +500,41 @@ mod tests {
         let none = parse_launcher_version("gentle-shell 4.6.0\npi not found\n").unwrap();
         assert_eq!(none.pi, None);
         assert_eq!(parse_launcher_version(""), None);
+    }
+
+    #[test]
+    fn flags_a_gentle_shell_without_gentle_desktop() {
+        let status = |text: &str| launcher_status(&parse_launcher_version(text).unwrap());
+        // Issue #62: a main build from before Gentle Desktop chats, but
+        // every tab warns; the setup screen must say so too.
+        assert_eq!(
+            status("gentle-shell 4.7.0-main.ce3ae68fd64e\npi 1.5.2\n"),
+            (
+                Status::Outdated(
+                    "gentle-shell 4.7.0-main.ce3ae68fd64e — needs 4.8.0 or newer for Gentle Desktop"
+                        .into()
+                ),
+                Fix::Auto
+            )
+        );
+        for ready in ["4.8.0", "4.8.0-main.3dc902975591", "4.10.2"] {
+            assert!(
+                matches!(
+                    status(&format!("gentle-shell {ready}\npi 1.5.2\n")),
+                    (Status::Ok(_), Fix::None)
+                ),
+                "{ready}"
+            );
+        }
+        // A version that doesn't parse is not called outdated; Pi still is.
+        assert!(matches!(
+            status("gentle-shell dev\npi 1.5.2\n"),
+            (Status::Ok(_), _)
+        ));
+        assert!(matches!(
+            status("gentle-shell 4.8.0\npi 1.1.0\n"),
+            (Status::Outdated(why), _) if why.starts_with("pi 1.1.0")
+        ));
     }
 
     #[test]

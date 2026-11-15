@@ -3,15 +3,26 @@
 //! there is deliberately no visual tab strip.
 
 use super::*;
+use gpui_kit::component::Disableable as _;
+
+#[derive(Clone)]
+enum NavigatorSessionSource {
+    /// One visible pane, which may be an agent or a terminal in a split.
+    Open { space: usize, tab: usize, pane: PaneId },
+    /// A session saved in a workspace that has not been restored yet.
+    Saved { space: usize, tab: usize, pane_index: usize },
+    /// A Herdr terminal not yet represented by any GPUI pane.
+    Herdr { address: String, live: bool, agent: bool },
+}
 
 struct NavigatorSession {
-    tab_index: usize,
-    tab_id: usize,
+    source: NavigatorSessionSource,
+    row_id: String,
     title: String,
     address: Option<String>,
-    /// The runtime working directory, never the Windows workspace fallback
-    /// for a remote Pi agent.
+    /// Real machine working directory; never substitute a Windows cwd for a Pi.
     directory: Option<String>,
+    kind: &'static str,
     icon: IconName,
     running: bool,
     pane_count: usize,
@@ -104,6 +115,9 @@ impl Workspace {
         format!("{machine} · {}", directory.unwrap_or_else(|| "remote cwd unavailable".into()))
     }
 
+    /// Build the machine tree from both sources of truth: GPUI panes (agents
+    /// and terminals, including splits and other workspaces) and Herdr Core's
+    /// terminal.list. Every Herdr address appears only once.
     fn navigator_groups(&self) -> Vec<NavigatorMachine> {
         let mut groups = vec![NavigatorMachine {
             key: "local".into(),
@@ -126,58 +140,354 @@ impl Workspace {
             }
         }
 
-        for (tab_index, tab) in self.space().tabs.iter().enumerate() {
-            // A multi-pane tab follows its owning agent, not whichever file
-            // pane currently happens to have keyboard focus.
-            let primary = tab.tree.leaves().into_iter()
-                .find(|id| self.panes.get(id).is_some_and(|pane| {
-                    pane.item.kind == PaneKind::Agent
-                }))
-                .unwrap_or(tab.focused);
-            let Some(pane) = self.panes.get(&primary) else { continue };
-            let herdr = crate::features::terminal::herdr_enabled();
-            let key = if herdr {
-                machine_key(
-                    pane.agent_target.as_ref(),
-                    pane.herdr_address.as_deref(),
-                ).unwrap_or_else(|| "local".into())
-            } else {
-                "local".into()
-            };
-            if !groups.iter().any(|group| group.key == key) {
-                // Keep recovered sessions visible while the machine-list RPC
-                // is temporarily unavailable. This does not assert online.
-                groups.push(NavigatorMachine {
-                    key: key.clone(), name: key.clone(),
-                    connected: false, local: false, sessions: Vec::new(),
-                });
+        let mut shown = std::collections::HashSet::new();
+        let mut add = |key: String, entry: NavigatorSession| {
+            if let Some(address) = &entry.address
+                && (self.terminated_herdr_sessions.contains(address)
+                    || !shown.insert(address.clone()))
+            {
+                return;
             }
-            if let Some(group) = groups.iter_mut().find(|group| group.key == key) {
-                group.sessions.push(NavigatorSession {
-                    tab_index,
-                    tab_id: tab.id,
-                    title: {
-                        let title = pane.title.to_string();
-                        if title.is_empty() { "Agent".into() } else { title }
-                    },
-                    address: pane.herdr_address.clone(),
-                    directory: if herdr {
-                        session_directory(
-                            pane.agent_target.as_ref(),
-                            pane.herdr_address.as_deref(),
-                            &pane.cwd,
-                            self.machine_snapshot.as_ref(),
-                        )
+            let index = match groups.iter().position(|group| group.key == key) {
+                Some(index) => index,
+                None => {
+                    // A recovered/saved session can exist while discovery is
+                    // offline. Keep it visible without claiming connectivity.
+                    let local = key == "local";
+                    groups.push(NavigatorMachine {
+                        name: if local { "This computer".into() } else { key.clone() },
+                        key,
+                        connected: local,
+                        local,
+                        sessions: Vec::new(),
+                    });
+                    groups.len() - 1
+                }
+            };
+            groups[index].sessions.push(entry);
+        };
+
+        for (space_index, space) in self.spaces.iter().enumerate() {
+            for (tab_index, tab) in space.tabs.iter().enumerate() {
+                // Render EACH agent and terminal pane, not only the first
+                // agent of a multi-pane tab.
+                for (pane_index, pane_id) in tab.tree.leaves().into_iter().enumerate() {
+                    let Some(pane) = self.panes.get(&pane_id) else { continue };
+                    let kind = match pane.item.kind {
+                        PaneKind::Agent => "Gentle Shell",
+                        PaneKind::Terminal => "Terminal",
+                        _ => continue,
+                    };
+                    // The title poll keeps this identity current. Do not
+                    // read a session entity during the GPUI render pass.
+                    let address = pane.herdr_address.clone();
+                    let key = if crate::features::terminal::herdr_enabled() {
+                        machine_key(pane.agent_target.as_ref(), address.as_deref())
+                            .unwrap_or_else(|| "local".into())
                     } else {
-                        Some(pane.cwd.display().to_string())
+                        "local".into()
+                    };
+                    let title = pane.title.to_string();
+                    let directory = session_directory(
+                        pane.agent_target.as_ref(), address.as_deref(),
+                        &pane.cwd, self.machine_snapshot.as_ref(),
+                    );
+                    add(key, NavigatorSession {
+                        source: NavigatorSessionSource::Open {
+                            space: space_index, tab: tab_index,
+                            pane: pane_id,
+                        },
+                        row_id: format!("open-{space_index}-{}-{pane_index}", tab.id),
+                        title: if title.is_empty() { kind.into() } else { title },
+                        address,
+                        directory,
+                        kind,
+                        icon: pane.item.kind.icon(),
+                        running: self.tab_running(tab),
+                        pane_count: tab.tree.len(),
+                    });
+                }
+            }
+        }
+
+        // Workspaces are lazy. Include their saved agent/terminal panes even
+        // when they have not yet been instantiated in GPUI.
+        for (space_index, space) in self.spaces.iter().enumerate() {
+            let Some((tabs, _)) = &space.saved else { continue };
+            for (tab_index, tab) in tabs.iter().enumerate() {
+                for (pane_index, pane) in tab.layout.leaves().iter().enumerate() {
+                    let kind = match pane.kind {
+                        PaneKind::Agent => "Gentle Shell",
+                        PaneKind::Terminal => "Terminal",
+                        _ => continue,
+                    };
+                    let address = pane.herdr_terminal.clone();
+                    let key = if crate::features::terminal::herdr_enabled() {
+                        machine_key(pane.agent_target.as_ref(), address.as_deref())
+                            .unwrap_or_else(|| "local".into())
+                    } else {
+                        "local".into()
+                    };
+                    add(key, NavigatorSession {
+                        source: NavigatorSessionSource::Saved {
+                            space: space_index, tab: tab_index, pane_index,
+                        },
+                        row_id: format!("saved-{space_index}-{tab_index}-{pane_index}"),
+                        title: format!("{kind} (saved)"),
+                        directory: session_directory(
+                            pane.agent_target.as_ref(), address.as_deref(),
+                            &pane.cwd, self.machine_snapshot.as_ref(),
+                        ),
+                        address,
+                        kind,
+                        icon: pane.kind.icon(),
+                        running: false,
+                        pane_count: tab.layout.leaves().len(),
+                    });
+                }
+            }
+        }
+
+        if crate::features::terminal::herdr_enabled()
+            && let Some(snapshot) = &self.machine_snapshot
+        {
+            for terminal in &snapshot.terminals {
+                let key = terminal.address.split_once('/')
+                    .map_or_else(|| "local".to_owned(), |(machine, _)| machine.to_owned());
+                let live = terminal.live();
+                add(key, NavigatorSession {
+                    source: NavigatorSessionSource::Herdr {
+                        address: terminal.address.clone(), live,
+                        agent: terminal.gentle_shell,
                     },
-                    icon: pane.item.kind.icon(),
-                    running: self.tab_running(tab),
-                    pane_count: tab.tree.len(),
+                    row_id: format!("herdr-{}", terminal.address),
+                    // The terminal's Herdr labels distinguish bridge agents
+                    // from shells, including agents not yet opened in GPUI.
+                    title: terminal.display_title().to_owned(),
+                    address: Some(terminal.address.clone()),
+                    directory: (!terminal.cwd.is_empty())
+                        .then(|| terminal.cwd.clone()),
+                    kind: if terminal.gentle_shell { "Gentle Shell" } else { "Terminal" },
+                    icon: if terminal.gentle_shell {
+                        IconName::Bot
+                    } else {
+                        IconName::SquareTerminal
+                    },
+                    running: live,
+                    pane_count: 1,
                 });
             }
         }
         groups
+    }
+
+    /// Close from Machines means permanent termination, not merely detaching
+    /// the GPUI viewer or saving an Undo snapshot. Always ask first.
+    fn confirm_permanent_session_close(
+        &mut self, source: NavigatorSessionSource,
+        address: Option<String>, agent: bool,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if address.as_ref().is_some_and(|address| {
+            self.terminating_herdr_sessions.contains(address)
+                || self.terminated_herdr_sessions.contains(address)
+        }) {
+            return;
+        }
+        if address.is_some() && !crate::features::terminal::herdr_enabled() {
+            window.push_notification(Notification::info(
+                "Switch to the Herdr backend to permanently terminate an existing Herdr session.",
+            ), cx);
+            return;
+        }
+        let kind = if agent { "Gentle Shell agent" } else { "terminal" };
+        let title = format!("Terminate {kind} permanently?");
+        let description = format!(
+            "This stops the {kind} on its computer and removes it from Machines. \
+             It will not be restored on the next launch. This action cannot be undone. \
+             Saved conversation files are not deleted. Unsaved edits in attached \
+             file panes may be lost."
+        );
+        let weak = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let weak = weak.clone();
+            let source = source.clone();
+            let address = address.clone();
+            alert
+                .title(title.clone())
+                .description(description.clone())
+                .ok_text("Terminate permanently")
+                .ok_variant(ButtonVariant::Danger)
+                .show_cancel(true)
+                .on_ok(move |_, window, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.permanently_close_machine_session(
+                            source.clone(), address.clone(), agent, window, cx,
+                        );
+                    });
+                    true
+                })
+        });
+    }
+
+    fn permanently_close_machine_session(
+        &mut self, source: NavigatorSessionSource,
+        address: Option<String>, agent: bool,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if let Some(address) = address {
+            if self.terminated_herdr_sessions.contains(&address)
+                || !self.terminating_herdr_sessions.insert(address.clone())
+            {
+                return;
+            }
+            cx.notify();
+            let task = cx.background_executor().spawn({
+                let address = address.clone();
+                async move { machine_model::terminate_session(&address, agent) }
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.terminating_herdr_sessions.remove(&address);
+                    match result {
+                        Ok(()) => {
+                            this.terminated_herdr_sessions.insert(address.clone());
+                            this.remove_machine_session_from_desktop(
+                                &source, Some(&address), window, cx,
+                            );
+                            this.save_now(cx);
+                            window.push_notification(Notification::info(
+                                "Session terminated in Herdr and removed from Machines.",
+                            ), cx);
+                        }
+                        Err(error) => {
+                            window.push_notification(Notification::error(format!(
+                                "Could not terminate Herdr session {address}: {error}"
+                            )), cx);
+                        }
+                    }
+                    cx.notify();
+                });
+            }).detach();
+        } else {
+            // A local agent may be pending launch and have no address yet.
+            // There is no Herdr terminal to kill; disposing the pane stops
+            // its owned Pi backend and prevents subsequent restore.
+            self.remove_machine_session_from_desktop(&source, None, window, cx);
+            self.save_now(cx);
+        }
+    }
+
+    /// Remove all desktop references to a terminated session. This also
+    /// clears its linked remote file/history panes and stale saved layouts.
+    /// Unlike close_tab(), nothing enters the Undo/reopen queue.
+    fn remove_machine_session_from_desktop(
+        &mut self,
+        source: &NavigatorSessionSource,
+        address: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected_pane = match source {
+            NavigatorSessionSource::Open { pane, .. } => Some(*pane),
+            _ => None,
+        };
+        let selected_saved = match source {
+            NavigatorSessionSource::Saved { space, tab, pane_index } =>
+                Some((*space, *tab, *pane_index)),
+            _ => None,
+        };
+        let matching: std::collections::HashSet<PaneId> = self.panes.iter()
+            .filter_map(|(id, pane)| {
+                let same_address = address.is_some_and(|address| {
+                    pane.herdr_address.as_deref() == Some(address)
+                        || pane.item.terminal_address.as_ref()
+                            .and_then(|get| get(cx)).as_deref() == Some(address)
+                        || (matches!(pane.item.kind, PaneKind::File | PaneKind::History)
+                            && pane.linked_session.as_ref()
+                                .and_then(|session| session.read(cx).herdr_terminal())
+                                .as_deref() == Some(address))
+                });
+                (same_address || selected_pane == Some(*id)).then_some(*id)
+            })
+            .collect();
+
+        for id in &matching {
+            self.shutdown_agent_pane(*id, cx);
+        }
+        for (space_index, space) in self.spaces.iter_mut().enumerate() {
+            space.tabs.retain_mut(|tab| {
+                let Some(tree) = tab.tree.filter_map(&mut |id| {
+                    (!matching.contains(id)).then_some(*id)
+                }) else {
+                    return false;
+                };
+                if !tree.contains(&tab.focused) {
+                    tab.focused = tree.leaves()[0];
+                }
+                tab.tree = tree;
+                true
+            });
+            space.active = space.active.min(space.tabs.len().saturating_sub(1));
+            if let Some((tabs, active)) = &mut space.saved {
+                let mut tab_index = 0;
+                tabs.retain_mut(|tab| {
+                    let original_tab = tab_index;
+                    tab_index += 1;
+                    let mut pane_index = 0;
+                    let Some(tree) = tab.layout.filter_map(&mut |pane: &SavedPane| {
+                        let original_pane = pane_index;
+                        pane_index += 1;
+                        let same_address = address.is_some_and(|addr| {
+                            pane.herdr_terminal.as_deref() == Some(addr)
+                                || (matches!(pane.kind, PaneKind::File | PaneKind::History)
+                                    && pane.remote_owner.as_deref() == Some(addr))
+                        });
+                        let selected = selected_saved == Some((
+                            space_index, original_tab, original_pane,
+                        ));
+                        (!same_address && !selected).then(|| {
+                            let mut kept = pane.clone();
+                            if address.is_some_and(|addr| {
+                                kept.remote_owner.as_deref() == Some(addr)
+                            }) {
+                                kept.remote_owner = None;
+                            }
+                            kept
+                        })
+                    }) else {
+                        return false;
+                    };
+                    tab.focused = tab.focused.min(tree.leaves().len().saturating_sub(1));
+                    tab.layout = tree;
+                    true
+                });
+                *active = (*active).min(tabs.len().saturating_sub(1));
+            }
+        }
+        for id in matching {
+            self.panes.remove(&id);
+        }
+        // Independent terminals may have been opened beside the agent.
+        // Keep their own Herdr sessions alive and drop only the dead parent link.
+        for pane in self.panes.values_mut() {
+            if address.is_some_and(|addr| {
+                pane.linked_session.as_ref()
+                    .and_then(|session| session.read(cx).herdr_terminal())
+                    .as_deref() == Some(addr)
+            }) {
+                pane.linked_session = None;
+            }
+        }
+        // Undo records intentionally omit dead Herdr addresses, so there is
+        // no reliable way to pick only this one's old close snapshots.
+        // Clearing them ensures Undo cannot resurrect a terminated agent.
+        self.closed.clear();
+        window.remove_notification::<closed::Closed>(cx);
+        self.focus_active(window, cx);
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     fn toggle_machine_group(&mut self, key: String, cx: &mut Context<Self>) {
@@ -193,18 +503,176 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if crate::features::terminal::herdr_enabled() {
-            match machine {
-                Some(machine) => {
-                    self.open_remote_directory_picker(machine, window, cx)
-                }
-                None => self.open_agent_on_machine(
-                    pi_rpc::AgentTarget::Local, window, cx,
-                ),
+        match machine {
+            Some(machine) if crate::features::terminal::herdr_enabled() => {
+                self.open_remote_directory_picker(machine, window, cx);
             }
-        } else if machine.is_none() {
-            self.on_new_tab(&NewTab, window, cx);
+            None => self.pick_local_agent_folder(window, cx),
+            Some(_) => {}
         }
+    }
+
+    /// Start a Herdr terminal on the requested machine, independent of the
+    /// currently selected agent. Never spawn Pi when Terminal is selected.
+    fn new_terminal_in_group(
+        &mut self,
+        machine: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if crate::features::terminal::herdr_enabled() {
+            if let Some(name) = &machine
+                && !self.machine_snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot.machines.iter().any(|item| {
+                        item.name == *name && item.connected()
+                    })
+                })
+            {
+                window.push_notification(Notification::info(
+                    format!("{name} is disconnected. No terminal was created."),
+                ), cx);
+                return;
+            }
+            let task = cx.background_executor().spawn(async move {
+                machine_model::create_shell(machine.as_deref())
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                let _ = this.update_in(cx, |this, window, cx| match result {
+                    Ok(address) => this.open_herdr_terminal(address, window, cx),
+                    Err(error) => window.push_notification(
+                        Notification::error(error), cx,
+                    ),
+                });
+            }).detach();
+        } else if machine.is_none() {
+            let cwd = self.active_cwd(cx);
+            self.open_tab(PaneKind::Terminal, cwd, None, None, window, cx);
+        }
+    }
+
+    /// Herdr-style compact Machines rail: always visible, icon-only.
+    /// A click expands the full tree with its previous width intact. No
+    /// session is created, restored or terminated by this navigation.
+    pub(super) fn render_machine_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let groups = self.navigator_groups();
+        let herdr = crate::features::terminal::herdr_enabled();
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .items_center()
+            .child(
+                div()
+                    .w_full()
+                    .h(px(42.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_b_1()
+                    .border_color(ui::border())
+                    .child(
+                        Button::new("machine-rail-expand")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::PanelLeftOpen))
+                            .tooltip("Expand Machines (Ctrl+B)")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_sidebar(cx)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .id("machine-rail-scroll")
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .py_2()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_1()
+                            .children(groups.into_iter().enumerate().map(|(index, group)| {
+                                let icon = if group.local {
+                                    IconName::SquareTerminal
+                                } else {
+                                    IconName::Layers
+                                };
+                                let connected = group.connected;
+                                let tooltip = format!(
+                                    "{} · {} session{}{}",
+                                    group.name, group.sessions.len(),
+                                    if group.sessions.len() == 1 { "" } else { "s" },
+                                    if connected { "" } else { " · disconnected" },
+                                );
+                                div()
+                                    .id(("machine-rail-item", index))
+                                    .w_full()
+                                    .h(px(42.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(6.))
+                                    .cursor_pointer()
+                                    .hover(|row| row.bg(ui::surface_hover().opacity(0.55)))
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(tooltip.clone()).build(window, cx)
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_sidebar(cx);
+                                    }))
+                                    .child(
+                                        v_flex()
+                                            .items_center()
+                                            .gap(px(3.))
+                                            .child(
+                                                Icon::new(icon)
+                                                    .small()
+                                                    .text_color(if connected {
+                                                        ui::fg()
+                                                    } else {
+                                                        ui::muted()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .size(px(5.))
+                                                    .rounded_full()
+                                                    .bg(if connected {
+                                                        ui::accent()
+                                                    } else {
+                                                        ui::muted()
+                                                    }),
+                                            ),
+                                    )
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .h(px(38.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_t_1()
+                    .border_color(ui::border())
+                    .when(herdr, |bar| {
+                        bar.child(
+                            Button::new("machine-rail-manage")
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Settings))
+                                .tooltip("Manage Herdr machines")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_machines(window, cx);
+                                })),
+                        )
+                    }),
+            )
     }
 
     pub(super) fn render_machine_navigator(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -235,13 +703,25 @@ impl Workspace {
                             .child("Machines"),
                     )
                     .child(
-                        Button::new("navigator-new-local")
+                        Button::new("navigator-add-machine")
                             .ghost()
                             .xsmall()
-                            .icon(Icon::new(IconName::Plus))
-                            .tooltip("New agent on this computer")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.new_agent_in_group(None, window, cx)
+                            .icon(Icon::new(if herdr {
+                                IconName::Plus
+                            } else {
+                                IconName::Bot
+                            }))
+                            .tooltip(if herdr {
+                                "Add a machine through Herdr Core"
+                            } else {
+                                "New local agent"
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if herdr {
+                                    this.open_machine_registration(window, cx);
+                                } else {
+                                    this.new_agent_in_group(None, window, cx);
+                                }
                             })),
                     )
                     .when(herdr, |row| {
@@ -250,7 +730,7 @@ impl Workspace {
                                 .ghost()
                                 .xsmall()
                                 .icon(Icon::new(IconName::Settings))
-                                .tooltip("Manage Herdr machines and terminals")
+                                .tooltip("Manage registered Herdr machines")
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.open_machines(window, cx)
                                 })),
@@ -332,46 +812,90 @@ impl Workspace {
                                                     .text_color(ui::muted())
                                                     .child(group.sessions.len().to_string()),
                                             )
-                                            .child(
-                                                Button::new(("navigator-add-machine", group_index))
-                                                    .ghost()
-                                                    .xsmall()
-                                                    .icon(Icon::new(IconName::Plus))
-                                                    .tooltip(if available {
-                                                        "New agent on this machine"
-                                                    } else {
-                                                        "Machine disconnected"
+                                            .child({
+                                                // Do not bubble the + click into the
+                                                // machine row's expand/collapse handler.
+                                                let weak = cx.entity().downgrade();
+                                                div()
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                        cx.stop_propagation();
                                                     })
-                                                    .when(available, |button| {
-                                                        button.on_click(cx.listener(
-                                                            move |this, _, window, cx| {
-                                                                cx.stop_propagation();
-                                                                this.new_agent_in_group(
-                                                                    machine_for_add.clone(),
-                                                                    window, cx,
-                                                                )
-                                                            },
-                                                        ))
-                                                    }),
-                                            ),
+                                                    .child(
+                                                        Button::new(("navigator-new-session", group_index))
+                                                            .ghost()
+                                                            .xsmall()
+                                                            .icon(Icon::new(IconName::Plus))
+                                                            .tooltip(if available {
+                                                                "New Gentle Shell or Terminal"
+                                                            } else {
+                                                                "Machine disconnected"
+                                                            })
+                                                            .disabled(!available)
+                                                            .dropdown_menu(move |menu, _, _| {
+                                                                    let weak_agent = weak.clone();
+                                                                    let weak_terminal = weak.clone();
+                                                                    let agent_machine = machine_for_add.clone();
+                                                                    let terminal_machine = machine_for_add.clone();
+                                                                    menu.min_w(px(210.))
+                                                                        .item(
+                                                                            PopupMenuItem::element(|_, _| {
+                                                                                h_flex().gap_2().px_2().py_1p5()
+                                                                                    .child(Icon::new(IconName::Bot).small())
+                                                                                    .child("Gentle Shell")
+                                                                            })
+                                                                            .on_click(move |_, window, cx| {
+                                                                                let _ = weak_agent.update(cx, |this, cx| {
+                                                                                    this.new_agent_in_group(
+                                                                                        agent_machine.clone(), window, cx,
+                                                                                    );
+                                                                                });
+                                                                            }),
+                                                                        )
+                                                                        .item(
+                                                                            PopupMenuItem::element(|_, _| {
+                                                                                h_flex().gap_2().px_2().py_1p5()
+                                                                                    .child(Icon::new(IconName::SquareTerminal).small())
+                                                                                    .child("Terminal")
+                                                                            })
+                                                                            .on_click(move |_, window, cx| {
+                                                                                let _ = weak_terminal.update(cx, |this, cx| {
+                                                                                    this.new_terminal_in_group(
+                                                                                        terminal_machine.clone(), window, cx,
+                                                                                    );
+                                                                                });
+                                                                            }),
+                                                                        )
+                                                                }),
+                                                    )
+                                            }),
                                     )
                                     .when(!collapsed, |section| {
                                         section.child(
                                             v_flex()
                                                 .gap(px(1.))
                                                 .children(group.sessions.into_iter().map(|session| {
-                                                    let active = session.tab_index == self.space().active;
-                                                    let tab_index = session.tab_index;
-                                                    let close_index = tab_index;
-                                                    let renaming = self.renaming.as_ref().filter(|rename| {
-                                                        self.space().tabs.get(tab_index).is_some_and(|tab| {
-                                                            tab.tree.leaves().contains(&rename.pane)
-                                                        })
-                                                    });
-                                                    let group_name = format!("nav-session-{}", session.tab_id);
+                                                    let source = session.source.clone();
+                                                    let active = matches!(&source,
+                                                        NavigatorSessionSource::Open { space, tab, pane, .. }
+                                                            if *space == self.current
+                                                                && *tab == self.space().active
+                                                                && self.tab().is_some_and(|t| t.focused == *pane)
+                                                    );
+                                                    let renaming = match &source {
+                                                        NavigatorSessionSource::Open { space, pane, .. }
+                                                            if *space == self.current =>
+                                                                self.renaming.as_ref()
+                                                                    .filter(|rename| rename.pane == *pane),
+                                                        _ => None,
+                                                    };
+                                                    let group_name = format!("nav-session-{}", session.row_id);
+                                                    let close_id = format!("nav-close-{}", session.row_id);
+                                                    let close_source = session.source.clone();
+                                                    let close_address = session.address.clone();
+                                                    let close_agent = session.kind == "Gentle Shell";
                                                     let details = format!(
-                                                        "{}{}{}",
-                                                        session.title,
+                                                        "{} · {}{}{}",
+                                                        session.kind, session.title,
                                                         session.address.as_ref()
                                                             .map(|a| format!(" · {a}"))
                                                             .unwrap_or_default(),
@@ -381,12 +905,16 @@ impl Workspace {
                                                     );
                                                     let details = match &session.directory {
                                                         Some(path) => format!("{details} · cwd: {path}"),
-                                                        None => format!("{details} · remote cwd unavailable"),
+                                                        None => details,
                                                     };
-                                                    let directory_label = session.directory.clone()
-                                                        .unwrap_or_else(|| "Remote cwd unavailable".into());
+                                                    let directory_label = format!(
+                                                        "{} · {}",
+                                                        session.kind,
+                                                        session.directory.as_deref()
+                                                            .unwrap_or("cwd unavailable"),
+                                                    );
                                                     h_flex()
-                                                        .id(("navigator-session", session.tab_id))
+                                                        .id(SharedString::from(format!("nav-row-{}", session.row_id)))
                                                         .group(SharedString::from(group_name.clone()))
                                                         .h(px(48.))
                                                         .ml(px(14.))
@@ -408,10 +936,28 @@ impl Workspace {
                                                             Tooltip::new(details.clone()).build(window, cx)
                                                         })
                                                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                                                            if event.click_count() >= 2 {
-                                                                this.start_tab_rename(tab_index, window, cx);
-                                                            } else {
-                                                                this.activate(tab_index, window, cx);
+                                                            match &source {
+                                                                NavigatorSessionSource::Open { space, tab, pane, .. } => {
+                                                                    if *space != this.current {
+                                                                        this.switch_workspace(*space, window, cx);
+                                                                    }
+                                                                    this.activate(*tab, window, cx);
+                                                                    this.focus_pane(*pane, window, cx);
+                                                                    if event.click_count() >= 2 {
+                                                                        this.start_tab_rename(*tab, window, cx);
+                                                                    }
+                                                                }
+                                                                NavigatorSessionSource::Saved { space, tab, .. } => {
+                                                                    this.switch_workspace(*space, window, cx);
+                                                                    this.activate(*tab, window, cx);
+                                                                }
+                                                                NavigatorSessionSource::Herdr { address, live, agent } => {
+                                                                    if *live {
+                                                                        this.show_or_attach_herdr_session(
+                                                                            address.clone(), *agent, window, cx,
+                                                                        );
+                                                                    }
+                                                                }
                                                             }
                                                         }))
                                                         .child(
@@ -419,6 +965,8 @@ impl Workspace {
                                                                 .small()
                                                                 .text_color(if active {
                                                                     ui::petal()
+                                                                } else if session.running {
+                                                                    ui::accent()
                                                                 } else {
                                                                     ui::muted()
                                                                 }),
@@ -433,7 +981,6 @@ impl Workspace {
                                                                 .items_center()
                                                                 .rounded(px(5.))
                                                                 .bg(ui::well())
-                                                                // Editing the name must not activate the row.
                                                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                                                     cx.stop_propagation();
                                                                 })
@@ -478,7 +1025,7 @@ impl Workspace {
                                                         })
                                                         .child(
                                                             div()
-                                                                .id(("navigator-close", session.tab_id))
+                                                                .id(SharedString::from(close_id))
                                                                 .size(px(20.))
                                                                 .flex_none()
                                                                 .flex()
@@ -493,12 +1040,21 @@ impl Workspace {
                                                                 )
                                                                 .hover(|button| {
                                                                     button.bg(ui::surface_hover())
-                                                                        .text_color(ui::fg())
+                                                                        .text_color(ui::danger())
+                                                                })
+                                                                .tooltip(|window, cx| {
+                                                                    Tooltip::new("Terminate session permanently")
+                                                                        .build(window, cx)
                                                                 })
                                                                 .on_click(cx.listener(
                                                                     move |this, _, window, cx| {
                                                                         cx.stop_propagation();
-                                                                        this.close_tab(close_index, window, cx);
+                                                                        this.confirm_permanent_session_close(
+                                                                            close_source.clone(),
+                                                                            close_address.clone(),
+                                                                            close_agent,
+                                                                            window, cx,
+                                                                        );
                                                                     },
                                                                 ))
                                                                 .child(Icon::new(IconName::X).xsmall()),
@@ -584,6 +1140,7 @@ mod tests {
                 title: "Gentle Shell".into(),
                 cwd: "/srv/workspaces/OtherProject".into(),
                 state: "live".into(),
+                gentle_shell: true,
             }],
         };
         assert_eq!(

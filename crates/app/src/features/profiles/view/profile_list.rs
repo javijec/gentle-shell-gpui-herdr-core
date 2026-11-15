@@ -76,6 +76,8 @@ impl ProfilesView {
                                 |(ix, (name, config))| {
                                     let selected = self.selected.as_deref() == Some(name.as_str());
                                     let active = self.file.active.as_deref() == Some(name.as_str());
+                                    let in_session =
+                                        self.in_session.as_deref() == Some(name.as_str());
                                     let pinned = pin_winner.as_deref() == Some(name.as_str());
                                     let is_declared = declared.as_deref() == Some(name.as_str());
                                     let roles = config.roles().count();
@@ -145,6 +147,9 @@ impl ProfilesView {
                                                         ),
                                                     ),
                                                 )
+                                                .when(in_session, |d| {
+                                                    d.child(ui::chip("this session", ui::success()))
+                                                })
                                                 .when(active, |d| {
                                                     d.child(ui::chip("default", ui::accent()))
                                                 })

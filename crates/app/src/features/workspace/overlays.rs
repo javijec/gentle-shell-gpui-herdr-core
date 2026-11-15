@@ -120,6 +120,7 @@ impl Workspace {
             PaletteAction::Welcome => self.open_welcome(None, window, cx),
             PaletteAction::NewTab => self.on_new_tab(&NewTab, window, cx),
             PaletteAction::NewTerminalTab => self.on_new_terminal_tab(&NewTerminalTab, window, cx),
+            PaletteAction::ToggleAgentTerminal => self.toggle_agent_terminal(window, cx),
             PaletteAction::TilePane => self.tile(None, window, cx),
             PaletteAction::SplitRight => self.split(SplitAxis::Horizontal, None, window, cx),
             PaletteAction::SplitDown => self.split(SplitAxis::Vertical, None, window, cx),
@@ -352,35 +353,64 @@ impl Workspace {
 
     /// Herdr machine and terminal browser (all discovery/actions off the UI thread).
     pub(super) fn open_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_machines_impl(false, window, cx);
+    }
+
+    /// The + in the Machines navigator registers an SSH machine in Herdr.
+    /// Creating an agent remains an explicit per-machine action.
+    pub(super) fn open_machine_registration(
+        &mut self, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        self.open_machines_impl(true, window, cx);
+    }
+
+    fn open_machines_impl(
+        &mut self, register: bool, window: &mut Window, cx: &mut Context<Self>,
+    ) {
         if !crate::features::terminal::herdr_enabled() {
             return;
         }
         if matches!(&self.overlay, Some((Overlay::Machines(_), _))) {
-            self.close_overlay(window, cx);
+            if register {
+                if let Some((Overlay::Machines(view), _)) = &self.overlay {
+                    view.update(cx, |view, cx| view.begin_add_machine(window, cx));
+                }
+            } else {
+                self.close_overlay(window, cx);
+            }
             return;
         }
-        let view = cx.new(|cx| MachinesView::new(window, cx));
+        let view = cx.new(|cx| {
+            if register {
+                MachinesView::new_for_registration(window, cx)
+            } else {
+                MachinesView::new(window, cx)
+            }
+        });
         let subscription = cx.subscribe_in(
             &view,
             window,
             |this, _, event: &MachinesEvent, window, cx| match event {
                 MachinesEvent::Close => this.close_overlay(window, cx),
-                MachinesEvent::OpenTerminal(address) => {
-                    let address = address.clone();
-                    this.close_overlay(window, cx);
-                    this.open_herdr_terminal(address, window, cx);
-                }
-                MachinesEvent::NewAgent(machine) => {
-                    let machine = machine.clone();
-                    this.close_overlay(window, cx);
-                    match machine {
-                        Some(machine) => {
-                            this.open_remote_directory_picker(machine, window, cx)
-                        }
-                        None => this.open_agent_on_machine(
-                            pi_rpc::AgentTarget::Local, window, cx,
-                        ),
-                    }
+                MachinesEvent::Changed => {
+                    // Machine registration/removal is confirmed by Herdr Core.
+                    // Re-read its authoritative machine and terminal lists
+                    // outside the GPUI render thread.
+                    cx.spawn(async move |this, cx| {
+                        let result = cx.background_executor().spawn(async {
+                            machine_model::discover()
+                        }).await;
+                        let _ = this.update(cx, |this, cx| {
+                            match result {
+                                Ok(snapshot) => {
+                                    this.machine_snapshot = Some(snapshot);
+                                    this.machine_error = None;
+                                }
+                                Err(error) => this.machine_error = Some(error),
+                            }
+                            cx.notify();
+                        });
+                    }).detach();
                 }
             },
         );
@@ -474,10 +504,15 @@ impl Workspace {
                 }
                 ProfilesEvent::UseInSession { profile, model, thinking } => {
                     if let Some(tab) = tab {
-                        let (model, thinking) = (model.clone(), thinking.clone());
+                        let (profile, model, thinking) =
+                            (profile.clone(), model.clone(), thinking.clone());
                         let note = format!("Profile \u{201c}{profile}\u{201d} applied to this session's orchestrator; helpers keep the routing this session started with.");
                         tab.update(cx, |s, cx| {
                             s.note(note, cx);
+                            // Older Shells apply by set_model, not Desktop RPC.
+                            // Keep the binding on the actual owning session,
+                            // regardless of whether it is local or Herdr-backed.
+                            s.set_session_profile(Some(profile), cx);
                             if let Some((provider, id)) = model {
                                 s.send_command(serde_json::json!({"type": "set_model", "provider": provider, "modelId": id}), cx);
                             }

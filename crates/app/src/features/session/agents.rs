@@ -15,7 +15,7 @@ use super::state::desktop;
 use crate::shared::ui;
 use gentle_core::activity::{AgentTask, ThreadItem};
 use gentle_core::gentle_state::{Job, JobOutcome};
-use gentle_core::transcript::format_tokens;
+use gentle_core::transcript::{NoticeLevel, format_tokens};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentsTab {
@@ -110,6 +110,15 @@ impl<'a> Helper<'a> {
 
     fn label(&self) -> Option<&str> {
         self.live()?.summary.label.as_deref()
+    }
+
+    /// Routed model of a structured helper. The legacy task widget does
+    /// not report this field, so never infer a model for legacy helpers.
+    fn model(&self) -> Option<&str> {
+        match self {
+            Self::Structured(agent, _) => agent.model.as_deref(),
+            Self::Legacy(_) => None,
+        }
     }
 
     fn last_step(&self) -> Option<String> {
@@ -405,6 +414,14 @@ impl SessionView {
     /// Stop one helper over `cancel_subagent`; the legacy prompt stays only for
     /// a peer that genuinely does not offer the method.
     fn stop_agent(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.process().is_none() {
+            self.transcript.notice(
+                NoticeLevel::Warning,
+                "The owning agent is offline; the helper was not stopped.".to_string(),
+            );
+            cx.notify();
+            return;
+        }
         let applied = self.desktop.cancel_subagent(id.to_string());
         match applied.report.as_ref() {
             Some(desktop::supervision::Report::Unsupported) => self.ask_to_stop_agent(id, cx),
@@ -430,6 +447,14 @@ impl SessionView {
                 })
             })
             .unwrap_or_default();
+        if self.process().is_none() {
+            self.transcript.notice(
+                NoticeLevel::Warning,
+                "The owning agent is offline; the helper cancellation request was not sent.".to_string(),
+            );
+            cx.notify();
+            return;
+        }
         let text = format!(
             "Stop the subagent task {id} ({agent}) now with subagent_cancel, then tell me what it had done."
         );
@@ -481,6 +506,13 @@ impl SessionView {
             (bits.join(" · "), running > 0, helpers.len())
         };
 
+        let (host, connected) = if self.is_remote_herdr() {
+            let machine = self.remote_fs_target()
+                .map_or_else(|| "Remote".to_string(), |(machine, _)| machine);
+            (machine, self.remote_fs_process().is_some())
+        } else {
+            ("Local".to_string(), self.process().is_some())
+        };
         let header = ui::screen_header()
             .child(Icon::new(IconName::Users).small().text_color(ui::muted()))
             .child(
@@ -491,6 +523,11 @@ impl SessionView {
                     .text_color(ui::fg())
                     .child("Agents"),
             )
+            .child(ui::chip(
+                format!("{} · {}", host,
+                    if connected { "connected" } else { "offline" }),
+                if connected { ui::accent() } else { ui::warning() },
+            ))
             .child(
                 div()
                     .flex_1()
@@ -585,7 +622,10 @@ impl SessionView {
                 "No background jobs yet. Commands the agent runs in the background show up here.",
             ),
             AgentsTab::Jobs => {
-                let (cancel, view) = (self.desktop.cancel_job_supported(), cx.entity().downgrade());
+                let (cancel, view) = (
+                    self.desktop.cancel_job_supported() && self.process().is_some(),
+                    cx.entity().downgrade(),
+                );
                 v_flex()
                     .gap_0p5()
                     .children(
@@ -682,7 +722,7 @@ impl SessionView {
             })
             .child(div().flex_1())
             .child(
-                Button::new("agents-close")
+                Button::new("agents-footer-close")
                     .ghost()
                     .small()
                     .label("Close")
@@ -812,6 +852,18 @@ impl SessionView {
                                 .child(name),
                         )
                         .when_some(kind, |d, kind| d.child(kind_chip(kind)))
+                        .when_some(helper.model().map(str::to_string), |d, model| {
+                            d.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .max_w(px(220.))
+                                    .truncate()
+                                    .text_xs()
+                                    .font_family(ui::MONO)
+                                    .text_color(ui::info())
+                                    .child(model),
+                            )
+                        })
                         .child(
                             div()
                                 .flex_1()

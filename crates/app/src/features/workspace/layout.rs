@@ -11,6 +11,8 @@ pub(super) const DIVIDER: f32 = 6.;
 
 /// The side docks are independent of the central split-pane dividers.
 pub(super) const MIN_DOCK_WIDTH: f32 = 180.;
+/// Narrow Machines rail retained when its tree is collapsed.
+pub(super) const MACHINES_RAIL_WIDTH: f32 = 48.;
 pub(super) const MAX_DOCK_WIDTH: f32 = 640.;
 pub(super) const DOCK_HANDLE_WIDTH: f32 = 6.;
 const DOCK_PADDING: f32 = 12.;
@@ -56,6 +58,23 @@ pub(super) fn fit_dock_widths(
     }
 }
 
+/// A collapsed Machines dock is a narrow navigation rail, never a hidden
+/// sidebar. Its reserved width must be accounted for before fitting Files.
+pub(super) fn fit_machine_dock_widths(
+    viewport: f32,
+    expanded: bool,
+    saved_machines_width: f32,
+    files: Option<f32>,
+) -> (f32, f32) {
+    if expanded {
+        fit_dock_widths(viewport, Some(saved_machines_width), files)
+    } else {
+        let available = (viewport - MACHINES_RAIL_WIDTH - DOCK_GAP).max(0.);
+        let (_, files_width) = fit_dock_widths(available, None, files);
+        (MACHINES_RAIL_WIDTH, files_width)
+    }
+}
+
 /// Bound a drag by the other dock's rendered size and a minimum center pane.
 pub(super) fn resized_dock_width(
     viewport: f32,
@@ -87,9 +106,10 @@ impl Workspace {
         machines_visible: bool,
         files_visible: bool,
     ) -> (f32, f32) {
-        fit_dock_widths(
+        fit_machine_dock_widths(
             viewport,
-            machines_visible.then_some(self.machines_dock_width),
+            machines_visible,
+            self.machines_dock_width,
             files_visible.then_some(self.files_dock_width.unwrap_or(
                 if selected_remote { SIDEBAR_WIDTH + 70. } else { SIDEBAR_WIDTH },
             )),
@@ -195,6 +215,20 @@ mod tests {
     use super::{
         DockSide, DropZone, SplitAxis, fit_dock_widths, resized_dock_width, tile_axis,
     };
+
+    #[test]
+    fn machines_rail_stays_visible_and_preserves_saved_width() {
+        use super::{fit_machine_dock_widths, MACHINES_RAIL_WIDTH};
+        let expanded = fit_machine_dock_widths(1400., true, 310., Some(320.));
+        assert_eq!(expanded, (310., 320.));
+        let collapsed = fit_machine_dock_widths(1400., false, 310., Some(320.));
+        assert_eq!(collapsed, (MACHINES_RAIL_WIDTH, 320.));
+        let restored = fit_machine_dock_widths(1400., true, 310., Some(320.));
+        assert_eq!(restored, expanded);
+        let narrow = fit_machine_dock_widths(620., false, 310., Some(320.));
+        assert_eq!(narrow.0, MACHINES_RAIL_WIDTH);
+        assert!(narrow.1 <= 320.);
+    }
 
     #[test]
     fn dock_widths_keep_the_center_visible_and_restore_full_size() {

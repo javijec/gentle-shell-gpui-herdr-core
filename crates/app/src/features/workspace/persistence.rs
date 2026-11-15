@@ -60,16 +60,27 @@ impl Workspace {
 
     pub(super) fn saved_pane(&self, id: PaneId, cx: &App) -> Option<SavedPane> {
         let pane = self.panes.get(&id)?;
-        // Remote Linux files cannot be re-opened via a Windows PathBuf.
-        // Do not serialize ephemeral remote editor panes as local files;
-        // the owning Herdr agent remains persisted independently.
-        if pane.item.kind == PaneKind::File && pane.path.is_none() {
+        // Persist Linux editors as POSIX paths and the exact owner terminal,
+        // never as PathBuf Windows paths. A recovered editor can be rebound
+        // only to that originally saved Herdr agent.
+        let remote_file = if pane.item.kind == PaneKind::File && pane.path.is_none() {
+            Some(pane.item.view.clone().downcast::<RemoteFilesView>().ok()?)
+        } else {
+            None
+        };
+        let remote_path = remote_file.as_ref()
+            .and_then(|view| view.read(cx).remote_path().map(str::to_owned));
+        let remote_owner = pane.linked_session.as_ref()
+            .and_then(|session| session.read(cx).herdr_terminal());
+        let remote_draft = remote_file.as_ref()
+            .and_then(|view| view.read(cx).draft_snapshot(cx));
+        if remote_file.is_some() && (remote_path.is_none() || remote_owner.is_none()) {
             return None;
         }
-        // The remote History pane is tied to a living Herdr RPC session;
-        // never rehydrate it through the Windows Git history factory.
         if pane.item.kind == PaneKind::History
-            && matches!(pane.agent_target.as_ref(), Some(pi_rpc::AgentTarget::Remote { .. }))
+            && matches!(pane.agent_target.as_ref(),
+                Some(pi_rpc::AgentTarget::Remote { .. }))
+            && remote_owner.is_none()
         {
             return None;
         }
@@ -87,6 +98,9 @@ impl Workspace {
                 crate::features::terminal::herdr_enabled(),
             ),
             agent_target: pane.agent_target.clone(),
+            remote_path,
+            remote_owner,
+            remote_draft,
         })
     }
 
@@ -138,6 +152,12 @@ impl Workspace {
             sidebar: self.sidebar_visible,
             machines_dock_width: self.machines_dock_width,
             files_dock_width: self.files_dock_width,
+            terminated_herdr_sessions: {
+                let mut addresses: Vec<_> = self.terminated_herdr_sessions.iter()
+                    .cloned().collect();
+                addresses.sort();
+                addresses
+            },
         }
     }
 
