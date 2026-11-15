@@ -415,7 +415,7 @@ impl Workspace {
                 let (machine, _) = agent.remote_fs_target()?;
                 agent.remote_fs_process()?;
                 let terminal = agent.herdr_terminal()?;
-                Some((machine, terminal))
+                Some((format!("{machine} ({terminal})"), terminal))
             })
             .take(12)
             .collect();
