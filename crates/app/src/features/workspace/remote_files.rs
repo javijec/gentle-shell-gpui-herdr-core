@@ -37,14 +37,20 @@ impl Workspace {
             ), cx);
             return;
         }
-        let Some(process) = session.read(cx).remote_fs_process() else {
-            window.push_notification(Notification::info(
-                "Remote History requires a connected Herdr agent.",
-            ), cx);
-            return;
-        };
+        let pane = self.build_remote_history_pane(
+            session, machine, root, cx,
+        );
+        self.place_preview(pane, window, cx);
+    }
+
+    /// Construct the same Git History pane during live opening or recovery.
+    /// Its session reference reconnects to the original Herdr address.
+    pub(super) fn build_remote_history_pane(
+        &mut self, session: Entity<SessionView>,
+        machine: String, root: String, cx: &mut Context<Self>,
+    ) -> PaneId {
         let view = cx.new(|cx| HistoryView::new_remote(
-            machine.clone(), root.clone(), process, cx,
+            machine.clone(), root.clone(), session.clone(), cx,
         ));
         let title = view.clone();
         let item = PaneItem {
@@ -74,7 +80,7 @@ impl Workspace {
         };
         pane.sync_chrome(cx);
         self.panes.insert(id, pane);
-        self.place_preview(id, window, cx);
+        id
     }
 
     /// Select the remote Files dock's Changes page for a command owned by
