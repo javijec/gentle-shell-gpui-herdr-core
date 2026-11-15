@@ -176,7 +176,7 @@ impl Workspace {
                     Some((session, current_machine, current_root))
                         if !terminal.is_empty() && machine == current_machine
                             && root == current_root
-                            && session.read(cx).herdr_terminal().as_deref() == Some(&terminal) =>
+                            && session.read(cx).herdr_terminal().as_deref() == Some(terminal.as_str()) =>
                             self.open_remote_file(path, window, cx),
                     _ => window.push_notification(Notification::info(
                         "The active machine changed. Reopen the remote Files palette.",
