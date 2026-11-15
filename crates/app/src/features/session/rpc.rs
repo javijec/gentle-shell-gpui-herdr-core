@@ -265,6 +265,20 @@ impl SessionView {
         Ok(ticket)
     }
 
+    /// Profile bound to this session, when seen by its Desktop RPC channel.
+    /// This follows the agent, not a global current-profile setting.
+    pub(crate) fn session_profile(&self) -> Option<&str> {
+        self.desktop.session_profile()
+    }
+
+    /// Record an explicit legacy action that applied or cleared a profile.
+    pub(crate) fn set_session_profile(
+        &mut self, profile: Option<String>, cx: &mut Context<Self>,
+    ) {
+        self.desktop.set_session_profile(profile);
+        cx.notify();
+    }
+
     /// The answers to config tickets since the last call (the Profiles
     /// screen's to take).
     pub(crate) fn take_config_outcomes(&mut self) -> Vec<(ConfigTicket, ConfigOutcome)> {
