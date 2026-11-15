@@ -423,7 +423,20 @@ impl Workspace {
             }
             PaneKind::Terminal => {
                 PaneFactories::get(cx).terminal.as_ref()?;
-                self.new_factory_pane_restored(PaneKind::Terminal, cwd, saved.herdr_terminal.clone(), window, cx)
+                let id = self.new_factory_pane_restored(
+                    PaneKind::Terminal, cwd, saved.herdr_terminal.clone(), window, cx,
+                )?;
+                if let Some(owner) = saved.remote_owner.as_deref() {
+                    let agent = self.panes.values().find_map(|pane| {
+                        (pane.herdr_address.as_deref() == Some(owner))
+                            .then(|| pane.session.clone()).flatten()
+                    });
+                    if let Some(pane) = self.panes.get_mut(&id) {
+                        pane.linked_session = agent;
+                        pane.agent_target = saved.agent_target.clone();
+                    }
+                }
+                Some(id)
             }
             PaneKind::File => {
                 if let Some(path) = saved.remote_path.clone() {
