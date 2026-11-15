@@ -493,6 +493,8 @@ pub struct RemoteFilesView {
     file_clipboard: Option<(String, bool)>,
     entry_name: Entity<InputState>,
     entry_busy: bool,
+    trash_confirm: Option<String>,
+    last_trash: Option<(String, String)>,
     create_name: Entity<InputState>,
     creating: bool,
     preview: Option<RemotePreview>,
@@ -747,6 +749,8 @@ impl RemoteFilesView {
             file_clipboard: None,
             entry_name,
             entry_busy: false,
+            trash_confirm: None,
+            last_trash: None,
             create_name,
             creating: false,
             preview: None,
@@ -876,6 +880,8 @@ impl RemoteFilesView {
         self.tree_loading.clear();
         self.tree_selected_directory = None;
         self.tree_selected_entry = None;
+        self.trash_confirm = None;
+        self.last_trash = None;
         self.rebuild_remote_rows();
         self.error = None;
         self.truncated = false;
@@ -927,6 +933,86 @@ impl RemoteFilesView {
             self.error = None;
             cx.notify();
         }
+    }
+
+    fn trash_remote_entry(&mut self, cx: &mut Context<Self>) {
+        if self.entry_busy || self.creating || self.root == "/" || self.pane_path.is_some() {
+            return;
+        }
+        let Some((selected, _)) = self.tree_selected_entry.clone() else { return; };
+        if self.trash_confirm.as_deref() != Some(selected.as_str()) {
+            self.trash_confirm = Some(selected);
+            cx.notify();
+            return;
+        }
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.error = Some("Remote agent is disconnected".into());
+            cx.notify();
+            return;
+        };
+        self.trash_confirm = None;
+        self.entry_busy = true;
+        let parent = remote_parent(&self.root, &selected)
+            .unwrap_or_else(|| self.root.clone());
+        let generation = self.generation;
+        let operation = WorkspaceBackend::herdr(self.root.clone(), process)
+            .trash(WorkspacePath::Herdr(selected.clone()));
+        cx.spawn(async move |this, cx| {
+            let result = operation.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation { return; }
+                this.entry_busy = false;
+                match result {
+                    Ok(receipt) => {
+                        if let Some(token) = receipt.token {
+                            this.last_trash = Some((token, selected.clone()));
+                        }
+                        this.tree_selected_entry = None;
+                        this.file_clipboard = None;
+                        this.tree_children.remove(&selected);
+                        this.tree_expanded.remove(&selected);
+                        this.refresh_tree_folder(parent.clone(), cx);
+                    }
+                    Err(error) => this.error = Some(friendly_error(&error)),
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    fn restore_remote_entry(&mut self, cx: &mut Context<Self>) {
+        if self.entry_busy || self.creating || self.root == "/" {
+            return;
+        }
+        let Some((token, original)) = self.last_trash.clone() else { return; };
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.error = Some("Remote agent is disconnected".into());
+            cx.notify();
+            return;
+        };
+        self.entry_busy = true;
+        let generation = self.generation;
+        let parent = remote_parent(&self.root, &original)
+            .unwrap_or_else(|| self.root.clone());
+        let operation = WorkspaceBackend::herdr(self.root.clone(), process)
+            .restore(token.clone());
+        cx.spawn(async move |this, cx| {
+            let result = operation.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation { return; }
+                this.entry_busy = false;
+                match result {
+                    Ok(_) => {
+                        this.last_trash = None;
+                        this.refresh_tree_folder(parent.clone(), cx);
+                    }
+                    Err(error) => this.error = Some(friendly_error(&error)),
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
     }
 
     fn rename_remote_entry(&mut self, cx: &mut Context<Self>) {
@@ -2089,6 +2175,33 @@ impl Render for RemoteFilesView {
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.paste_remote_entry(cx)
                                 })))
+                            .child(Button::new("remote-entry-trash")
+                                .ghost().xsmall()
+                                .icon(Icon::new(IconName::Trash))
+                                .label(if self.trash_confirm.as_ref()
+                                    == self.tree_selected_entry.as_ref().map(|(path, _)| path)
+                                    && self.trash_confirm.is_some()
+                                {
+                                    "Confirm Trash"
+                                } else {
+                                    "Trash"
+                                })
+                                .tooltip("Move to recoverable private Trash; click twice to confirm")
+                                .disabled(self.entry_busy || self.tree_selected_entry.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.trash_remote_entry(cx)
+                                })))
+                            .when(self.last_trash.is_some(), |row| row.child(
+                                Button::new("remote-entry-restore")
+                                    .ghost().xsmall()
+                                    .icon(Icon::new(IconName::Undo2))
+                                    .label("Undo")
+                                    .tooltip("Restore last entry from private Trash")
+                                    .disabled(self.entry_busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.restore_remote_entry(cx)
+                                    })),
+                            ))
                             .child(div().flex_1())
                             .child(div().min_w_0().truncate().text_xs()
                                 .text_color(ui::muted())
