@@ -270,6 +270,20 @@ impl Render for Workspace {
                                             )
                                         },
                                     )
+                                    .when(self.active_session().is_some(), |bar| {
+                                        let in_terminal = self.focused_pane()
+                                            .and_then(|id| self.panes.get(&id))
+                                            .is_some_and(|pane| pane.item.kind == PaneKind::Terminal);
+                                        bar.child(
+                                            Button::new("title-switch-chat-terminal")
+                                                .ghost().xsmall()
+                                                .label(if in_terminal { "Chat" } else { "Terminal" })
+                                                .tooltip("Switch between this agent's chat and companion terminal")
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.toggle_agent_terminal(window, cx)
+                                                })),
+                                        )
+                                    })
                                     .children(crate::features::music::title_button(&self.music, cx))
                                     .children(self.render_devices_button(cx))
                                     .when(crate::features::terminal::herdr_enabled(), |bar| {
