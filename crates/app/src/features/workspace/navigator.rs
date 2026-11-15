@@ -5,14 +5,24 @@
 use super::*;
 use gpui_kit::component::Disableable as _;
 
+#[derive(Clone)]
+enum NavigatorSessionSource {
+    /// One visible pane, which may be an agent or a terminal in a split.
+    Open { space: usize, tab: usize, pane: PaneId, tab_id: usize },
+    /// A session saved in a workspace that has not been restored yet.
+    Saved { space: usize, tab: usize },
+    /// A Herdr terminal not yet represented by any GPUI pane.
+    Herdr { address: String, live: bool },
+}
+
 struct NavigatorSession {
-    tab_index: usize,
-    tab_id: usize,
+    source: NavigatorSessionSource,
+    row_id: String,
     title: String,
     address: Option<String>,
-    /// The runtime working directory, never the Windows workspace fallback
-    /// for a remote Pi agent.
+    /// Real machine working directory; never substitute a Windows cwd for a Pi.
     directory: Option<String>,
+    kind: &'static str,
     icon: IconName,
     running: bool,
     pane_count: usize,
@@ -105,7 +115,10 @@ impl Workspace {
         format!("{machine} · {}", directory.unwrap_or_else(|| "remote cwd unavailable".into()))
     }
 
-    fn navigator_groups(&self) -> Vec<NavigatorMachine> {
+    /// Build the machine tree from both sources of truth: GPUI panes (agents
+    /// and terminals, including splits and other workspaces) and Herdr Core's
+    /// terminal.list. Every Herdr address appears only once.
+    fn navigator_groups(&self, cx: &App) -> Vec<NavigatorMachine> {
         let mut groups = vec![NavigatorMachine {
             key: "local".into(),
             name: "This computer".into(),
@@ -127,58 +140,171 @@ impl Workspace {
             }
         }
 
-        for (tab_index, tab) in self.space().tabs.iter().enumerate() {
-            // A multi-pane tab follows its owning agent, not whichever file
-            // pane currently happens to have keyboard focus.
-            let primary = tab.tree.leaves().into_iter()
-                .find(|id| self.panes.get(id).is_some_and(|pane| {
-                    pane.item.kind == PaneKind::Agent
-                }))
-                .unwrap_or(tab.focused);
-            let Some(pane) = self.panes.get(&primary) else { continue };
-            let herdr = crate::features::terminal::herdr_enabled();
-            let key = if herdr {
-                machine_key(
-                    pane.agent_target.as_ref(),
-                    pane.herdr_address.as_deref(),
-                ).unwrap_or_else(|| "local".into())
-            } else {
-                "local".into()
-            };
-            if !groups.iter().any(|group| group.key == key) {
-                // Keep recovered sessions visible while the machine-list RPC
-                // is temporarily unavailable. This does not assert online.
-                groups.push(NavigatorMachine {
-                    key: key.clone(), name: key.clone(),
-                    connected: false, local: false, sessions: Vec::new(),
-                });
+        let mut shown = std::collections::HashSet::new();
+        let mut add = |key: String, entry: NavigatorSession| {
+            if let Some(address) = &entry.address
+                && !shown.insert(address.clone())
+            {
+                return;
             }
-            if let Some(group) = groups.iter_mut().find(|group| group.key == key) {
-                group.sessions.push(NavigatorSession {
-                    tab_index,
-                    tab_id: tab.id,
-                    title: {
-                        let title = pane.title.to_string();
-                        if title.is_empty() { "Agent".into() } else { title }
-                    },
-                    address: pane.herdr_address.clone(),
-                    directory: if herdr {
-                        session_directory(
-                            pane.agent_target.as_ref(),
-                            pane.herdr_address.as_deref(),
-                            &pane.cwd,
-                            self.machine_snapshot.as_ref(),
-                        )
+            let index = match groups.iter().position(|group| group.key == key) {
+                Some(index) => index,
+                None => {
+                    // A recovered/saved session can exist while discovery is
+                    // offline. Keep it visible without claiming connectivity.
+                    let local = key == "local";
+                    groups.push(NavigatorMachine {
+                        name: if local { "This computer".into() } else { key.clone() },
+                        key,
+                        connected: local,
+                        local,
+                        sessions: Vec::new(),
+                    });
+                    groups.len() - 1
+                }
+            };
+            groups[index].sessions.push(entry);
+        };
+
+        for (space_index, space) in self.spaces.iter().enumerate() {
+            for (tab_index, tab) in space.tabs.iter().enumerate() {
+                // Render EACH agent and terminal pane, not only the first
+                // agent of a multi-pane tab.
+                for pane_id in tab.tree.leaves() {
+                    let Some(pane) = self.panes.get(&pane_id) else { continue };
+                    let kind = match pane.item.kind {
+                        PaneKind::Agent => "Gentle Shell",
+                        PaneKind::Terminal => "Terminal",
+                        _ => continue,
+                    };
+                    let address = pane.herdr_address.clone().or_else(|| {
+                        pane.item.terminal_address.as_ref()
+                            .and_then(|get| get(cx))
+                    });
+                    let key = if crate::features::terminal::herdr_enabled() {
+                        machine_key(pane.agent_target.as_ref(), address.as_deref())
+                            .unwrap_or_else(|| "local".into())
                     } else {
-                        Some(pane.cwd.display().to_string())
+                        "local".into()
+                    };
+                    let title = pane.title.to_string();
+                    let directory = session_directory(
+                        pane.agent_target.as_ref(), address.as_deref(),
+                        &pane.cwd, self.machine_snapshot.as_ref(),
+                    );
+                    add(key, NavigatorSession {
+                        source: NavigatorSessionSource::Open {
+                            space: space_index, tab: tab_index,
+                            pane: pane_id, tab_id: tab.id,
+                        },
+                        row_id: format!("open-{space_index}-{}-{pane_id:?}", tab.id),
+                        title: if title.is_empty() { kind.into() } else { title },
+                        address,
+                        directory,
+                        kind,
+                        icon: pane.item.kind.icon(),
+                        running: self.tab_running(tab),
+                        pane_count: tab.tree.len(),
+                    });
+                }
+            }
+        }
+
+        // Workspaces are lazy. Include their saved agent/terminal panes even
+        // when they have not yet been instantiated in GPUI.
+        for (space_index, space) in self.spaces.iter().enumerate() {
+            let Some((tabs, _)) = &space.saved else { continue };
+            for (tab_index, tab) in tabs.iter().enumerate() {
+                for (pane_index, pane) in tab.layout.leaves().iter().enumerate() {
+                    let kind = match pane.kind {
+                        PaneKind::Agent => "Gentle Shell",
+                        PaneKind::Terminal => "Terminal",
+                        _ => continue,
+                    };
+                    let address = pane.herdr_terminal.clone();
+                    let key = if crate::features::terminal::herdr_enabled() {
+                        machine_key(pane.agent_target.as_ref(), address.as_deref())
+                            .unwrap_or_else(|| "local".into())
+                    } else {
+                        "local".into()
+                    };
+                    add(key, NavigatorSession {
+                        source: NavigatorSessionSource::Saved {
+                            space: space_index, tab: tab_index,
+                        },
+                        row_id: format!("saved-{space_index}-{tab_index}-{pane_index}"),
+                        title: format!("{kind} (saved)"),
+                        directory: session_directory(
+                            pane.agent_target.as_ref(), address.as_deref(),
+                            &pane.cwd, self.machine_snapshot.as_ref(),
+                        ),
+                        address,
+                        kind,
+                        icon: pane.kind.icon(),
+                        running: false,
+                        pane_count: tab.layout.leaves().len(),
+                    });
+                }
+            }
+        }
+
+        if crate::features::terminal::herdr_enabled()
+            && let Some(snapshot) = &self.machine_snapshot
+        {
+            for terminal in &snapshot.terminals {
+                let key = terminal.address.split_once('/')
+                    .map_or_else(|| "local".to_owned(), |(machine, _)| machine.to_owned());
+                let live = terminal.live();
+                add(key, NavigatorSession {
+                    source: NavigatorSessionSource::Herdr {
+                        address: terminal.address.clone(), live,
                     },
-                    icon: pane.item.kind.icon(),
-                    running: self.tab_running(tab),
-                    pane_count: tab.tree.len(),
+                    row_id: format!("herdr-{}", terminal.address),
+                    // Herdr's terminal.list does not reliably distinguish
+                    // Pi agents from plain shells. Known agents above have
+                    // already been classified from their real GPUI pane.
+                    title: terminal.display_title().to_owned(),
+                    address: Some(terminal.address.clone()),
+                    directory: (!terminal.cwd.is_empty())
+                        .then(|| terminal.cwd.clone()),
+                    kind: "Terminal",
+                    icon: IconName::SquareTerminal,
+                    running: live,
+                    pane_count: 1,
                 });
             }
         }
         groups
+    }
+
+    /// Known agent identities are shared with the standalone Machines
+    /// manager so its terminal list can label those entries correctly.
+    pub(super) fn known_herdr_agent_addresses(&self, cx: &App)
+        -> std::collections::HashSet<String>
+    {
+        let mut addresses = std::collections::HashSet::new();
+        for pane in self.panes.values() {
+            if pane.item.kind != PaneKind::Agent { continue; }
+            if let Some(address) = pane.herdr_address.clone().or_else(|| {
+                pane.item.terminal_address.as_ref().and_then(|get| get(cx))
+            }) {
+                addresses.insert(address);
+            }
+        }
+        for space in &self.spaces {
+            if let Some((tabs, _)) = &space.saved {
+                for tab in tabs {
+                    for pane in tab.layout.leaves() {
+                        if pane.kind == PaneKind::Agent
+                            && let Some(address) = &pane.herdr_terminal
+                        {
+                            addresses.insert(address.clone());
+                        }
+                    }
+                }
+            }
+        }
+        addresses
     }
 
     fn toggle_machine_group(&mut self, key: String, cx: &mut Context<Self>) {
@@ -243,7 +369,7 @@ impl Workspace {
     }
 
     pub(super) fn render_machine_navigator(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let groups = self.navigator_groups();
+        let groups = self.navigator_groups(cx);
         let herdr = crate::features::terminal::herdr_enabled();
         let total: usize = groups.iter().map(|g| g.sessions.len()).sum();
         v_flex()
