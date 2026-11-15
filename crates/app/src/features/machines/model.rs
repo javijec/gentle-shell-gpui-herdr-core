@@ -148,6 +148,48 @@ pub fn create_shell_in(machine: Option<&str>, cwd: Option<&str>) -> Result<Strin
         .ok_or_else(|| "Herdr returned no terminal address".to_string())
 }
 
+/// Prepare the machine.add payload without ever starting an agent or shell.
+/// The target can be an SSH config Host, user@host or user@host:port.
+fn machine_add_params(target: &str, name: Option<&str>) -> Result<Value, String> {
+    let target = target.trim();
+    if target.is_empty() || target.len() > 512 || target.starts_with('-')
+        || target.chars().any(char::is_whitespace)
+        || target.chars().any(char::is_control)
+    {
+        return Err("Enter a valid SSH target (for example dietpi@javipi).".into());
+    }
+    let mut params = json!({"target": target});
+    if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) {
+        if name.len() > 64
+            || !name.chars().all(|ch| ch.is_ascii_alphanumeric()
+                || matches!(ch, '-' | '_' | '.'))
+        {
+            return Err("Machine name must contain only letters, numbers, ., - or _ (max 64 characters).".into());
+        }
+        params["name"] = json!(name);
+    }
+    Ok(params)
+}
+
+/// Register a new SSH machine in the local Herdr Core. This is an actual
+/// machine.add RPC, not a remote agent, a terminal, or a GPUI-only bookmark.
+/// Blocking SSH work runs on a background executor in MachinesView.
+pub fn add_machine(target: &str, name: Option<&str>) -> Result<(), String> {
+    let params = machine_add_params(target, name)?;
+    let mut client = client()?;
+    if !client.hello().methods.iter().any(|method| method == "machine.add") {
+        return Err("The connected Herdr Core does not support machine.add. Update hc.".into());
+    }
+    client.call("machine.add", params).map(|_| ()).map_err(|error| {
+        let details = error.to_string();
+        if details.contains("hc_missing") {
+            format!("{details}. Install hc on the remote machine first, or use 'hc machine add TARGET --install' in a terminal.")
+        } else {
+            details
+        }
+    })
+}
+
 pub fn connect_machine(name: &str) -> Result<(), String> {
     let mut client = client()?;
     client.call("machine.connect", json!({"machine": name}))
@@ -158,7 +200,29 @@ pub fn connect_machine(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use super::{parse_machine, parse_terminal};
+    use super::{machine_add_params, parse_machine, parse_terminal};
+
+    #[test]
+    fn machine_registration_uses_ssh_target_and_optional_name() {
+        let request = machine_add_params(" dietpi@javipi:2222 ", Some("pi-home")).unwrap();
+        assert_eq!(request, json!({
+            "target": "dietpi@javipi:2222", "name": "pi-home"
+        }));
+        assert_eq!(machine_add_params("workbox", None).unwrap(),
+            json!({"target":"workbox"}));
+        assert_eq!(machine_add_params("ssh://user@10.0.0.7:2222", Some("")).unwrap(),
+            json!({"target":"ssh://user@10.0.0.7:2222"}));
+    }
+
+    #[test]
+    fn machine_registration_rejects_empty_or_unsafe_values() {
+        for target in ["", " ", "--config", "user@host with spaces", "box\nnext"] {
+            assert!(machine_add_params(target, None).is_err());
+        }
+        for name in ["space name", "bad/name", "bad\nname"] {
+            assert!(machine_add_params("workbox", Some(name)).is_err());
+        }
+    }
 
     #[test]
     fn parses_connected_and_offline_machines() {
