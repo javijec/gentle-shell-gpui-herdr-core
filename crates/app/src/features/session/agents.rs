@@ -408,7 +408,7 @@ impl SessionView {
         if self.process().is_none() {
             self.transcript.notice(
                 NoticeLevel::Warning,
-                "The owning agent is offline; the helper was not stopped.",
+                "The owning agent is offline; the helper was not stopped.".to_string(),
             );
             cx.notify();
             return;
@@ -441,7 +441,7 @@ impl SessionView {
         if self.process().is_none() {
             self.transcript.notice(
                 NoticeLevel::Warning,
-                "The owning agent is offline; the helper cancellation request was not sent.",
+                "The owning agent is offline; the helper cancellation request was not sent.".to_string(),
             );
             cx.notify();
             return;
