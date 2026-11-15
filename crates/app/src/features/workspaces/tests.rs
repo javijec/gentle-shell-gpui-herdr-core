@@ -76,6 +76,7 @@ fn sample() -> SavedState {
         sidebar: false,
         machines_dock_width: 340.,
         files_dock_width: Some(410.),
+        terminated_herdr_sessions: vec!["javipi/t24".into()],
     }
 }
 
@@ -99,6 +100,8 @@ fn json_round_trip() {
     assert_eq!(minimal.files_dock_width, None);
     assert_eq!(back.machines_dock_width, 340.);
     assert_eq!(back.files_dock_width, Some(410.));
+    assert_eq!(back.terminated_herdr_sessions, vec!["javipi/t24"]);
+    assert!(minimal.terminated_herdr_sessions.is_empty());
 
     // Files saved by older versions had no Herdr identity.
     let legacy: SavedPane = serde_json::from_str(
