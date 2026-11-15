@@ -31,7 +31,8 @@ fn valid_remote_path(root: &str, path: &str) -> bool {
     root.starts_with('/') && !root.contains('\\')
         && path.starts_with('/') && !path.contains('\\')
         && path.len() <= 2048 && !path.chars().any(char::is_control)
-        && (path == root || path.starts_with(&(root.to_owned() + "/")))
+        && (root == "/" || path == root
+            || path.starts_with(&(root.to_owned() + "/")))
         && !path.split('/').any(|part| part == "." || part == "..")
 }
 
@@ -258,6 +259,7 @@ mod tests {
     fn blocks_foreign_roots_and_windows_paths() {
         let root = "/srv/project";
         assert!(valid_remote_path(root, "/srv/project/src/file.bin"));
+        assert!(valid_remote_path("/", "/srv/project/src/file.bin"));
         assert!(!valid_remote_path(root, "/srv/project2/file.bin"));
         assert!(!valid_remote_path(root, "/srv/project/../secret"));
         assert!(!valid_remote_path(root, "C:\\Windows\\file.bin"));
