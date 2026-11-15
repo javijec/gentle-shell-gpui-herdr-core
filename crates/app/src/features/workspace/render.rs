@@ -547,13 +547,9 @@ impl Render for Workspace {
                                                         .min_w_0()
                                                         .truncate()
                                                         .text_xs()
-                                                        .text_color(if selected_remote {
-                                                            ui::warning()
-                                                        } else {
-                                                            ui::muted()
-                                                        })
+                                                        .text_color(ui::muted())
                                                         .child(if selected_remote {
-                                                            "Remote Linux files · read-only"
+                                                            "Remote Linux files"
                                                         } else {
                                                             "Local Windows files"
                                                         }),
