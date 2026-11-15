@@ -96,23 +96,27 @@ fn session_directory(
 }
 
 impl Workspace {
-    /// Select the machine that owns the focused runtime pane. Focusing a File
-    /// or History pane falls back to the first actual runtime in the tab;
-    /// it must not turn a JaviPi session into a Windows machine selection.
+    /// The focused agent or terminal owns the active machine. A focused
+    /// auxiliary File or History pane does not pretend to be a local session:
+    /// use the first agent or terminal from the same tab instead.
+    fn selected_runtime_pane(&self) -> Option<&super::Pane> {
+        let tab = self.tab()?;
+        let is_runtime = |pane: &&super::Pane| {
+            pane.item.kind == PaneKind::Agent || pane.item.kind == PaneKind::Terminal
+        };
+        self.panes.get(&tab.focused).filter(is_runtime)
+            .or_else(|| tab.tree.leaves().into_iter()
+                .find_map(|id| self.panes.get(&id).filter(is_runtime)))
+    }
+
+    /// Show the same owner as the active session title label.
     fn active_navigator_machine_key(&self) -> String {
         if !crate::features::terminal::herdr_enabled() {
             return "local".into();
         }
-        let Some(tab) = self.tab() else { return "local".into() };
-        let runtime = |pane: &&super::Pane| {
-            pane.item.kind == PaneKind::Agent || pane.item.kind == PaneKind::Terminal
-        };
-        let pane = self.panes.get(&tab.focused).filter(runtime)
-            .or_else(|| tab.tree.leaves().into_iter()
-                .find_map(|id| self.panes.get(&id).filter(runtime)));
-        pane.and_then(|pane| machine_key(
-            pane.agent_target.as_ref(), pane.herdr_address.as_deref(),
-        )).unwrap_or_else(|| "local".into())
+        self.selected_runtime_pane().and_then(|pane| {
+            machine_key(pane.agent_target.as_ref(), pane.herdr_address.as_deref())
+        }).unwrap_or_else(|| "local".into())
     }
 
     /// Selecting a computer in the compact rail expands *that* group,
@@ -126,19 +130,11 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Machine and runtime path for the selected agent, shown separately
+    /// Machine and runtime path for the active agent or terminal, independent
     /// from the Windows workspace name in the title bar.
     pub(super) fn active_runtime_label(&self) -> String {
-        let Some(tab) = self.tab() else {
-            return "No agent selected".into();
-        };
-        let primary = tab.tree.leaves().into_iter()
-            .find(|id| self.panes.get(id).is_some_and(|pane| {
-                pane.item.kind == PaneKind::Agent
-            }))
-            .unwrap_or(tab.focused);
-        let Some(pane) = self.panes.get(&primary) else {
-            return "No agent selected".into();
+        let Some(pane) = self.selected_runtime_pane() else {
+            return "No agent or terminal selected".into();
         };
         let herdr = crate::features::terminal::herdr_enabled();
         let machine = if herdr {
