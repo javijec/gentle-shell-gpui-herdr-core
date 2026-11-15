@@ -712,7 +712,7 @@ impl Workspace {
                                 IconName::Bot
                             }))
                             .tooltip(if herdr {
-                                "Add SSH machine to Herdr Core"
+                                "Add a machine through Herdr Core"
                             } else {
                                 "New local agent"
                             })
@@ -730,7 +730,7 @@ impl Workspace {
                                 .ghost()
                                 .xsmall()
                                 .icon(Icon::new(IconName::Settings))
-                                .tooltip("Manage Herdr machines and terminals")
+                                .tooltip("Manage registered Herdr machines")
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.open_machines(window, cx)
                                 })),
