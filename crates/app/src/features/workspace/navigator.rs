@@ -12,7 +12,7 @@ enum NavigatorSessionSource {
     /// A session saved in a workspace that has not been restored yet.
     Saved { space: usize, tab: usize },
     /// A Herdr terminal not yet represented by any GPUI pane.
-    Herdr { address: String, live: bool },
+    Herdr { address: String, live: bool, agent: bool },
 }
 
 struct NavigatorSession {
@@ -258,17 +258,21 @@ impl Workspace {
                 add(key, NavigatorSession {
                     source: NavigatorSessionSource::Herdr {
                         address: terminal.address.clone(), live,
+                        agent: terminal.gentle_shell,
                     },
                     row_id: format!("herdr-{}", terminal.address),
-                    // Herdr's terminal.list does not reliably distinguish
-                    // Pi agents from plain shells. Known agents above have
-                    // already been classified from their real GPUI pane.
+                    // The terminal's Herdr labels distinguish bridge agents
+                    // from shells, including agents not yet opened in GPUI.
                     title: terminal.display_title().to_owned(),
                     address: Some(terminal.address.clone()),
                     directory: (!terminal.cwd.is_empty())
                         .then(|| terminal.cwd.clone()),
-                    kind: "Terminal",
-                    icon: IconName::SquareTerminal,
+                    kind: if terminal.gentle_shell { "Gentle Shell" } else { "Terminal" },
+                    icon: if terminal.gentle_shell {
+                        IconName::Bot
+                    } else {
+                        IconName::SquareTerminal
+                    },
                     running: live,
                     pane_count: 1,
                 });
@@ -646,10 +650,10 @@ impl Workspace {
                                                                     this.switch_workspace(*space, window, cx);
                                                                     this.activate(*tab, window, cx);
                                                                 }
-                                                                NavigatorSessionSource::Herdr { address, live } => {
+                                                                NavigatorSessionSource::Herdr { address, live, agent } => {
                                                                     if *live {
-                                                                        this.show_or_attach_herdr_terminal(
-                                                                            address.clone(), window, cx,
+                                                                        this.show_or_attach_herdr_session(
+                                                                            address.clone(), *agent, window, cx,
                                                                         );
                                                                     }
                                                                 }
