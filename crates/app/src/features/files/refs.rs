@@ -34,6 +34,10 @@ pub enum RefsEvent {
     OpenAgent(PathBuf),
     /// Open local commit history for this repository.
     OpenHistory(PathBuf),
+    /// Open the same History pane through the currently selected Herdr agent.
+    RemoteOpenHistory,
+    /// Open an existing remote worktree under the same Herdr machine.
+    RemoteOpenWorktree(String),
     /// Herdr uses the same Branches UI; its owner executes the guarded switch.
     SwitchRemoteBranch(String),
     RemoteStash { name: String, action: StashAction },
@@ -554,6 +558,14 @@ impl RefsView {
                     IconName::FolderGit, ui::muted(), title, ui::fg(),
                     Some(detail(format!("{}{}", tree.path, status))),
                 )
+                .when(!prunable, |element| {
+                    let selected = name.clone();
+                    element.cursor_pointer().on_click(
+                        cx.listener(move |_, _, _, cx| {
+                            cx.emit(RefsEvent::RemoteOpenWorktree(selected.clone()));
+                        }),
+                    )
+                })
                 .context_menu(move |menu, _, _| {
                     let weak_action = weak.clone();
                     let name = name.clone();
@@ -991,6 +1003,8 @@ impl RefsView {
                     |sha| format!("Detached at {sha}"),
                 )
             });
+            let upstream = head.upstream.clone()
+                .unwrap_or_else(|| "No upstream".into());
             return Some(v_flex()
                 .flex_none().px_3().py_2p5().gap_0p5()
                 .child(h_flex().gap_2()
@@ -998,9 +1012,20 @@ impl RefsView {
                         .small().text_color(ui::muted()))
                     .child(div().flex_1().min_w_0().truncate()
                         .text_size(px(13.5)).font_weight(FontWeight::MEDIUM)
-                        .text_color(ui::fg()).child(name)))
+                        .text_color(ui::fg()).child(name))
+                    .child(ahead_behind(head.ahead, head.behind))
+                    .child(
+                        Button::new("refs-remote-history")
+                            .ghost().xsmall()
+                            .icon(Icon::new(IconName::GitGraph))
+                            .tooltip("Commit history")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(RefsEvent::RemoteOpenHistory)
+                            })),
+                    ))
                 .child(div().pl(px(22.)).text_size(px(12.))
-                    .text_color(ui::muted()).child("Herdr · remote repository")));
+                    .text_color(ui::muted())
+                    .child(format!("{upstream} · Herdr remote repository"))));
         }
         let repo = self.snapshot()?;
         let head = &repo.refs.head;

@@ -17,6 +17,26 @@ pub(super) fn remote_file_in_root(root: &str, path: &str) -> bool {
     root == "/" || path.starts_with(&(root.to_owned() + "/"))
 }
 
+/// Guard new-agent navigation against an absolute path from any other
+/// machine or from a manipulated Git RPC response. Worktrees live under a
+/// sibling private directory owned by the selected Linux repository.
+pub(super) fn remote_worktree_agent_path(root: &str, target: &str) -> bool {
+    if root.is_empty() || root == "/" || !root.starts_with('/')
+        || root.ends_with('/') || root.contains('\\')
+        || root.bytes().any(|byte| byte < 32 || byte == 127)
+        || target.len() > 2048 || target.contains('\\')
+        || target.bytes().any(|byte| byte < 32 || byte == 127)
+        || target.split('/').any(|part| part == "." || part == "..")
+    {
+        return false;
+    }
+    let prefix = format!("{root}.worktrees/");
+    let Some(relative) = target.strip_prefix(&prefix) else {
+        return false;
+    };
+    !relative.is_empty() && relative.split('/').all(|part| !part.is_empty())
+}
+
 impl Workspace {
     /// Open the common Commit History graph with the current Linux agent as
     /// its source. No Windows Git lookup or extra Pi session is created.
@@ -454,6 +474,35 @@ impl Workspace {
             |this, source, event: &RemoteFilesEvent, window, cx| {
                 match event {
                     RemoteFilesEvent::Close => this.toggle_files_panel(cx),
+                    RemoteFilesEvent::OpenHistory => {
+                        if this.active_session().as_ref()
+                            != Some(source.read(cx).session())
+                        {
+                            return;
+                        }
+                        this.open_remote_history(window, cx);
+                    },
+                    RemoteFilesEvent::OpenWorktreeAgent(path) => {
+                        if this.active_session().as_ref()
+                            != Some(source.read(cx).session())
+                        {
+                            return;
+                        }
+                        let Some((_, machine, root)) = this.selected_remote_files(cx) else {
+                            return;
+                        };
+                        if !remote_worktree_agent_path(&root, path) {
+                            window.push_notification(Notification::info(
+                                "Remote worktree path is outside the selected repository.",
+                            ), cx);
+                            return;
+                        }
+                        this.open_agent_on_machine(
+                            pi_rpc::AgentTarget::Remote {
+                                machine, cwd: path.clone(),
+                            }, window, cx,
+                        );
+                    },
                     RemoteFilesEvent::RelayFile { path, target_terminal } => {
                         let origin = source.read(cx).session().clone();
                         this.relay_remote_file(
@@ -498,7 +547,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::remote_file_in_root;
+    use super::{remote_file_in_root, remote_worktree_agent_path};
 
     #[test]
     fn remote_file_navigation_is_machine_and_root_scoped() {
@@ -515,5 +564,21 @@ mod tests {
         assert!(!remote_file_in_root("/", "/"));
         assert!(remote_file_in_root("/", "/etc/hosts"));
         assert!(!remote_file_in_root("/", "/etc/../hosts"));
+    }
+    #[test]
+    fn worktree_agent_target_must_be_private_sibling_on_same_machine() {
+        let root = "/srv/workspaces/JaviPi";
+        assert!(remote_worktree_agent_path(root,
+            "/srv/workspaces/JaviPi.worktrees/feature-demo"));
+        assert!(!remote_worktree_agent_path(root,
+            "/srv/workspaces/Other.worktrees/feature-demo"));
+        assert!(!remote_worktree_agent_path(root,
+            "/srv/workspaces/JaviPi.worktrees/../Other"));
+        assert!(!remote_worktree_agent_path(root,
+            "/srv/workspaces/JaviPi.worktrees//feature-demo"));
+        assert!(!remote_worktree_agent_path(root, "C:\\Windows\\other"));
+        assert!(!remote_worktree_agent_path(root,
+            "/srv/workspaces/JaviPi.worktrees-backup/feature-demo"));
+        assert!(!remote_worktree_agent_path("/", "/.worktrees/example"));
     }
 }

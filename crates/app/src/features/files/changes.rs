@@ -43,7 +43,13 @@ pub enum ChangesEvent {
     /// Routed by the owning Herdr controller, not native Git.
     RemoteStage { path: String, index: char, worktree: char, stage: bool },
     RemoteOpenDiff(String),
-    RemoteCommit(String),
+    /// File navigation stays bound to the active Herdr agent, not Windows.
+    RemoteOpenFile(String),
+    RemoteCommit { summary: String, description: String, amend: bool, push: bool },
+    /// Generate the commit message using the Gentle Shell installation on JaviPi.
+    RemoteGenerateMessage,
+    /// Prefill an amend with the actual Linux repository's last commit.
+    RemoteLastCommitMessage,
     RemoteBulkStage { stage: bool },
     RemoteStashPush(String),
     RemoteDiscard { path: String, index: char, worktree: char, staged: bool },
@@ -101,7 +107,7 @@ pub struct ChangesView {
     remote_tree: Option<WorkTree>,
     remote_writable: bool,
     remote_busy: bool,
-    remote_confirm_commit: Option<String>,
+    remote_confirm_commit: Option<(String, String, bool, bool)>,
     tree_mode: bool,
     collapsed: HashSet<(Side, String)>,
     selected: Option<(Side, String)>,
@@ -202,6 +208,12 @@ impl ChangesView {
         if !self.remote {
             return;
         }
+        // A branch switch must not inherit Amend from the previous branch.
+        let old_branch = self.remote_tree.as_ref().and_then(|tree| tree.branch.head.as_ref());
+        let new_branch = tree.as_ref().and_then(|tree| tree.branch.head.as_ref());
+        if old_branch != new_branch {
+            self.amend = false;
+        }
         self.remote_tree = tree;
         self.remote_writable = writable;
         self.remote_confirm_commit = None;
@@ -226,6 +238,57 @@ impl ChangesView {
     pub(super) fn set_remote_busy(&mut self, busy: bool, cx: &mut Context<Self>) {
         if self.remote {
             self.remote_busy = busy;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_remote_generating(&mut self, generating: bool, cx: &mut Context<Self>) {
+        if self.remote {
+            self.generating = generating;
+            if generating {
+                self.error = None;
+            }
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_remote_message(
+        &mut self, summary: String, description: String,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if !self.remote { return; }
+        self.summary.update(cx, |input, cx| input.set_value(summary, window, cx));
+        self.description.update(cx, |input, cx| input.set_value(description, window, cx));
+        self.remote_confirm_commit = None;
+        self.error = None;
+        cx.notify();
+    }
+
+    pub(super) fn set_remote_last_message(
+        &mut self, summary: String, description: String,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if self.remote && self.amend && self.summary_text(cx).is_empty()
+            && self.description.read(cx).value().trim().is_empty()
+        {
+            self.set_remote_message(summary, description, window, cx);
+        }
+    }
+
+    pub(super) fn remote_commit_completed(
+        &mut self, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if !self.remote { return; }
+        self.amend = false;
+        self.remote_confirm_commit = None;
+        self.summary.update(cx, |input, cx| input.set_value("", window, cx));
+        self.description.update(cx, |input, cx| input.set_value("", window, cx));
+        cx.notify();
+    }
+
+    pub(super) fn set_remote_error(&mut self, error: String, cx: &mut Context<Self>) {
+        if self.remote {
+            self.error = Some(error);
             cx.notify();
         }
     }
@@ -474,7 +537,24 @@ impl ChangesView {
                     let entry = entry.clone();
                     let staged = side == Side::Staged;
                     let _ = this.update(cx, |this, cx| {
-                        this.git_op(move |top| git::discard(top, &entry, staged), cx)
+                        if this.remote {
+                            let matching_snapshot = this.remote_writable && !this.remote_busy
+                                && this.tree().is_some_and(|tree| tree.entries.iter().any(|item| {
+                                    item.path == entry.path
+                                        && item.index == entry.index
+                                        && item.worktree == entry.worktree
+                                }));
+                            if matching_snapshot {
+                                cx.emit(ChangesEvent::RemoteDiscard {
+                                    path: entry.path.clone(),
+                                    index: entry.index,
+                                    worktree: entry.worktree,
+                                    staged,
+                                });
+                            }
+                        } else {
+                            this.git_op(move |top| git::discard(top, &entry, staged), cx);
+                        }
                     });
                     true
                 })
@@ -921,7 +1001,7 @@ impl ChangesView {
                 );
             let path = entry.path.clone();
             let menu_entry = entry.clone();
-            let discard_weak = cx.entity().downgrade();
+            let weak = cx.entity().downgrade();
             let writable = self.remote_writable && !self.remote_busy;
             return change_row(
                 SharedString::from(id), &entry.path, badge, selected, indent, control,
@@ -931,18 +1011,57 @@ impl ChangesView {
             }))
             .context_menu(move |menu, _, _| {
                 let entry = menu_entry.clone();
-                let weak = discard_weak.clone();
-                menu.item(PopupMenuItem::new("Discard changes…")
-                    .icon(Icon::new(IconName::Undo2))
-                    .disabled(!writable || entry.kind == EntryKind::Conflict)
-                    .on_click(move |_, _, cx| {
+                let deleted = side == Side::Unstaged && entry.worktree == 'D'
+                    || side == Side::Staged && entry.index == 'D';
+                let open = {
+                    let (weak, path) = (weak.clone(), entry.path.clone());
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                         let _ = weak.update(cx, |_, cx| {
-                            cx.emit(ChangesEvent::RemoteDiscard {
-                                path: entry.path.clone(), index: entry.index,
-                                worktree: entry.worktree, staged: side == Side::Staged,
-                            });
+                            cx.emit(ChangesEvent::RemoteOpenFile(path.clone()));
                         });
+                    }
+                };
+                let toggle = {
+                    let (weak, entry) = (weak.clone(), entry.clone());
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.toggle(&entry, side, cx);
+                        });
+                    }
+                };
+                let discard = {
+                    let (weak, entry) = (weak.clone(), entry.clone());
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.confirm_discard(entry.clone(), side, window, cx);
+                        });
+                    }
+                };
+                menu.item(
+                    PopupMenuItem::new("Open file")
+                        .icon(Icon::new(IconName::File))
+                        .disabled(deleted)
+                        .on_click(open),
+                )
+                .item(
+                    PopupMenuItem::new(match side {
+                        Side::Unstaged => "Stage",
+                        Side::Staged => "Unstage",
+                    })
+                    .icon(Icon::new(match side {
+                        Side::Unstaged => IconName::Plus,
+                        Side::Staged => IconName::Minus,
                     }))
+                    .disabled(!writable || entry.kind == EntryKind::Conflict)
+                    .on_click(toggle),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Discard changes…")
+                        .icon(Icon::new(IconName::Undo2))
+                        .disabled(!writable || entry.kind == EntryKind::Conflict)
+                        .on_click(discard),
+                )
             })
             .into_any_element();
         }
@@ -1066,21 +1185,34 @@ impl ChangesView {
             .into_any_element()
     }
 
-    fn submit_remote_commit(&mut self, cx: &mut Context<Self>) {
-        if !self.remote || !self.tree().is_some_and(|tree| {
-            tree.entries.iter().any(|entry| entry.staged().is_some())
-        }) {
+    fn submit_remote_commit(&mut self, push: bool, cx: &mut Context<Self>) {
+        if !self.remote || !self.remote_writable || self.remote_busy || self.generating
+            || !self.tree().is_some_and(|tree| {
+                tree.entries.iter().any(|entry| entry.staged().is_some())
+                    || (self.amend && tree.branch.oid.is_some())
+            })
+        {
             return;
         }
         let summary = self.summary_text(cx);
-        if summary.is_empty() {
+        let description = self.description.read(cx).value().to_string();
+        if summary.is_empty() || summary.len() > 120
+            || summary.chars().any(char::is_control)
+            || description.len() > 4000 || description.contains('\0')
+        {
             return;
         }
-        if self.remote_confirm_commit.as_deref() == Some(summary.as_str()) {
+        let reviewed = (summary, description, self.amend, push);
+        if self.remote_confirm_commit.as_ref() == Some(&reviewed) {
             self.remote_confirm_commit = None;
-            cx.emit(ChangesEvent::RemoteCommit(summary));
+            cx.emit(ChangesEvent::RemoteCommit {
+                summary: reviewed.0,
+                description: reviewed.1,
+                amend: reviewed.2,
+                push: reviewed.3,
+            });
         } else {
-            self.remote_confirm_commit = Some(summary);
+            self.remote_confirm_commit = Some(reviewed);
         }
         cx.notify();
     }
@@ -1088,24 +1220,81 @@ impl ChangesView {
     fn render_commit(&self, cx: &mut Context<Self>) -> Div {
         if self.remote {
             let summary = self.summary_text(cx);
+            let description = self.description.read(cx).value().to_string();
             let staged = self.tree().is_some_and(|tree| {
                 tree.entries.iter().any(|entry| entry.staged().is_some())
             });
-            let confirmed = !summary.is_empty()
-                && self.remote_confirm_commit.as_deref() == Some(summary.as_str());
+            let has_head = self.tree().is_some_and(|tree| tree.branch.oid.is_some());
+            let ready = staged || (self.amend && has_head);
+            let confirmed = self.remote_confirm_commit.as_ref()
+                == Some(&(summary.clone(), description.clone(), self.amend, false));
+            let push_confirmed = self.remote_confirm_commit.as_ref()
+                == Some(&(summary.clone(), description.clone(), self.amend, true));
+            let disabled = !ready || summary.is_empty() || summary.len() > 120
+                || summary.chars().any(char::is_control)
+                || description.len() > 4000 || description.contains('\0')
+                || !self.remote_writable || self.remote_busy || self.generating;
             return v_flex()
                 .flex_none().mx_2().mb_2().mt_1().px_3().py_2().gap_1()
                 .rounded_xl().bg(ui::surface())
                 .child(Input::new(&self.summary).appearance(false))
+                .child(
+                    div().min_h(px(48.)).text_size(px(13.))
+                        .text_color(ui::muted())
+                        .child(Textarea::new(&self.description).appearance(false)),
+                )
+                .child(
+                    h_flex().gap_2()
+                        .child(Button::new("changes-remote-write")
+                            .ghost().xsmall()
+                            .icon(Icon::new(IconName::Sparkles))
+                            .label("Write it")
+                            .loading(self.generating)
+                            .disabled(!staged || !self.remote_writable
+                                || self.remote_busy || self.generating)
+                            .tooltip("Write the message from the remote staged diff")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(ChangesEvent::RemoteGenerateMessage);
+                            })))
+                        .child(Button::new("changes-remote-amend")
+                            .ghost().xsmall().label("Amend")
+                            .selected(self.amend)
+                            .disabled(!has_head || !self.remote_writable
+                                || self.remote_busy || self.generating)
+                            .tooltip("Rewrite the latest remote commit instead of creating a new one")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.amend = !this.amend;
+                                this.remote_confirm_commit = None;
+                                if this.amend && this.summary_text(cx).is_empty()
+                                    && this.description.read(cx).value().trim().is_empty()
+                                {
+                                    cx.emit(ChangesEvent::RemoteLastCommitMessage);
+                                }
+                                cx.notify();
+                            })))
+                )
                 .child(Button::new("changes-remote-commit")
                     .primary().small().w_full()
                     .label(if confirmed { "Confirm commit" } else { "Commit" })
-                    .disabled(!staged || summary.is_empty() || summary.len() > 120
-                        || !self.remote_writable || self.remote_busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.submit_remote_commit(cx))))
-                .when(confirmed, |row| row.child(
+                    .disabled(disabled)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.submit_remote_commit(false, cx);
+                    })))
+                .child(Button::new("changes-remote-commit-push")
+                    .small().w_full()
+                    .label(if push_confirmed { "Confirm commit & push" } else { "Commit & Push" })
+                    .disabled(disabled || !self.tree().is_some_and(|tree| tree.branch.head.is_some()))
+                    .tooltip("Commit on the selected Linux agent, then push its current branch")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.submit_remote_commit(true, cx);
+                    })))
+                .when(confirmed || push_confirmed, |row| row.child(
                     div().text_xs().text_color(ui::warning())
-                        .child("Review staged changes before confirming the remote commit"),
+                        .child("Review the exact message and action before confirming"),
+                ))
+                .when_some(self.error.clone(), |row, error| row.child(
+                    div().max_h(px(96.)).overflow_y_scrollbar()
+                        .text_xs().text_color(ui::danger()).child(error),
                 ));
         }
         let ready = matches!(self.repo, Some(Some(_)));

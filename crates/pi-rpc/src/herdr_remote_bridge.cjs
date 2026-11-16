@@ -1459,6 +1459,72 @@ async function remoteGit(req) {
   if (req.type === "herdr_git_head") {
     return await gitRefState(toplevel);
   }
+  if (req.type === "herdr_git_last_commit") {
+    const state = await gitRefState(toplevel);
+    if (!state.headOid || state.headOid !== req.expectedHead ||
+        state.currentBranch !== req.expectedBranch) {
+      throw new Error("Remote HEAD changed. Refresh before amending");
+    }
+    const raw = strictUtf8(await runGit(toplevel, [
+      "log", "-1", "--format=%s%x00%b",
+    ]));
+    const cut = raw.indexOf("\0");
+    if (cut < 1) throw new Error("Invalid last commit message");
+    const summary = raw.slice(0, cut).trim();
+    const description = raw.slice(cut + 1).trim();
+    if (!summary || Buffer.byteLength(summary, "utf8") > 120 ||
+        /[\x00-\x1f\x7f]/.test(summary) ||
+        Buffer.byteLength(description, "utf8") > 4000) {
+      throw new Error("The last message exceeds the remote commit editor limit");
+    }
+    return { summary, description };
+  }
+  if (req.type === "herdr_git_generate_message") {
+    // A second headless Gentle Shell invocation runs only on explicit user
+    // action; --no-tools and --no-session keep it isolated from the live Pi.
+    await checkGitRefRequest(req, toplevel);
+    if (!await checkGitIndexRequest(req, toplevel)) {
+      throw new Error("Stage changes before generating a commit message");
+    }
+    const raw = strictUtf8(await runGit(toplevel, [
+      "diff", "--cached", "--no-ext-diff", "--no-textconv",
+      "--no-color", "--",
+    ]));
+    const diff = Buffer.byteLength(raw, "utf8") > 24000
+      ? raw.slice(0, 12000) + "\n[diff truncated]" : raw;
+    if (!diff.trim()) throw new Error("Staged diff is empty");
+    const prompt =
+      "Write a Conventional Commits git message for this staged diff. " +
+      "Reply with a summary of at most 72 characters, then a blank line " +
+      "and an optional short body. Reply only with the message.\n\n<diff>\n" +
+      diff + "\n</diff>\n";
+    const output = await new Promise((resolve, reject) => {
+      execFile(agentBin, ["--print", "--no-session", "--no-tools", prompt],
+        { cwd: toplevel, env: { ...process.env, GENTLE_SHELL_INTERACTIVE_HOST: "" },
+          timeout: 90000, maxBuffer: 65536, shell: false },
+        (error, stdout) => error ? reject(
+          new Error("Remote Gentle Shell message generation failed: " + error.message)
+        ) : resolve(stdout));
+    });
+    // The model cannot mutate Git. Reject stale results if stage/HEAD moved.
+    await checkGitRefRequest(req, toplevel);
+    await checkGitIndexRequest(req, toplevel);
+    const lines = String(output).split(/\r?\n/)
+      .filter((line) => !line.trimStart().startsWith("```"));
+    const first = lines.findIndex((line) => line.trim() &&
+      !/^commit message:?$/i.test(line.trim()));
+    if (first < 0) throw new Error("Remote Gentle Shell returned no commit message");
+    const summary = lines[first].trim().replace(/^Summary:\s*/i, "")
+      .replace(/^[\x22'`]+|[\x22'`]+$/g, "");
+    const description = lines.slice(first + 1).join("\n").trim();
+    if (!summary || Buffer.byteLength(summary, "utf8") > 120 ||
+        /[\x00-\x1f\x7f]/.test(summary) ||
+        Buffer.byteLength(description, "utf8") > 4000 ||
+        description.includes("\0")) {
+      throw new Error("Generated commit message exceeds editor limits");
+    }
+    return { summary, description };
+  }
   if (req.type === "herdr_git_history") {
     // Share the native History graph's Git record format without invoking Pi
     // tools or leaking the Linux repository into Windows Git.
@@ -1993,6 +2059,7 @@ async function remoteGitWrite(req) {
     await checkGitRefRequest(req, toplevel);
     const hasStaged = await checkGitIndexRequest(req, toplevel);
     let trashed = null;
+    let newWorktreePath = null;
     if (req.type === "herdr_git_stage" || req.type === "herdr_git_unstage") {
       const relative = await selectedGitEntry(req, toplevel);
       const literal = ":(literal)" + relative;
@@ -2078,7 +2145,10 @@ async function remoteGitWrite(req) {
                 "herdr_git_push"].includes(req.type)) {
       await guardedNetworkAction(req, toplevel);
     } else if (req.type.startsWith("herdr_git_worktree_")) {
-      await guardedWorktreeAction(req, toplevel);
+      const result = await guardedWorktreeAction(req, toplevel);
+      if (req.type === "herdr_git_worktree_add") {
+        newWorktreePath = result.path;
+      }
     } else if (req.type === "herdr_git_commit") {
       if (!req.expectedBranch) {
         throw new Error("Cannot commit from a detached HEAD");
@@ -2094,12 +2164,39 @@ async function remoteGitWrite(req) {
           message.includes("\0")) {
         throw new Error("Invalid commit description");
       }
-      if (!hasStaged) {
+      if ((req.amend !== undefined && typeof req.amend !== "boolean") ||
+          (req.push !== undefined && typeof req.push !== "boolean")) {
+        throw new Error("Invalid commit action flags");
+      }
+      const amend = req.amend === true;
+      const push = req.push === true;
+      if (amend && !req.expectedHead) {
+        throw new Error("Amend requires an existing commit");
+      }
+      if (!hasStaged && !amend) {
         throw new Error("No staged changes to commit");
       }
-      const args = ["commit", "--no-verify", "--no-gpg-sign", "-m", summary];
+      // Validate the configured transport before changing HEAD. A credential
+      // or network failure after the commit must be surfaced explicitly.
+      if (push) {
+        await gitNetworkDestination(toplevel, validatedBranchName(req.expectedBranch), false);
+      }
+      const args = ["commit", "--no-verify", "--no-gpg-sign",
+        ...(amend ? ["--amend"] : []), "-m", summary];
       if (message.trim()) args.push("-m", message.trim());
       await runGitMutation(toplevel, args);
+      if (push) {
+        try {
+          // A successful first commit has a new HEAD even when the reviewed
+          // snapshot described an unborn branch.
+          const committedHead = (await gitRefState(toplevel)).headOid;
+          await guardedNetworkAction({
+            ...req, type: "herdr_git_push", expectedHead: committedHead,
+          }, toplevel);
+        } catch (error) {
+          throw new Error("Commit succeeded, but push failed: " + error.message);
+        }
+      }
     } else if (req.type === "herdr_git_create_branch" ||
                req.type === "herdr_git_switch_branch") {
       if (!req.expectedBranch || !req.expectedHead) {
@@ -2129,6 +2226,7 @@ async function remoteGitWrite(req) {
     return {
       toplevel, operation: req.type, ...await gitRefState(toplevel),
       ...(trashed ? { trashToken: trashed.token, trashedPath: trashed.path } : {}),
+      ...(newWorktreePath ? { newWorktreePath } : {}),
     };
   } finally {
     gitWriteInFlight.delete(toplevel);
@@ -2146,6 +2244,7 @@ async function remoteGitRequest(req) {
       throw new Error("Missing request identifier");
     }
     if (!["herdr_palette_snapshot", "herdr_git_head", "herdr_git_history",
+          "herdr_git_last_commit", "herdr_git_generate_message",
           "herdr_git_snapshot", "herdr_git_diff",
           ...GIT_MUTATIONS].includes(command)) {
       throw new Error("Unsupported remote Git operation");
@@ -2207,6 +2306,8 @@ function inputLine() {
         } else if (request && (request.type === "herdr_palette_snapshot" ||
                                request.type === "herdr_git_head" ||
                                request.type === "herdr_git_history" ||
+                               request.type === "herdr_git_last_commit" ||
+                               request.type === "herdr_git_generate_message" ||
                                request.type === "herdr_git_snapshot" ||
                                request.type === "herdr_git_diff" ||
                                GIT_MUTATIONS.includes(request.type))) {

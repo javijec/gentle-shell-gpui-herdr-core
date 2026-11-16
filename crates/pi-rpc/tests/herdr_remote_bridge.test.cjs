@@ -12,7 +12,7 @@ const source = fs.readFileSync(
   path.join(__dirname, "../src/herdr_remote_bridge.cjs"), "utf8"
 );
 
-function harness(cwd = "/srv/workspaces/JaviPi") {
+function harness(cwd = "/srv/workspaces/JaviPi", envOverrides = {}) {
   const stdout = [];
   const childWrites = [];
   let killed = false;
@@ -31,7 +31,7 @@ function harness(cwd = "/srv/workspaces/JaviPi") {
   const timers = [];
   const fakeProcess = {
     argv: ["node", "t123"],
-    env: { PATH: "/usr/bin", HOME: "/home/dietpi" },
+    env: { PATH: "/usr/bin", HOME: "/home/dietpi", ...envOverrides },
     cwd: () => cwd,
     getuid: typeof process.getuid === "function" ? () => process.getuid() : undefined,
     stdout: { write: (value) => stdout.push(value) },
@@ -58,7 +58,7 @@ function harness(cwd = "/srv/workspaces/JaviPi") {
     // Remote Files uses built-in fs and SHA-256 for opt-in revision-checked
     // writes; no I/O occurs until the matching private command arrives.
     assert.ok(["node:fs/promises", "node:fs", "node:crypto",
-               "node:path", "node:util"].includes(name));
+               "node:path", "node:util", "node:perf_hooks"].includes(name));
     return require(name);
   };
   const execute = new Function(
@@ -1568,6 +1568,167 @@ test("5D refuses a commit when the staged index changed since the snapshot", {
     assert.equal(cp.execFileSync("git", ["-C", root,
       "log", "-1", "--format=%s"]).toString().trim(), "Initial");
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test("8C guarded remote amend updates the message without staged files", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const cp = require("node:child_process");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-8c-amend-"));
+  try {
+    gitInit(root);
+    const h = harness(root);
+    const original = await gitSnapshot(h, root, "amend-s1");
+    const withoutStage = await gitWrite(h, root, original,
+      "herdr_git_commit", "amend-refuse", {
+        summary: "fix: rewritten", description: "Explanation", amend: false,
+      });
+    assert.equal(withoutStage.success, false);
+    const amended = await gitWrite(h, root, original,
+      "herdr_git_commit", "amend-yes", {
+        summary: "fix: rewritten", description: "Explanation", amend: true,
+      });
+    assert.equal(amended.success, true, amended.error);
+    const message = cp.execFileSync("git",
+      ["-C", root, "log", "-1", "--format=%B"]).toString();
+    assert.match(message, /^fix: rewritten\n\nExplanation\n/);
+    assert.notEqual(amended.data.headOid, original.headOid);
+    const stale = await gitWrite(h, root, original,
+      "herdr_git_commit", "amend-stale", {
+        summary: "fix: shouldn't happen", amend: true,
+      });
+    assert.equal(stale.success, false);
+    assert.match(stale.error, /HEAD or branch changed/);
+    assert.equal(h.childWrites.length, 1, "private Git bridge only");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("8C Commit & Push preflights remote transport before changing HEAD", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const cp = require("node:child_process");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-8c-push-"));
+  try {
+    const git = gitInit(root);
+    fs.writeFileSync(path.join(root, "tracked.txt"), "staged\n");
+    git("add", "--", "tracked.txt");
+    const h = harness(root);
+    const snap = await gitSnapshot(h, root, "push-s1");
+    const failed = await gitWrite(h, root, snap,
+      "herdr_git_commit", "push-no-remote", {
+        summary: "fix: check remote first", push: true,
+      });
+    assert.equal(failed.success, false);
+    assert.match(failed.error, /safe configured Git remote/);
+    assert.equal(cp.execFileSync("git",
+      ["-C", root, "rev-parse", "HEAD"]).toString().trim(), snap.headOid);
+    assert.equal(cp.execFileSync("git",
+      ["-C", root, "diff", "--cached", "--name-only"]).toString().trim(), "tracked.txt");
+    assert.equal(h.childWrites.length, 1, "no Windows Git fallback or Pi bash");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test("8C last commit prefill is bound to the reviewed HEAD and agent root", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-8c-last-"));
+  try {
+    gitInit(root);
+    const h = harness(root);
+    const snap = await gitSnapshot(h, root, "last-snap");
+    rpcInput(h, {
+      id: "last-ok", type: "herdr_git_last_commit", root,
+      expectedHead: snap.headOid, expectedBranch: snap.currentBranch,
+    });
+    const reply = await fsReply(h, "last-ok");
+    assert.equal(reply.success, true, reply.error);
+    assert.equal(reply.data.summary, "Initial");
+    rpcInput(h, {
+      id: "last-old", type: "herdr_git_last_commit", root,
+      expectedHead: "f".repeat(40), expectedBranch: snap.currentBranch,
+    });
+    assert.equal((await fsReply(h, "last-old")).success, false);
+    assert.equal(h.childWrites.length, 1, "only private read commands");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("8C Write it uses a bounded, no-tools remote CLI and rejects stale index", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-8c-message-"));
+  try {
+    const fakeCli = path.join(root, "fake-gentle-shell");
+    fs.writeFileSync(fakeCli, [
+      "#!/bin/sh",
+      'test "$1" = "--print" && test "$2" = "--no-session" && test "$3" = "--no-tools" || exit 5',
+      "printf 'feat: remote message\\n\\nSafe preview\\n'",
+    ].join("\n") + "\n", { mode: 0o700 });
+    const git = gitInit(root);
+    fs.writeFileSync(path.join(root, "tracked.txt"), "staged edit\n");
+    git("add", "--", "tracked.txt");
+    const h = harness(root, { GENTLE_SHELL_BIN: fakeCli });
+    const snap = await gitSnapshot(h, root, "message-snap");
+    rpcInput(h, {
+      id: "message-ok", type: "herdr_git_generate_message", root,
+      toplevel: snap.toplevel, expectedHead: snap.headOid,
+      expectedBranch: snap.currentBranch, expectedIndexToken: snap.indexToken,
+    });
+    const result = await fsReply(h, "message-ok");
+    assert.equal(result.success, true, result.error);
+    assert.equal(result.data.summary, "feat: remote message");
+    assert.equal(result.data.description, "Safe preview");
+    git("reset", "-q", "HEAD", "--", "tracked.txt");
+    rpcInput(h, {
+      id: "message-old", type: "herdr_git_generate_message", root,
+      toplevel: snap.toplevel, expectedHead: snap.headOid,
+      expectedBranch: snap.currentBranch, expectedIndexToken: snap.indexToken,
+    });
+    const stale = await fsReply(h, "message-old");
+    assert.equal(stale.success, false);
+    assert.match(stale.error, /index changed/i);
+    assert.equal(h.childWrites.length, 1, "no Git command delegated to Pi");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test("8C worktree add returns the scoped Linux path for auto-opening an agent", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-8c-wt-"));
+  try {
+    const git = gitInit(root);
+    git("branch", "feature-8c");
+    const h = harness(root);
+    const snapshot = await gitSnapshot(h, root, "wt-snap");
+    const add = await gitWrite(h, root, snapshot,
+      "herdr_git_worktree_add", "wt-add", {
+        branch: "feature-8c", newBranch: false,
+      });
+    assert.equal(add.success, true, add.error);
+    const created = add.data.newWorktreePath;
+    assert.equal(typeof created, "string");
+    assert.ok(created.startsWith(root + ".worktrees/"));
+    assert.ok(fs.statSync(created).isDirectory());
+    assert.equal(h.childWrites.length, 1, "worktree operations never call Pi bash");
+  } finally {
+    fs.rmSync(root + ".worktrees", { recursive: true, force: true });
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

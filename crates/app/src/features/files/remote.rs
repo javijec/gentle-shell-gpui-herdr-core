@@ -37,6 +37,10 @@ use crate::shared::ui;
 
 pub enum RemoteFilesEvent {
     InsertPath(String),
+    /// Open the same History pane for the owning remote session.
+    OpenHistory,
+    /// Open a newly created or existing remote worktree as a Herdr agent.
+    OpenWorktreeAgent(String),
     /// Open an existing remote Linux file in a normal central editor pane.
     OpenFile(String),
     /// Request a native central diff for a changed Linux file.
@@ -259,6 +263,37 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
     })
 }
 
+/// The shared Changes dialog labels stash messages optional. The remote
+/// bridge requires a non-empty `-m` value, so use a deterministic WIP
+/// message rather than silently ignoring an empty request.
+fn remote_stash_message(raw: &str) -> Option<String> {
+    let supplied = raw.trim();
+    let message = if supplied.is_empty() {
+        "WIP (Gentle Shell)"
+    } else {
+        supplied
+    };
+    (message.len() <= 120 && !message.chars().any(char::is_control))
+        .then(|| message.to_owned())
+}
+
+/// A Git status path is relative to the actual Linux toplevel. Never let
+/// a menu event become a Windows path, an absolute path or a traversal.
+fn remote_git_file_path(toplevel: &str, relative: &str) -> Option<String> {
+    if !toplevel.starts_with('/') || toplevel.contains('\\')
+        || toplevel.chars().any(char::is_control)
+        || relative.is_empty() || relative.starts_with('/')
+        || relative.contains('\\') || relative.contains(':')
+        || relative.len() > 2048 || relative.chars().any(char::is_control)
+        || relative.split('/').any(|segment| {
+            segment.is_empty() || matches!(segment, "." | "..")
+        })
+    {
+        return None;
+    }
+    Some(format!("{}/{}", toplevel.trim_end_matches('/'), relative))
+}
+
 fn shared_remote_worktree(source: &RemoteGitSnapshot) -> WorkTree {
     WorkTree {
         branch: BranchStatus {
@@ -324,8 +359,34 @@ fn shared_remote_refs(source: &RemoteGitSnapshot) -> RefsSnapshot {
 
 #[cfg(test)]
 mod remote_git_snapshot_tests {
-    use super::{parse_git_snapshot, shared_remote_refs, shared_remote_worktree};
+    use super::{
+        parse_git_snapshot, remote_git_file_path, remote_stash_message,
+        shared_remote_refs, shared_remote_worktree,
+    };
     use serde_json::json;
+
+    #[test]
+    fn empty_stash_message_has_valid_nonempty_default() {
+        assert_eq!(remote_stash_message(""), Some("WIP (Gentle Shell)".into()));
+        assert_eq!(remote_stash_message("  work in progress  "),
+            Some("work in progress".into()));
+        assert_eq!(remote_stash_message("bad\nmessage"), None);
+        assert_eq!(remote_stash_message(&"a".repeat(121)), None);
+    }
+
+    #[test]
+    fn git_menu_paths_are_linux_repository_scoped() {
+        assert_eq!(
+            remote_git_file_path("/srv/workspaces/JaviPi", "src/main.rs"),
+            Some("/srv/workspaces/JaviPi/src/main.rs".to_owned()),
+        );
+        for path in ["", "/etc/passwd", "../outside", "src/../outside",
+            "src//main.rs", "src\\main.rs", "C:danger", "a\nb"]
+        {
+            assert!(remote_git_file_path("/srv/workspaces/JaviPi", path).is_none());
+        }
+        assert!(remote_git_file_path("C:/repo", "main.rs").is_none());
+    }
 
     #[test]
     fn remote_worktrees_are_display_only_posix_paths() {
@@ -497,7 +558,6 @@ pub struct RemoteFilesView {
     git_confirm_stash: Option<(String, StashAction)>,
     git_confirm_network: Option<String>,
     git_confirm_worktree: Option<(RemoteWorktreeAction, String)>,
-    git_confirm_discard: Option<(String, bool)>,
     _git_events: Vec<Subscription>,
     focus: FocusHandle,
     tree_children: HashMap<String, Vec<RemoteEntry>>,
@@ -714,6 +774,10 @@ impl RemoteFilesView {
         let refs = cx.new(|cx| RefsView::new_remote(window, cx));
         let refs_events = cx.subscribe(&refs, |this, _, event: &RefsEvent, cx| {
             match event {
+                RefsEvent::RemoteOpenHistory =>
+                    cx.emit(RemoteFilesEvent::OpenHistory),
+                RefsEvent::RemoteOpenWorktree(path) =>
+                    cx.emit(RemoteFilesEvent::OpenWorktreeAgent(path.clone())),
                 RefsEvent::SwitchRemoteBranch(branch) =>
                     this.git_switch_branch(branch.clone(), cx),
                 RefsEvent::RemoteStash { name, action } =>
@@ -733,15 +797,29 @@ impl RemoteFilesView {
                     );
                 }
                 ChangesEvent::RemoteOpenDiff(path) => {
-                    if let Some(snapshot) = this.git.as_ref() {
-                        let absolute = format!(
-                            "{}/{}", snapshot.toplevel.trim_end_matches('/'), path
-                        );
+                    if let Some(absolute) = this.git.as_ref().and_then(|snapshot| {
+                        remote_git_file_path(&snapshot.toplevel, path)
+                    }) {
                         cx.emit(RemoteFilesEvent::OpenDiff(absolute));
                     }
                 }
-                ChangesEvent::RemoteCommit(summary) => {
-                    this.git_commit_message(summary.clone(), cx);
+                ChangesEvent::RemoteOpenFile(path) => {
+                    if let Some(absolute) = this.git.as_ref().and_then(|snapshot| {
+                        remote_git_file_path(&snapshot.toplevel, path)
+                    }) {
+                        cx.emit(RemoteFilesEvent::OpenFile(absolute));
+                    }
+                }
+                ChangesEvent::RemoteCommit { summary, description, amend, push } => {
+                    this.git_commit_message(
+                        summary.clone(), description.clone(), *amend, *push, cx,
+                    );
+                }
+                ChangesEvent::RemoteGenerateMessage => {
+                    this.git_generate_message(cx);
+                }
+                ChangesEvent::RemoteLastCommitMessage => {
+                    this.git_load_last_commit_message(cx);
                 }
                 ChangesEvent::RemoteBulkStage { stage } => {
                     this.git_bulk_stage(*stage, cx);
@@ -789,7 +867,6 @@ impl RemoteFilesView {
             git_confirm_stash: None,
             git_confirm_network: None,
             git_confirm_worktree: None,
-            git_confirm_discard: None,
             _git_events: git_events,
             focus: cx.focus_handle(),
             tree_children: HashMap::new(),
@@ -1841,7 +1918,6 @@ impl RemoteFilesView {
         self.git_confirm_stash = None;
         self.git_confirm_network = None;
         self.git_confirm_worktree = None;
-        self.git_confirm_discard = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
             view.mark_remote_stash(None, cx);
@@ -1915,6 +1991,8 @@ impl RemoteFilesView {
             cx.notify();
             return;
         };
+        let committed = command["type"].as_str() == Some("herdr_git_commit");
+        let added_worktree = command["type"].as_str() == Some("herdr_git_worktree_add");
         self.git_write_future(async move {
             let reply = process.request(command).await
                 .map_err(|error| error.to_string())?;
@@ -1922,12 +2000,15 @@ impl RemoteFilesView {
                 reply.data["trashedPath"].as_str()
                     .map(|path| (token.to_owned(), path.to_owned()))
             });
-            Ok(trashed)
+            let worktree = added_worktree.then(|| {
+                reply.data["newWorktreePath"].as_str().map(ToOwned::to_owned)
+            }).flatten();
+            Ok((trashed, committed, worktree))
         }, cx);
     }
 
     fn git_write_future(
-        &mut self, operation: impl std::future::Future<Output = Result<Option<(String, String)>, String>>
+        &mut self, operation: impl std::future::Future<Output = Result<(Option<(String, String)>, bool, Option<String>), String>>
             + Send + 'static,
         cx: &mut Context<Self>,
     ) {
@@ -1943,7 +2024,6 @@ impl RemoteFilesView {
         self.git_confirm_stash = None;
         self.git_confirm_network = None;
         self.git_confirm_worktree = None;
-        self.git_confirm_discard = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
             view.mark_remote_stash(None, cx);
@@ -1951,21 +2031,40 @@ impl RemoteFilesView {
         let response = cx.background_executor().spawn(operation);
         cx.spawn(async move |this, cx| {
             let result = response.await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.git_busy = false;
                 this.changes.update(cx, |view, cx| {
                     view.set_remote_busy(false, cx);
                 });
                 match result {
-                    Ok(trashed) => {
+                    Ok((trashed, committed, worktree)) => {
                         if let Some(receipt) = trashed {
                             this.last_trash = Some(receipt);
+                        }
+                        if let Some(path) = worktree {
+                            cx.emit(RemoteFilesEvent::OpenWorktreeAgent(path));
+                        }
+                        if committed {
+                            this.changes.update(cx, |view, cx| {
+                                view.remote_commit_completed(window, cx);
+                            });
                         }
                         this.git_feedback = Some("Remote Git updated. Status refreshed.".into());
                         this.refresh_git(cx);
                     }
                     Err(error) => {
-                        this.git_error = Some(friendly_error(&error.to_string()));
+                        let message = friendly_error(&error.to_string());
+                        if message.contains("Commit succeeded, but push failed:") {
+                            // Commit changed HEAD even though the network push failed.
+                            // Refresh before the next mutation; never reuse stale guards.
+                            this.changes.update(cx, |view, cx| {
+                                view.remote_commit_completed(window, cx);
+                            });
+                            this.refresh_git(cx);
+                            this.git_feedback = Some(message);
+                        } else {
+                            this.git_error = Some(message);
+                        }
                     }
                 }
                 cx.notify();
@@ -1995,8 +2094,86 @@ impl RemoteFilesView {
             }),
         };
         self.git_write_future(async move {
-            backend.git_file(action, request).await.map(|_| None)
+            backend.git_file(action, request).await.map(|_| (None, false, None))
         }, cx);
+    }
+
+    /// Generate on the Linux machine with a bounded staged diff. Never
+    /// launch local Windows Git or let a stale response overwrite a new agent.
+    fn git_generate_message(&mut self, cx: &mut Context<Self>) {
+        if self.git_busy || self.git_loading { return; }
+        let Some(snapshot) = self.git.as_ref().filter(|s| {
+            s.writes_enabled && !s.files_truncated
+                && s.files.iter().any(|entry| entry.staged().is_some())
+        }) else { return; };
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.changes.update(cx, |view, cx| {
+                view.set_remote_error("Remote agent disconnected.".into(), cx);
+            });
+            return;
+        };
+        let request = process.request(json!({
+            "type": "herdr_git_generate_message",
+            "root": self.root, "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+        }));
+        self.changes.update(cx, |view, cx| view.set_remote_generating(true, cx));
+        cx.spawn(async move |this, cx| {
+            let result = request.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.changes.update(cx, |view, cx| {
+                    view.set_remote_generating(false, cx);
+                    match result {
+                        Ok(reply) => match (reply.data["summary"].as_str(),
+                            reply.data["description"].as_str())
+                        {
+                            (Some(summary), Some(description)) => view.set_remote_message(
+                                summary.to_owned(), description.to_owned(), window, cx,
+                            ),
+                            _ => view.set_remote_error(
+                                "Remote generator returned an invalid message.".into(), cx,
+                            ),
+                        },
+                        Err(error) => view.set_remote_error(
+                            friendly_error(&error.to_string()), cx,
+                        ),
+                    }
+                });
+            });
+        }).detach();
+    }
+
+    fn git_load_last_commit_message(&mut self, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|s| s.head_oid.is_some()) else {
+            return;
+        };
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            return;
+        };
+        let request = process.request(json!({
+            "type": "herdr_git_last_commit",
+            "root": self.root,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+        }));
+        cx.spawn(async move |this, cx| {
+            let result = request.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Ok(reply) = result
+                    && let (Some(summary), Some(description)) = (
+                        reply.data["summary"].as_str(), reply.data["description"].as_str(),
+                    )
+                {
+                    this.changes.update(cx, |view, cx| {
+                        view.set_remote_last_message(
+                            summary.to_owned(), description.to_owned(), window, cx,
+                        );
+                    });
+                }
+            });
+        }).detach();
     }
 
     /// A confirmed commit from the shared ChangesView; retain Herdr guards.
@@ -2027,13 +2204,18 @@ impl RemoteFilesView {
         self.git_write(command, cx);
     }
 
-    fn git_commit_message(&mut self, summary: String, cx: &mut Context<Self>) {
+    fn git_commit_message(
+        &mut self, summary: String, description: String, amend: bool, push: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(snapshot) = self.git.as_ref().filter(|snapshot| {
             snapshot.writes_enabled && !snapshot.files_truncated
-                && snapshot.files.iter().any(|entry| entry.staged().is_some())
+                && (snapshot.files.iter().any(|entry| entry.staged().is_some())
+                    || (amend && snapshot.head_oid.is_some()))
         }) else { return; };
         if summary.trim().is_empty() || summary.len() > 120
             || summary.chars().any(char::is_control)
+            || description.len() > 4000 || description.contains('\0')
         { return; }
         let command = json!({
             "type": "herdr_git_commit", "root": self.root,
@@ -2041,7 +2223,8 @@ impl RemoteFilesView {
             "expectedHead": snapshot.head_oid,
             "expectedBranch": snapshot.current_branch,
             "expectedIndexToken": snapshot.index_token,
-            "summary": summary,
+            "summary": summary, "description": description,
+            "amend": amend, "push": push,
         });
         self.git_write(command, cx);
     }
@@ -2077,16 +2260,12 @@ impl RemoteFilesView {
         if !snapshot.files.iter().any(|entry|
             entry.path == path && entry.index == index && entry.worktree == worktree
         ) { return; }
-        let pending = (path.clone(), staged);
-        if self.git_confirm_discard.as_ref() != Some(&pending) {
-            self.git_confirm_discard = Some(pending);
-            self.git_feedback = Some(
-                "Discard replaces local changes; select the action again to confirm.".into(),
-            );
-            cx.notify();
+        // ChangesView already required a native destructive-action dialog.
+        // The bridge still validates the exact HEAD/branch/index token and
+        // porcelain status before it touches this machine's working tree.
+        let Some(absolute) = remote_git_file_path(&snapshot.toplevel, &path) else {
             return;
-        }
-        let absolute = format!("{}/{}", snapshot.toplevel.trim_end_matches('/'), path);
+        };
         let command = json!({
             "type": "herdr_git_discard", "root": self.root,
             "toplevel": snapshot.toplevel,
@@ -2164,10 +2343,11 @@ impl RemoteFilesView {
             s.writes_enabled && !s.files_truncated && !s.files.is_empty()
                 && s.head_oid.is_some() && s.index_token.is_some()
         ) else { return; };
-        let message = message.trim().to_owned();
-        if message.is_empty() || message.len() > 120
-            || message.chars().any(char::is_control)
-        { return; }
+        let Some(message) = remote_stash_message(&message) else {
+            self.git_error = Some("Stash message must be at most 120 characters on one line.".into());
+            cx.notify();
+            return;
+        };
         let expected_files: Vec<_> = snapshot.files.iter().map(|entry| json!({
             "path": entry.path,
             "index": entry.index.to_string(),

@@ -219,7 +219,10 @@ impl FileTreeView {
                 // The native ChangesView never dispatches Herdr mutations.
                 ChangesEvent::RemoteStage { .. }
                 | ChangesEvent::RemoteOpenDiff(_)
-                | ChangesEvent::RemoteCommit(_)
+                | ChangesEvent::RemoteOpenFile(_)
+                | ChangesEvent::RemoteGenerateMessage
+                | ChangesEvent::RemoteLastCommitMessage
+                | ChangesEvent::RemoteCommit { .. }
                 | ChangesEvent::RemoteBulkStage { .. }
                 | ChangesEvent::RemoteStashPush(_)
                 | ChangesEvent::RemoteDiscard { .. } => {},
@@ -230,6 +233,8 @@ impl FileTreeView {
                 RefsEvent::Changed => cx.notify(),
                 // A remote action cannot originate in the local RefsView.
                 RefsEvent::SwitchRemoteBranch(_)
+                | RefsEvent::RemoteOpenHistory
+                | RefsEvent::RemoteOpenWorktree(_)
                 | RefsEvent::RemoteStash { .. }
                 | RefsEvent::RemoteWorktree { .. } => {},
             }),
