@@ -454,6 +454,14 @@ impl Workspace {
             |this, source, event: &RemoteFilesEvent, window, cx| {
                 match event {
                     RemoteFilesEvent::Close => this.toggle_files_panel(cx),
+                    RemoteFilesEvent::OpenHistory => {
+                        if this.active_session().as_ref()
+                            != Some(source.read(cx).session())
+                        {
+                            return;
+                        }
+                        this.open_remote_history(window, cx);
+                    },
                     RemoteFilesEvent::RelayFile { path, target_terminal } => {
                         let origin = source.read(cx).session().clone();
                         this.relay_remote_file(
