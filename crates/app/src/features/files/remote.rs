@@ -263,6 +263,20 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
 
 /// A Git status path is relative to the actual Linux toplevel. Never let
 /// a menu event become a Windows path, an absolute path or a traversal.
+/// The shared Changes dialog labels this message optional. The bridge
+/// requires a non-empty -m value, so use a deterministic local-equivalent
+/// WIP message rather than silently ignoring an empty request.
+fn remote_stash_message(raw: &str) -> Option<String> {
+    let supplied = raw.trim();
+    let message = if supplied.is_empty() {
+        "WIP (Gentle Shell)"
+    } else {
+        supplied
+    };
+    (message.len() <= 120 && !message.chars().any(char::is_control))
+        .then(|| message.to_owned())
+}
+
 fn remote_git_file_path(toplevel: &str, relative: &str) -> Option<String> {
     if !toplevel.starts_with('/') || toplevel.contains('\\')
         || toplevel.chars().any(char::is_control)
@@ -344,9 +358,19 @@ fn shared_remote_refs(source: &RemoteGitSnapshot) -> RefsSnapshot {
 #[cfg(test)]
 mod remote_git_snapshot_tests {
     use super::{
-        parse_git_snapshot, remote_git_file_path, shared_remote_refs, shared_remote_worktree,
+        parse_git_snapshot, remote_git_file_path, remote_stash_message,
+        shared_remote_refs, shared_remote_worktree,
     };
     use serde_json::json;
+
+    #[test]
+    fn empty_stash_message_has_valid_nonempty_default() {
+        assert_eq!(remote_stash_message(""), Some("WIP (Gentle Shell)".into()));
+        assert_eq!(remote_stash_message("  work in progress  "),
+            Some("work in progress".into()));
+        assert_eq!(remote_stash_message("bad\nmessage"), None);
+        assert_eq!(remote_stash_message(&"a".repeat(121)), None);
+    }
 
     #[test]
     fn git_menu_paths_are_linux_repository_scoped() {
@@ -782,8 +806,8 @@ impl RemoteFilesView {
                         cx.emit(RemoteFilesEvent::OpenFile(absolute));
                     }
                 }
-                ChangesEvent::RemoteCommit(summary) => {
-                    this.git_commit_message(summary.clone(), cx);
+                ChangesEvent::RemoteCommit { summary, description } => {
+                    this.git_commit_message(summary.clone(), description.clone(), cx);
                 }
                 ChangesEvent::RemoteBulkStage { stage } => {
                     this.git_bulk_stage(*stage, cx);
@@ -2066,13 +2090,16 @@ impl RemoteFilesView {
         self.git_write(command, cx);
     }
 
-    fn git_commit_message(&mut self, summary: String, cx: &mut Context<Self>) {
+    fn git_commit_message(
+        &mut self, summary: String, description: String, cx: &mut Context<Self>,
+    ) {
         let Some(snapshot) = self.git.as_ref().filter(|snapshot| {
             snapshot.writes_enabled && !snapshot.files_truncated
                 && snapshot.files.iter().any(|entry| entry.staged().is_some())
         }) else { return; };
         if summary.trim().is_empty() || summary.len() > 120
             || summary.chars().any(char::is_control)
+            || description.len() > 4000 || description.contains('\0')
         { return; }
         let command = json!({
             "type": "herdr_git_commit", "root": self.root,
@@ -2080,7 +2107,7 @@ impl RemoteFilesView {
             "expectedHead": snapshot.head_oid,
             "expectedBranch": snapshot.current_branch,
             "expectedIndexToken": snapshot.index_token,
-            "summary": summary,
+            "summary": summary, "description": description,
         });
         self.git_write(command, cx);
     }
@@ -2199,10 +2226,11 @@ impl RemoteFilesView {
             s.writes_enabled && !s.files_truncated && !s.files.is_empty()
                 && s.head_oid.is_some() && s.index_token.is_some()
         ) else { return; };
-        let message = message.trim().to_owned();
-        if message.is_empty() || message.len() > 120
-            || message.chars().any(char::is_control)
-        { return; }
+        let Some(message) = remote_stash_message(&message) else {
+            self.git_error = Some("Stash message must be at most 120 characters on one line.".into());
+            cx.notify();
+            return;
+        };
         let expected_files: Vec<_> = snapshot.files.iter().map(|entry| json!({
             "path": entry.path,
             "index": entry.index.to_string(),
