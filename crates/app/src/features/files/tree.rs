@@ -232,6 +232,7 @@ impl FileTreeView {
                 // A remote action cannot originate in the local RefsView.
                 RefsEvent::SwitchRemoteBranch(_)
                 | RefsEvent::RemoteOpenHistory
+                | RefsEvent::RemoteOpenWorktree(_)
                 | RefsEvent::RemoteStash { .. }
                 | RefsEvent::RemoteWorktree { .. } => {},
             }),
