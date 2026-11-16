@@ -455,15 +455,25 @@ impl Workspace {
                 // bridge/terminal addresses were saved above; on release the
                 // viewer detaches without terminal.kill. Native and Herdr-local
                 // backends still shut down. Explicit tab close remains final.
-                let mut signalled = false;
-                for session in this.sessions() {
-                    signalled |= session.read(cx).shutdown_for_app_quit();
-                }
-                let settle =
-                    signalled.then(|| cx.background_executor().timer(Duration::from_millis(100)));
+                let pending: Vec<_> = this
+                    .sessions()
+                    .into_iter()
+                    .filter_map(|session| session.read(cx).shutdown_for_app_quit())
+                    .collect();
+                let executor = cx.background_executor().clone();
                 async move {
-                    if let Some(settle) = settle {
-                        settle.await;
+                    // Native RPC may need the full three-second grace period
+                    // before taskkill reaps its Windows process tree. Herdr
+                    // terminal.kill also runs on a worker. Keep GPUI alive
+                    // until those workers finish, with a bounded deadline.
+                    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+                    while pending.iter().any(|process| !process.shutdown_complete())
+                        && std::time::Instant::now() < deadline
+                    {
+                        executor.timer(Duration::from_millis(50)).await;
+                    }
+                    if pending.iter().any(|process| !process.shutdown_complete()) {
+                        eprintln!("gentle-shell-gpui: local agent shutdown timed out");
                     }
                 }
             }),

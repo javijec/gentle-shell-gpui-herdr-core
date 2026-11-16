@@ -86,6 +86,15 @@ impl RpcProcess {
             Self::Herdr(process) => process.shutdown(grace),
         }
     }
+
+    /// Only local backends are awaited on application quit. Herdr remote
+    /// agents are parked and are intentionally not part of that barrier.
+    pub fn shutdown_complete(&self) -> bool {
+        match self {
+            Self::Native(process) => process.shutdown_complete(),
+            Self::Herdr(process) => process.shutdown_complete(),
+        }
+    }
 }
 
 /// A running Pi RPC child process.
@@ -97,6 +106,8 @@ pub struct PiProcess {
     /// Set by the first [`Self::shutdown`], so Drop after an explicit
     /// shutdown doesn't signal and reap twice.
     stopping: AtomicBool,
+    /// The shutdown worker has finished reaping the child/process tree.
+    shutdown_finished: Arc<AtomicBool>,
 }
 
 impl PiProcess {
@@ -165,6 +176,7 @@ impl PiProcess {
             pending,
             next_id: AtomicU64::new(1),
             stopping: AtomicBool::new(false),
+            shutdown_finished: Arc::new(AtomicBool::new(false)),
         });
         Ok((process, rx))
     }
@@ -242,6 +254,10 @@ impl PiProcess {
     /// Once the backend exits, or after `grace`, whatever is left of it is
     /// killed (see [`kill_tree`]) and the child reaped. Only the first call
     /// acts.
+    pub fn shutdown_complete(&self) -> bool {
+        self.shutdown_finished.load(Ordering::Acquire)
+    }
+
     pub fn shutdown(&self, grace: Duration) {
         if self.stopping.swap(true, Ordering::AcqRel) {
             return;
@@ -254,6 +270,7 @@ impl PiProcess {
         // reaped here; its pid may be reused, so nothing is signalled.
         let mut guard = child.lock().unwrap();
         if !matches!(guard.try_wait(), Ok(None)) {
+            self.shutdown_finished.store(true, Ordering::Release);
             return;
         }
         #[cfg(unix)]
@@ -270,7 +287,8 @@ impl PiProcess {
             None
         };
         drop(guard);
-        let _ = std::thread::Builder::new()
+        let finished = self.shutdown_finished.clone();
+        let spawned = std::thread::Builder::new()
             .name("pi-rpc-shutdown".into())
             .spawn(move || {
                 #[cfg(unix)]
@@ -285,7 +303,11 @@ impl PiProcess {
                 }
                 drop(stdin);
                 kill_tree(&mut child.lock().unwrap());
+                finished.store(true, Ordering::Release);
             });
+        if let Err(error) = spawned {
+            eprintln!("gentle-shell-gpui: unable to start native shutdown worker: {error}");
+        }
     }
 }
 
@@ -387,4 +409,37 @@ fn signal(signal: &str, target: &str) -> Option<Child> {
         .stderr(Stdio::null())
         .spawn()
         .ok()
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    /// Spawn a real RPC child and verify that the app-quit completion barrier
+    /// only releases after its shutdown worker has reaped the process.
+    #[test]
+    fn native_shutdown_finishes_reaping_before_quit() {
+        #[cfg(windows)]
+        let (program, args) = (
+            "cmd.exe",
+            vec!["/C".to_string(), "ping -n 20 127.0.0.1 > NUL".to_string()],
+        );
+        #[cfg(unix)]
+        let (program, args) = ("sh", vec!["-c".to_string(), "sleep 20".to_string()]);
+
+        let spec = LaunchSpec {
+            program: program.into(),
+            args,
+            cwd: std::env::current_dir().expect("current directory"),
+            env: Vec::new(),
+        };
+        let (process, _rx) = PiProcess::spawn(&spec).expect("start test child");
+        assert!(!process.shutdown_complete());
+        process.shutdown(Duration::from_millis(150));
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while !process.shutdown_complete() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        assert!(process.shutdown_complete(), "child process was not reaped");
+    }
 }

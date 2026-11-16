@@ -392,14 +392,27 @@ fn accept_stream_events(initial_reattach: bool, startup_complete: bool, ready: b
 }
 
 /// An agent terminal is ours to stop; never issue a global core shutdown.
-fn stop_owned_terminal(address: String) {
-    let _ = std::thread::Builder::new().name("herdr-agent-stop".into()).spawn(move || {
-        let executable = std::env::var_os("GENTLE_SHELL_HERDR_HC")
-            .filter(|x| !x.is_empty()).unwrap_or_else(|| "hc".into());
-        if let Ok(mut client) = herdr_client::HerdrClient::connect_with_executable(executable) {
-            let _ = client.call("terminal.kill", json!({"terminal":address}));
-        }
-    });
+fn stop_owned_terminal(address: String, finished: Arc<AtomicBool>) {
+    let worker_finished = finished.clone();
+    let spawned = std::thread::Builder::new()
+        .name("herdr-agent-stop".into())
+        .spawn(move || {
+            let executable = std::env::var_os("GENTLE_SHELL_HERDR_HC")
+                .filter(|x| !x.is_empty())
+                .unwrap_or_else(|| "hc".into());
+            let result = herdr_client::HerdrClient::connect_with_executable(executable)
+                .and_then(|mut client| {
+                    client.call("terminal.kill", json!({"terminal": address}))
+                });
+            if let Err(error) = result {
+                eprintln!("gentle-shell-gpui: Herdr agent stop failed: {error}");
+            }
+            worker_finished.store(true, Ordering::Release);
+        });
+    if let Err(error) = spawned {
+        eprintln!("gentle-shell-gpui: unable to stop Herdr terminal: {error}");
+        finished.store(true, Ordering::Release);
+    }
 }
 
 struct IncomingState {
@@ -517,6 +530,7 @@ pub struct HerdrAgentProcess {
     last_failure: Arc<Mutex<Option<String>>>,
     allow_reconnect: Arc<AtomicBool>,
     stopping: AtomicBool,
+    shutdown_finished: Arc<AtomicBool>,
 }
 
 impl HerdrAgentProcess {
@@ -841,7 +855,7 @@ impl HerdrAgentProcess {
             if !reattaching
                 && let Some(address) = address.lock().unwrap().clone()
             {
-                stop_owned_terminal(address);
+                stop_owned_terminal(address, Arc::new(AtomicBool::new(false)));
             }
             return Err(error);
         }
@@ -858,6 +872,7 @@ impl HerdrAgentProcess {
                 last_failure,
                 allow_reconnect,
                 stopping: AtomicBool::new(false),
+                shutdown_finished: Arc::new(AtomicBool::new(false)),
             }),
             rx,
         ))
@@ -960,6 +975,10 @@ impl HerdrAgentProcess {
         }
     }
 
+    pub fn shutdown_complete(&self) -> bool {
+        self.shutdown_finished.load(Ordering::Acquire)
+    }
+
     /// Explicit close/restart terminates the managed agent, never Herdr Core.
     pub fn shutdown(&self, _grace: Duration) {
         self.allow_reconnect.store(false, Ordering::Release);
@@ -969,7 +988,9 @@ impl HerdrAgentProcess {
         self.ready.store(false, Ordering::Release);
         self.pending.lock().unwrap().clear();
         if let Some(address) = self.address.lock().unwrap().clone() {
-            stop_owned_terminal(address);
+            stop_owned_terminal(address, self.shutdown_finished.clone());
+        } else {
+            self.shutdown_finished.store(true, Ordering::Release);
         }
     }
 }
