@@ -261,11 +261,9 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
     })
 }
 
-/// A Git status path is relative to the actual Linux toplevel. Never let
-/// a menu event become a Windows path, an absolute path or a traversal.
-/// The shared Changes dialog labels this message optional. The bridge
-/// requires a non-empty -m value, so use a deterministic local-equivalent
-/// WIP message rather than silently ignoring an empty request.
+/// The shared Changes dialog labels stash messages optional. The remote
+/// bridge requires a non-empty `-m` value, so use a deterministic WIP
+/// message rather than silently ignoring an empty request.
 fn remote_stash_message(raw: &str) -> Option<String> {
     let supplied = raw.trim();
     let message = if supplied.is_empty() {
@@ -277,6 +275,8 @@ fn remote_stash_message(raw: &str) -> Option<String> {
         .then(|| message.to_owned())
 }
 
+/// A Git status path is relative to the actual Linux toplevel. Never let
+/// a menu event become a Windows path, an absolute path or a traversal.
 fn remote_git_file_path(toplevel: &str, relative: &str) -> Option<String> {
     if !toplevel.starts_with('/') || toplevel.contains('\\')
         || toplevel.chars().any(char::is_control)
