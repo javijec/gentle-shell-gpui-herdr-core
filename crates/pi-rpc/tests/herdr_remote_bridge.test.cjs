@@ -1705,3 +1705,30 @@ test("8C Write it uses a bounded, no-tools remote CLI and rejects stale index", 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test("8C worktree add returns the scoped Linux path for auto-opening an agent", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-8c-wt-"));
+  try {
+    const git = gitInit(root);
+    git("branch", "feature-8c");
+    const h = harness(root);
+    const snapshot = await gitSnapshot(h, root, "wt-snap");
+    const add = await gitWrite(h, root, snapshot,
+      "herdr_git_worktree_add", "wt-add", {
+        branch: "feature-8c", newBranch: false,
+      });
+    assert.equal(add.success, true, add.error);
+    const created = add.data.newWorktreePath;
+    assert.equal(typeof created, "string");
+    assert.ok(created.startsWith(root + ".worktrees/"));
+    assert.ok(fs.statSync(created).isDirectory());
+    assert.equal(h.childWrites.length, 1, "worktree operations never call Pi bash");
+  } finally {
+    fs.rmSync(root + ".worktrees", { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

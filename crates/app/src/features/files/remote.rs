@@ -39,6 +39,8 @@ pub enum RemoteFilesEvent {
     InsertPath(String),
     /// Open the same History pane for the owning remote session.
     OpenHistory,
+    /// Open a newly created or existing remote worktree as a Herdr agent.
+    OpenWorktreeAgent(String),
     /// Open an existing remote Linux file in a normal central editor pane.
     OpenFile(String),
     /// Request a native central diff for a changed Linux file.
@@ -774,6 +776,8 @@ impl RemoteFilesView {
             match event {
                 RefsEvent::RemoteOpenHistory =>
                     cx.emit(RemoteFilesEvent::OpenHistory),
+                RefsEvent::RemoteOpenWorktree(path) =>
+                    cx.emit(RemoteFilesEvent::OpenWorktreeAgent(path.clone())),
                 RefsEvent::SwitchRemoteBranch(branch) =>
                     this.git_switch_branch(branch.clone(), cx),
                 RefsEvent::RemoteStash { name, action } =>
@@ -1988,6 +1992,7 @@ impl RemoteFilesView {
             return;
         };
         let committed = command["type"].as_str() == Some("herdr_git_commit");
+        let added_worktree = command["type"].as_str() == Some("herdr_git_worktree_add");
         self.git_write_future(async move {
             let reply = process.request(command).await
                 .map_err(|error| error.to_string())?;
@@ -1995,12 +2000,15 @@ impl RemoteFilesView {
                 reply.data["trashedPath"].as_str()
                     .map(|path| (token.to_owned(), path.to_owned()))
             });
-            Ok((trashed, committed))
+            let worktree = added_worktree.then(|| {
+                reply.data["newWorktreePath"].as_str().map(ToOwned::to_owned)
+            }).flatten();
+            Ok((trashed, committed, worktree))
         }, cx);
     }
 
     fn git_write_future(
-        &mut self, operation: impl std::future::Future<Output = Result<(Option<(String, String)>, bool), String>>
+        &mut self, operation: impl std::future::Future<Output = Result<(Option<(String, String)>, bool, Option<String>), String>>
             + Send + 'static,
         cx: &mut Context<Self>,
     ) {
@@ -2029,9 +2037,12 @@ impl RemoteFilesView {
                     view.set_remote_busy(false, cx);
                 });
                 match result {
-                    Ok((trashed, committed)) => {
+                    Ok((trashed, committed, worktree)) => {
                         if let Some(receipt) = trashed {
                             this.last_trash = Some(receipt);
+                        }
+                        if let Some(path) = worktree {
+                            cx.emit(RemoteFilesEvent::OpenWorktreeAgent(path));
                         }
                         if committed {
                             this.changes.update(cx, |view, cx| {
@@ -2083,7 +2094,7 @@ impl RemoteFilesView {
             }),
         };
         self.git_write_future(async move {
-            backend.git_file(action, request).await.map(|_| (None, false))
+            backend.git_file(action, request).await.map(|_| (None, false, None))
         }, cx);
     }
 

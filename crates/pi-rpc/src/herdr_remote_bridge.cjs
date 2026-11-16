@@ -2059,6 +2059,7 @@ async function remoteGitWrite(req) {
     await checkGitRefRequest(req, toplevel);
     const hasStaged = await checkGitIndexRequest(req, toplevel);
     let trashed = null;
+    let newWorktreePath = null;
     if (req.type === "herdr_git_stage" || req.type === "herdr_git_unstage") {
       const relative = await selectedGitEntry(req, toplevel);
       const literal = ":(literal)" + relative;
@@ -2144,7 +2145,10 @@ async function remoteGitWrite(req) {
                 "herdr_git_push"].includes(req.type)) {
       await guardedNetworkAction(req, toplevel);
     } else if (req.type.startsWith("herdr_git_worktree_")) {
-      await guardedWorktreeAction(req, toplevel);
+      const result = await guardedWorktreeAction(req, toplevel);
+      if (req.type === "herdr_git_worktree_add") {
+        newWorktreePath = result.path;
+      }
     } else if (req.type === "herdr_git_commit") {
       if (!req.expectedBranch) {
         throw new Error("Cannot commit from a detached HEAD");
@@ -2222,6 +2226,7 @@ async function remoteGitWrite(req) {
     return {
       toplevel, operation: req.type, ...await gitRefState(toplevel),
       ...(trashed ? { trashToken: trashed.token, trashedPath: trashed.path } : {}),
+      ...(newWorktreePath ? { newWorktreePath } : {}),
     };
   } finally {
     gitWriteInFlight.delete(toplevel);

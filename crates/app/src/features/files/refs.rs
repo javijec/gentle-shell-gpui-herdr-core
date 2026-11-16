@@ -36,6 +36,8 @@ pub enum RefsEvent {
     OpenHistory(PathBuf),
     /// Open the same History pane through the currently selected Herdr agent.
     RemoteOpenHistory,
+    /// Open an existing remote worktree under the same Herdr machine.
+    RemoteOpenWorktree(String),
     /// Herdr uses the same Branches UI; its owner executes the guarded switch.
     SwitchRemoteBranch(String),
     RemoteStash { name: String, action: StashAction },
@@ -556,6 +558,14 @@ impl RefsView {
                     IconName::FolderGit, ui::muted(), title, ui::fg(),
                     Some(detail(format!("{}{}", tree.path, status))),
                 )
+                .when(!prunable, |element| {
+                    let selected = name.clone();
+                    element.cursor_pointer().on_click(
+                        cx.listener(move |_, _, _, cx| {
+                            cx.emit(RefsEvent::RemoteOpenWorktree(selected.clone()));
+                        }),
+                    )
+                })
                 .context_menu(move |menu, _, _| {
                     let weak_action = weak.clone();
                     let name = name.clone();
