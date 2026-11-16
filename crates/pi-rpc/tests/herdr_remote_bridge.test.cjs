@@ -1672,8 +1672,11 @@ test("8C Write it uses a bounded, no-tools remote CLI and rejects stale index", 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-8c-message-"));
   try {
     const fakeCli = path.join(root, "fake-gentle-shell");
-    fs.writeFileSync(fakeCli, "#!/bin/sh\nprintf 'feat: remote message\\n\\nSafe preview\\n'\n",
-      { mode: 0o700 });
+    fs.writeFileSync(fakeCli, [
+      "#!/bin/sh",
+      'test "$1" = "--print" && test "$2" = "--no-session" && test "$3" = "--no-tools" || exit 5',
+      "printf 'feat: remote message\\n\\nSafe preview\\n'",
+    ].join("\n") + "\n", { mode: 0o700 });
     const git = gitInit(root);
     fs.writeFileSync(path.join(root, "tracked.txt"), "staged edit\n");
     git("add", "--", "tracked.txt");

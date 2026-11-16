@@ -208,6 +208,12 @@ impl ChangesView {
         if !self.remote {
             return;
         }
+        // A branch switch must not inherit Amend from the previous branch.
+        let old_branch = self.remote_tree.as_ref().and_then(|tree| tree.branch.head.as_ref());
+        let new_branch = tree.as_ref().and_then(|tree| tree.branch.head.as_ref());
+        if old_branch != new_branch {
+            self.amend = false;
+        }
         self.remote_tree = tree;
         self.remote_writable = writable;
         self.remote_confirm_commit = None;
