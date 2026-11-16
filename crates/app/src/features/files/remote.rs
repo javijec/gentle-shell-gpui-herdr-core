@@ -1987,6 +1987,7 @@ impl RemoteFilesView {
             cx.notify();
             return;
         };
+        let committed = command["type"].as_str() == Some("herdr_git_commit");
         self.git_write_future(async move {
             let reply = process.request(command).await
                 .map_err(|error| error.to_string())?;
@@ -1994,12 +1995,12 @@ impl RemoteFilesView {
                 reply.data["trashedPath"].as_str()
                     .map(|path| (token.to_owned(), path.to_owned()))
             });
-            Ok(trashed)
+            Ok((trashed, committed))
         }, cx);
     }
 
     fn git_write_future(
-        &mut self, operation: impl std::future::Future<Output = Result<Option<(String, String)>, String>>
+        &mut self, operation: impl std::future::Future<Output = Result<(Option<(String, String)>, bool), String>>
             + Send + 'static,
         cx: &mut Context<Self>,
     ) {
@@ -2022,15 +2023,20 @@ impl RemoteFilesView {
         let response = cx.background_executor().spawn(operation);
         cx.spawn(async move |this, cx| {
             let result = response.await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.git_busy = false;
                 this.changes.update(cx, |view, cx| {
                     view.set_remote_busy(false, cx);
                 });
                 match result {
-                    Ok(trashed) => {
+                    Ok((trashed, committed)) => {
                         if let Some(receipt) = trashed {
                             this.last_trash = Some(receipt);
+                        }
+                        if committed {
+                            this.changes.update(cx, |view, cx| {
+                                view.remote_commit_completed(window, cx);
+                            });
                         }
                         this.git_feedback = Some("Remote Git updated. Status refreshed.".into());
                         this.refresh_git(cx);
@@ -2040,6 +2046,9 @@ impl RemoteFilesView {
                         if message.contains("Commit succeeded, but push failed:") {
                             // Commit changed HEAD even though the network push failed.
                             // Refresh before the next mutation; never reuse stale guards.
+                            this.changes.update(cx, |view, cx| {
+                                view.remote_commit_completed(window, cx);
+                            });
                             this.refresh_git(cx);
                             this.git_feedback = Some(message);
                         } else {
@@ -2074,7 +2083,7 @@ impl RemoteFilesView {
             }),
         };
         self.git_write_future(async move {
-            backend.git_file(action, request).await.map(|_| None)
+            backend.git_file(action, request).await.map(|_| (None, false))
         }, cx);
     }
 
@@ -2193,7 +2202,6 @@ impl RemoteFilesView {
                 && (snapshot.files.iter().any(|entry| entry.staged().is_some())
                     || (amend && snapshot.head_oid.is_some()))
         }) else { return; };
-        if push && snapshot.head_oid.is_none() { return; }
         if summary.trim().is_empty() || summary.len() > 120
             || summary.chars().any(char::is_control)
             || description.len() > 4000 || description.contains('\0')

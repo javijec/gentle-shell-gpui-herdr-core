@@ -269,6 +269,17 @@ impl ChangesView {
         }
     }
 
+    pub(super) fn remote_commit_completed(
+        &mut self, window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if !self.remote { return; }
+        self.amend = false;
+        self.remote_confirm_commit = None;
+        self.summary.update(cx, |input, cx| input.set_value("", window, cx));
+        self.description.update(cx, |input, cx| input.set_value("", window, cx));
+        cx.notify();
+    }
+
     pub(super) fn set_remote_error(&mut self, error: String, cx: &mut Context<Self>) {
         if self.remote {
             self.error = Some(error);
@@ -1266,7 +1277,7 @@ impl ChangesView {
                 .child(Button::new("changes-remote-commit-push")
                     .small().w_full()
                     .label(if push_confirmed { "Confirm commit & push" } else { "Commit & Push" })
-                    .disabled(disabled || !has_head)
+                    .disabled(disabled || !self.tree().is_some_and(|tree| tree.branch.head.is_some()))
                     .tooltip("Commit on the selected Linux agent, then push its current branch")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.submit_remote_commit(true, cx);

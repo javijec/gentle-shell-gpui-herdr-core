@@ -2183,7 +2183,12 @@ async function remoteGitWrite(req) {
       await runGitMutation(toplevel, args);
       if (push) {
         try {
-          await guardedNetworkAction({ ...req, type: "herdr_git_push" }, toplevel);
+          // A successful first commit has a new HEAD even when the reviewed
+          // snapshot described an unborn branch.
+          const committedHead = (await gitRefState(toplevel)).headOid;
+          await guardedNetworkAction({
+            ...req, type: "herdr_git_push", expectedHead: committedHead,
+          }, toplevel);
         } catch (error) {
           throw new Error("Commit succeeded, but push failed: " + error.message);
         }
