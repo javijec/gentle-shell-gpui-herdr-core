@@ -315,14 +315,17 @@ impl SessionView {
     /// On GPUI quit, detach live remote Herdr agents without killing them.
     /// Local/native agent shutdown remains unchanged; closing an individual
     /// tab still explicitly ends its agent via the normal Drop path.
-    pub fn shutdown_for_app_quit(&self) -> bool {
-        if let BackendStatus::Ready(process) = &self.backend.status
-            && let RpcProcess::Herdr(agent) = process.as_ref()
+    pub fn shutdown_for_app_quit(&self) -> Option<Arc<RpcProcess>> {
+        let BackendStatus::Ready(process) = &self.backend.status else {
+            return None;
+        };
+        if let RpcProcess::Herdr(agent) = process.as_ref()
             && agent.park_for_app_quit()
         {
-            return false;
+            return None;
         }
-        self.shutdown_backend()
+        process.shutdown(Duration::from_secs(3));
+        Some(process.clone())
     }
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -455,15 +455,25 @@ impl Workspace {
                 // bridge/terminal addresses were saved above; on release the
                 // viewer detaches without terminal.kill. Native and Herdr-local
                 // backends still shut down. Explicit tab close remains final.
-                let mut signalled = false;
-                for session in this.sessions() {
-                    signalled |= session.read(cx).shutdown_for_app_quit();
-                }
-                let settle =
-                    signalled.then(|| cx.background_executor().timer(Duration::from_millis(100)));
+                let pending: Vec<_> = this
+                    .sessions()
+                    .into_iter()
+                    .filter_map(|session| session.read(cx).shutdown_for_app_quit())
+                    .collect();
+                let executor = cx.background_executor().clone();
                 async move {
-                    if let Some(settle) = settle {
-                        settle.await;
+                    // Native RPC may need the full three-second grace period
+                    // before taskkill reaps its Windows process tree. Herdr
+                    // terminal.kill also runs on a worker. Keep GPUI alive
+                    // until those workers finish, with a bounded deadline.
+                    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+                    while pending.iter().any(|process| !process.shutdown_complete())
+                        && std::time::Instant::now() < deadline
+                    {
+                        executor.timer(Duration::from_millis(50)).await;
+                    }
+                    if pending.iter().any(|process| !process.shutdown_complete()) {
+                        eprintln!("gentle-shell-gpui: local agent shutdown timed out");
                     }
                 }
             }),
@@ -473,7 +483,7 @@ impl Workspace {
                 // shutdown path; never kill long-running JaviPi agents here.
                 this.save_now(cx);
                 for session in this.sessions() {
-                    session.read(cx).shutdown_for_app_quit();
+                    let _ = session.read(cx).shutdown_for_app_quit();
                 }
             }),
             // The title-bar update pill follows this app's own update state.
@@ -722,7 +732,9 @@ impl Workspace {
     /// Show `path` in the tab's preview pane, or a new split beside the largest pane.
     pub fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         // Already in the quick look: move that view (edits included) instead.
-        if self.peek.as_ref().is_some_and(|peek| peek.path == path) {
+        if self.peek.as_ref().is_some_and(|peek| {
+            matches!(&peek.source, peek::PeekSource::Local(current) if *current == path)
+        }) {
             self.pin_peek(window, cx);
             return;
         }

@@ -25,6 +25,29 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     std::process::Command::new(program)
 }
 
+/// Start the known self-contained Gentle Shell backend without the Windows
+/// `.cmd` intermediary. A detached cmd.exe can exit while Node's RPC child
+/// remains alive, leaving that child outside the tree killed on app quit.
+/// Only a verified generated bundle is unwrapped; custom launchers retain
+/// their original behavior.
+pub(crate) fn backend_command(program: &Path) -> std::process::Command {
+    #[cfg(windows)]
+    if program
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"))
+        && let Some(bundle) = bundled_install(program)
+    {
+        let entry = bundle.package.join("bin").join("gentle-shell.mjs");
+        if entry.is_file() {
+            let mut command = command(&bundle.node);
+            command.arg(entry);
+            return command;
+        }
+    }
+    command(program)
+}
+
 /// How to start one RPC backend process.
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
@@ -577,5 +600,55 @@ mod tests {
         assert_eq!(backend_version(&spec).as_deref(), Some("1.2.3"));
         assert_eq!(run_count(), 3);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_backend_tests {
+    use super::*;
+
+    #[test]
+    fn bundled_rpc_uses_node_without_a_cmd_parent() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "gentle-shell-bundled-rpc-{}-{stamp}",
+            std::process::id()
+        ));
+        let launcher = base.join("bin").join("gentle-shell.cmd");
+        let node = base.join("runtime").join("node-24").join("node.exe");
+        let entry = base
+            .join("versions")
+            .join("4.8.0")
+            .join("node_modules")
+            .join("gentle-pi")
+            .join("bin")
+            .join("gentle-shell.mjs");
+
+        for file in [&launcher, &node, &entry] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        }
+        std::fs::write(
+            &launcher,
+            format!("{BUNDLED_LAUNCHER_MARK}\r\nruntime\\node-24\\node.exe\r\n"),
+        )
+        .unwrap();
+        std::fs::write(base.join("current"), "4.8.0").unwrap();
+        std::fs::write(&node, "").unwrap();
+        std::fs::write(&entry, "").unwrap();
+
+        let direct = backend_command(&launcher);
+        assert_eq!(direct.get_program(), node.as_os_str());
+        assert_eq!(direct.get_args().next(), Some(entry.as_os_str()));
+
+        // A damaged or incomplete bundle must retain the existing launcher
+        // path rather than attempt an invalid direct Node invocation.
+        std::fs::remove_file(&entry).unwrap();
+        let fallback = backend_command(&launcher);
+        assert_eq!(fallback.get_program(), launcher.as_os_str());
+
+        std::fs::remove_dir_all(base).unwrap();
     }
 }
