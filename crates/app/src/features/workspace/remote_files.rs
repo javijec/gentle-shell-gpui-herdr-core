@@ -286,7 +286,11 @@ impl Workspace {
             this.peek = Some(peek::Peek {
                 item,
                 source: peek::PeekSource::Herdr {
-                    session, machine, root, path, subscription,
+                    session: session.clone(),
+                    machine: machine.clone(),
+                    root: root.clone(),
+                    path: path.clone(),
+                    subscription,
                 },
             });
             this.focus_active(window, cx);
