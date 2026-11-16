@@ -811,6 +811,12 @@ impl RemoteFilesView {
                         summary.clone(), description.clone(), *amend, *push, cx,
                     );
                 }
+                ChangesEvent::RemoteGenerateMessage => {
+                    this.git_generate_message(cx);
+                }
+                ChangesEvent::RemoteLastCommitMessage => {
+                    this.git_load_last_commit_message(cx);
+                }
                 ChangesEvent::RemoteBulkStage { stage } => {
                     this.git_bulk_stage(*stage, cx);
                 }
@@ -2070,6 +2076,84 @@ impl RemoteFilesView {
         self.git_write_future(async move {
             backend.git_file(action, request).await.map(|_| None)
         }, cx);
+    }
+
+    /// Generate on the Linux machine with a bounded staged diff. Never
+    /// launch local Windows Git or let a stale response overwrite a new agent.
+    fn git_generate_message(&mut self, cx: &mut Context<Self>) {
+        if self.git_busy || self.git_loading { return; }
+        let Some(snapshot) = self.git.as_ref().filter(|s| {
+            s.writes_enabled && !s.files_truncated
+                && s.files.iter().any(|entry| entry.staged().is_some())
+        }) else { return; };
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            self.changes.update(cx, |view, cx| {
+                view.set_remote_error("Remote agent disconnected.".into(), cx);
+            });
+            return;
+        };
+        let request = process.request(json!({
+            "type": "herdr_git_generate_message",
+            "root": self.root, "toplevel": snapshot.toplevel,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+            "expectedIndexToken": snapshot.index_token,
+        }));
+        self.changes.update(cx, |view, cx| view.set_remote_generating(true, cx));
+        cx.spawn(async move |this, cx| {
+            let result = request.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.changes.update(cx, |view, cx| {
+                    view.set_remote_generating(false, cx);
+                    match result {
+                        Ok(reply) => match (reply.data["summary"].as_str(),
+                            reply.data["description"].as_str())
+                        {
+                            (Some(summary), Some(description)) => view.set_remote_message(
+                                summary.to_owned(), description.to_owned(), window, cx,
+                            ),
+                            _ => view.set_remote_error(
+                                "Remote generator returned an invalid message.".into(), cx,
+                            ),
+                        },
+                        Err(error) => view.set_remote_error(
+                            friendly_error(&error.to_string()), cx,
+                        ),
+                    }
+                });
+            });
+        }).detach();
+    }
+
+    fn git_load_last_commit_message(&mut self, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.git.as_ref().filter(|s| s.head_oid.is_some()) else {
+            return;
+        };
+        let Some(process) = self.session.read(cx).remote_fs_process() else {
+            return;
+        };
+        let request = process.request(json!({
+            "type": "herdr_git_last_commit",
+            "root": self.root,
+            "expectedHead": snapshot.head_oid,
+            "expectedBranch": snapshot.current_branch,
+        }));
+        cx.spawn(async move |this, cx| {
+            let result = request.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Ok(reply) = result {
+                    if let (Some(summary), Some(description)) = (
+                        reply.data["summary"].as_str(), reply.data["description"].as_str(),
+                    ) {
+                        this.changes.update(cx, |view, cx| {
+                            view.set_remote_last_message(
+                                summary.to_owned(), description.to_owned(), window, cx,
+                            );
+                        });
+                    }
+                }
+            });
+        }).detach();
     }
 
     /// A confirmed commit from the shared ChangesView; retain Herdr guards.

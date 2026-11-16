@@ -46,6 +46,10 @@ pub enum ChangesEvent {
     /// File navigation stays bound to the active Herdr agent, not Windows.
     RemoteOpenFile(String),
     RemoteCommit { summary: String, description: String, amend: bool, push: bool },
+    /// Generate the commit message using the Gentle Shell installation on JaviPi.
+    RemoteGenerateMessage,
+    /// Prefill an amend with the actual Linux repository's last commit.
+    RemoteLastCommitMessage,
     RemoteBulkStage { stage: bool },
     RemoteStashPush(String),
     RemoteDiscard { path: String, index: char, worktree: char, staged: bool },
@@ -228,6 +232,46 @@ impl ChangesView {
     pub(super) fn set_remote_busy(&mut self, busy: bool, cx: &mut Context<Self>) {
         if self.remote {
             self.remote_busy = busy;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_remote_generating(&mut self, generating: bool, cx: &mut Context<Self>) {
+        if self.remote {
+            self.generating = generating;
+            if generating {
+                self.error = None;
+            }
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_remote_message(
+        &mut self, summary: String, description: String,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if !self.remote { return; }
+        self.summary.update(cx, |input, cx| input.set_value(summary, window, cx));
+        self.description.update(cx, |input, cx| input.set_value(description, window, cx));
+        self.remote_confirm_commit = None;
+        self.error = None;
+        cx.notify();
+    }
+
+    pub(super) fn set_remote_last_message(
+        &mut self, summary: String, description: String,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        if self.remote && self.amend && self.summary_text(cx).is_empty()
+            && self.description.read(cx).value().trim().is_empty()
+        {
+            self.set_remote_message(summary, description, window, cx);
+        }
+    }
+
+    pub(super) fn set_remote_error(&mut self, error: String, cx: &mut Context<Self>) {
+        if self.remote {
+            self.error = Some(error);
             cx.notify();
         }
     }
@@ -1125,7 +1169,7 @@ impl ChangesView {
     }
 
     fn submit_remote_commit(&mut self, push: bool, cx: &mut Context<Self>) {
-        if !self.remote || !self.remote_writable || self.remote_busy
+        if !self.remote || !self.remote_writable || self.remote_busy || self.generating
             || !self.tree().is_some_and(|tree| {
                 tree.entries.iter().any(|entry| entry.staged().is_some())
                     || (self.amend && tree.branch.oid.is_some())
@@ -1172,7 +1216,7 @@ impl ChangesView {
             let disabled = !ready || summary.is_empty() || summary.len() > 120
                 || summary.chars().any(char::is_control)
                 || description.len() > 4000 || description.contains('\0')
-                || !self.remote_writable || self.remote_busy;
+                || !self.remote_writable || self.remote_busy || self.generating;
             return v_flex()
                 .flex_none().mx_2().mb_2().mt_1().px_3().py_2().gap_1()
                 .rounded_xl().bg(ui::surface())
@@ -1182,16 +1226,36 @@ impl ChangesView {
                         .text_color(ui::muted())
                         .child(Textarea::new(&self.description).appearance(false)),
                 )
-                .child(Button::new("changes-remote-amend")
-                    .ghost().xsmall().label("Amend")
-                    .selected(self.amend)
-                    .disabled(!has_head || !self.remote_writable || self.remote_busy)
-                    .tooltip("Rewrite the latest remote commit instead of creating a new one")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.amend = !this.amend;
-                        this.remote_confirm_commit = None;
-                        cx.notify();
-                    })))
+                .child(
+                    h_flex().gap_2()
+                        .child(Button::new("changes-remote-write")
+                            .ghost().xsmall()
+                            .icon(Icon::new(IconName::Sparkles))
+                            .label("Write it")
+                            .loading(self.generating)
+                            .disabled(!staged || !self.remote_writable
+                                || self.remote_busy || self.generating)
+                            .tooltip("Write the message from the remote staged diff")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(ChangesEvent::RemoteGenerateMessage);
+                            })))
+                        .child(Button::new("changes-remote-amend")
+                            .ghost().xsmall().label("Amend")
+                            .selected(self.amend)
+                            .disabled(!has_head || !self.remote_writable
+                                || self.remote_busy || self.generating)
+                            .tooltip("Rewrite the latest remote commit instead of creating a new one")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.amend = !this.amend;
+                                this.remote_confirm_commit = None;
+                                if this.amend && this.summary_text(cx).is_empty()
+                                    && this.description.read(cx).value().trim().is_empty()
+                                {
+                                    cx.emit(ChangesEvent::RemoteLastCommitMessage);
+                                }
+                                cx.notify();
+                            })))
+                )
                 .child(Button::new("changes-remote-commit")
                     .primary().small().w_full()
                     .label(if confirmed { "Confirm commit" } else { "Commit" })
@@ -1210,6 +1274,10 @@ impl ChangesView {
                 .when(confirmed || push_confirmed, |row| row.child(
                     div().text_xs().text_color(ui::warning())
                         .child("Review the exact message and action before confirming"),
+                ))
+                .when_some(self.error.clone(), |row, error| row.child(
+                    div().max_h(px(96.)).overflow_y_scroll()
+                        .text_xs().text_color(ui::danger()).child(error),
                 ));
         }
         let ready = matches!(self.repo, Some(Some(_)));

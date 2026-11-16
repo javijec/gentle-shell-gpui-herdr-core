@@ -12,7 +12,7 @@ const source = fs.readFileSync(
   path.join(__dirname, "../src/herdr_remote_bridge.cjs"), "utf8"
 );
 
-function harness(cwd = "/srv/workspaces/JaviPi") {
+function harness(cwd = "/srv/workspaces/JaviPi", envOverrides = {}) {
   const stdout = [];
   const childWrites = [];
   let killed = false;
@@ -31,7 +31,7 @@ function harness(cwd = "/srv/workspaces/JaviPi") {
   const timers = [];
   const fakeProcess = {
     argv: ["node", "t123"],
-    env: { PATH: "/usr/bin", HOME: "/home/dietpi" },
+    env: { PATH: "/usr/bin", HOME: "/home/dietpi", ...envOverrides },
     cwd: () => cwd,
     getuid: typeof process.getuid === "function" ? () => process.getuid() : undefined,
     stdout: { write: (value) => stdout.push(value) },
@@ -1632,6 +1632,72 @@ test("8C Commit & Push preflights remote transport before changing HEAD", {
     assert.equal(cp.execFileSync("git",
       ["-C", root, "diff", "--cached", "--name-only"]).toString().trim(), "tracked.txt");
     assert.equal(h.childWrites.length, 1, "no Windows Git fallback or Pi bash");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test("8C last commit prefill is bound to the reviewed HEAD and agent root", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-8c-last-"));
+  try {
+    gitInit(root);
+    const h = harness(root);
+    const snap = await gitSnapshot(h, root, "last-snap");
+    rpcInput(h, {
+      id: "last-ok", type: "herdr_git_last_commit", root,
+      expectedHead: snap.headOid, expectedBranch: snap.currentBranch,
+    });
+    const reply = await fsReply(h, "last-ok");
+    assert.equal(reply.success, true, reply.error);
+    assert.equal(reply.data.summary, "Initial");
+    rpcInput(h, {
+      id: "last-old", type: "herdr_git_last_commit", root,
+      expectedHead: "f".repeat(40), expectedBranch: snap.currentBranch,
+    });
+    assert.equal((await fsReply(h, "last-old")).success, false);
+    assert.equal(h.childWrites.length, 1, "only private read commands");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("8C Write it uses a bounded, no-tools remote CLI and rejects stale index", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-8c-message-"));
+  try {
+    const fakeCli = path.join(root, "fake-gentle-shell");
+    fs.writeFileSync(fakeCli, "#!/bin/sh\nprintf 'feat: remote message\\n\\nSafe preview\\n'\n",
+      { mode: 0o700 });
+    const git = gitInit(root);
+    fs.writeFileSync(path.join(root, "tracked.txt"), "staged edit\n");
+    git("add", "--", "tracked.txt");
+    const h = harness(root, { GENTLE_SHELL_BIN: fakeCli });
+    const snap = await gitSnapshot(h, root, "message-snap");
+    rpcInput(h, {
+      id: "message-ok", type: "herdr_git_generate_message", root,
+      toplevel: snap.toplevel, expectedHead: snap.headOid,
+      expectedBranch: snap.currentBranch, expectedIndexToken: snap.indexToken,
+    });
+    const result = await fsReply(h, "message-ok");
+    assert.equal(result.success, true, result.error);
+    assert.equal(result.data.summary, "feat: remote message");
+    assert.equal(result.data.description, "Safe preview");
+    git("reset", "-q", "HEAD", "--", "tracked.txt");
+    rpcInput(h, {
+      id: "message-old", type: "herdr_git_generate_message", root,
+      toplevel: snap.toplevel, expectedHead: snap.headOid,
+      expectedBranch: snap.currentBranch, expectedIndexToken: snap.indexToken,
+    });
+    const stale = await fsReply(h, "message-old");
+    assert.equal(stale.success, false);
+    assert.match(stale.error, /index changed/i);
+    assert.equal(h.childWrites.length, 1, "no Git command delegated to Pi");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
