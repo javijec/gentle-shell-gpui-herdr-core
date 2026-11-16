@@ -732,7 +732,9 @@ impl Workspace {
     /// Show `path` in the tab's preview pane, or a new split beside the largest pane.
     pub fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         // Already in the quick look: move that view (edits included) instead.
-        if self.peek.as_ref().is_some_and(|peek| peek.path == path) {
+        if self.peek.as_ref().is_some_and(|peek| {
+            matches!(&peek.source, peek::PeekSource::Local(current) if *current == path)
+        }) {
             self.pin_peek(window, cx);
             return;
         }

@@ -41,6 +41,8 @@ pub enum RemoteFilesEvent {
     OpenHistory,
     /// Open a newly created or existing remote worktree as a Herdr agent.
     OpenWorktreeAgent(String),
+    /// Show a Linux file in the same quick-look modal used for native files.
+    PeekFile(String),
     /// Open an existing remote Linux file in a normal central editor pane.
     OpenFile(String),
     /// Request a native central diff for a changed Linux file.
@@ -1653,7 +1655,7 @@ impl RemoteFilesView {
                     cx.emit(RemoteFilesEvent::InsertPath(insert_path.clone()));
                 })),
         )
-        .on_click(cx.listener(move |this, _, window, cx| {
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
             this.tree_selected_entry = Some((path.clone(), directory));
             this.focus.focus(window, cx);
             this.entry_name.update(cx, |input, cx| {
@@ -1664,7 +1666,11 @@ impl RemoteFilesView {
                 this.toggle_remote_directory(path.clone(), cx);
             } else if regular {
                 this.tree_selected_directory = remote_parent(&this.root, &path);
-                cx.emit(RemoteFilesEvent::OpenFile(path.clone()));
+                if event.click_count() >= 2 {
+                    cx.emit(RemoteFilesEvent::OpenFile(path.clone()));
+                } else {
+                    cx.emit(RemoteFilesEvent::PeekFile(path.clone()));
+                }
             }
             this.rebuild_remote_rows();
             cx.notify();

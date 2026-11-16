@@ -254,8 +254,47 @@ impl Workspace {
         self.place_preview(id, window, cx);
     }
 
-    /// A selected Linux file opens beside its agent in the main workspace,
-    /// just like a local FileView preview. Files stays a directory browser.
+    /// Single click uses the same quick-look modal as local Files, with the
+    /// original remote SessionView attached even when another agent is selected.
+    pub(super) fn peek_remote_file(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((session, machine, root)) = self.selected_remote_files(cx) else {
+            return;
+        };
+        if !remote_file_in_root(&root, &path) {
+            window.push_notification(Notification::info(
+                "Remote path is outside the selected agent's project.",
+            ), cx);
+            return;
+        }
+        if self.peek.as_ref().is_some_and(|peek| {
+            matches!(&peek.source, peek::PeekSource::Herdr {
+                session: owner, machine: m, root: r, path: p, ..
+            } if owner == &session && m == &machine && r == &root && p == &path)
+        }) {
+            self.focus_active(window, cx);
+            return;
+        }
+        self.leave_peek(window, cx, move |this, window, cx| {
+            let (item, subscription) = Self::remote_file_item(
+                session.clone(), machine.clone(), root.clone(), path.clone(), window, cx,
+            );
+            this.peek = Some(peek::Peek {
+                item,
+                source: peek::PeekSource::Herdr {
+                    session, machine, root, path, subscription,
+                },
+            });
+            this.focus_active(window, cx);
+            cx.notify();
+        });
+    }
+
+    /// A double click or quick-look pin opens the remote editor in a pane.
     pub(super) fn open_remote_file(
         &mut self,
         path: String,
@@ -273,26 +312,32 @@ impl Workspace {
             ), cx);
             return;
         }
+        if self.peek.as_ref().is_some_and(|peek| {
+            matches!(&peek.source, peek::PeekSource::Herdr {
+                session: owner, machine: m, root: r, path: p, ..
+            } if owner == &session && m == &machine && r == &root && p == &path)
+        }) {
+            self.pin_peek(window, cx);
+            return;
+        }
         let pane = self.build_remote_file_pane(
             session, machine, root, path, window, cx,
         );
         self.place_preview(pane, window, cx);
     }
 
-    /// Instantiate a remote editor owned by one original agent. Restoration
-    /// and normal opening share exactly this constructor, including the
-    /// observer that schedules draft snapshots on every editor change.
-    pub(super) fn build_remote_file_pane(
-        &mut self,
+    /// One shared remote editor constructor for quick look and pinned panes.
+    /// The observing subscription follows the view when quick look is pinned.
+    fn remote_file_item(
         session: Entity<SessionView>,
         machine: String,
         root: String,
         path: String,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> PaneId {
+    ) -> (PaneItem, Subscription) {
         let file = cx.new(|cx| RemoteFilesView::new_pane(
-            session.clone(), machine.clone(), root.clone(), path, window, cx,
+            session, machine, root, path, window, cx,
         ));
         let title_view = file.clone();
         let unsaved_view = file.clone();
@@ -309,6 +354,24 @@ impl Workspace {
         let subscription = cx.observe(&file, |this, _, cx| {
             this.schedule_save(cx);
         });
+        (item, subscription)
+    }
+
+    /// Instantiate a remote editor owned by one original agent. Restoration
+    /// and normal opening share exactly this constructor, including the
+    /// observer that schedules draft snapshots on every editor change.
+    pub(super) fn build_remote_file_pane(
+        &mut self,
+        session: Entity<SessionView>,
+        machine: String,
+        root: String,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PaneId {
+        let (item, subscription) = Self::remote_file_item(
+            session.clone(), machine.clone(), root.clone(), path, window, cx,
+        );
         let id = self.alloc_id();
         let mut pane = Pane {
             item,
@@ -516,6 +579,14 @@ impl Workspace {
                             return;
                         }
                         this.open_remote_git_diff(path.clone(), window, cx);
+                    },
+                    RemoteFilesEvent::PeekFile(path) => {
+                        if this.active_session().as_ref()
+                            != Some(source.read(cx).session())
+                        {
+                            return;
+                        }
+                        this.peek_remote_file(path.clone(), window, cx);
                     },
                     RemoteFilesEvent::OpenFile(path) => {
                         if this.active_session().as_ref()

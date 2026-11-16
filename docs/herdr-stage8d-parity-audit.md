@@ -33,7 +33,7 @@ Use a **throwaway repository** on both Windows and JaviPi for all destructive op
 | Persistence | Close desktop with a remote agent running, reopen, reattach to the same Herdr address and conversation |
 | Local cleanup | Close desktop with one native agent, one Herdr-local agent and an idle remote agent; verify native Node and local `--herdr-agent-bridge` disappear without stopping `hc.exe serve` or the JaviPi agent |
 | Individual tab close | Close a local or remote **agent tab**; ensure exactly that owned terminal stops while unrelated agents remain alive |
-| Files | Open, edit, rename, copy/move, create and Trash/Undo; confirm Linux paths and no accidental writes on Windows |
+| Files | **Single click** must open the same quick-look modal on local and remote; **double click** or pin opens the same view in a pane (without discarding edits); then test edit, rename, copy/move, create and Trash/Undo, with no accidental writes on Windows |
 | Git Changes | Diff, stage/unstage, discard with confirmation, Commit summary+description, Amend, Write it, Commit & Push |
 | Branches/History | Switch branch safely, stash, open History, create/open remote worktree with a new agent on the same machine |
 | Reconnection | Disconnect JaviPi during a read, reconnect, verify machine and revision fencing remain intact |

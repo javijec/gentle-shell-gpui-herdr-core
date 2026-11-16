@@ -5,16 +5,31 @@
 
 use super::*;
 
+/// Native and remote quick looks carry the same editor, but must retain
+/// their different ownership metadata when pinned into a normal pane.
+pub(super) enum PeekSource {
+    Local(PathBuf),
+    Herdr {
+        session: Entity<SessionView>,
+        machine: String,
+        root: String,
+        path: String,
+        subscription: Subscription,
+    },
+}
+
 /// The file shown over the panes.
 pub(super) struct Peek {
     pub(super) item: PaneItem,
-    pub(super) path: PathBuf,
+    pub(super) source: PeekSource,
 }
 
 impl Workspace {
     /// Show `path` in the quick look, replacing the file it shows.
     pub fn peek_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.peek.as_ref().is_some_and(|peek| peek.path == path) {
+        if self.peek.as_ref().is_some_and(|peek| {
+            matches!(&peek.source, PeekSource::Local(current) if *current == path)
+        }) {
             self.focus_active(window, cx);
             return;
         }
@@ -26,7 +41,7 @@ impl Workspace {
             let item = factory(path.clone(), window, cx);
             this.peek = Some(Peek {
                 item,
-                path: path.clone(),
+                source: PeekSource::Local(path.clone()),
             });
             this.focus_active(window, cx);
             cx.notify();
@@ -45,17 +60,48 @@ impl Workspace {
     /// Move the quick look's view into the layout, placed like a file opened
     /// from the sidebar.
     pub(super) fn pin_peek(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Peek { item, path }) = self.peek.take() else {
+        let Some(Peek { item, source }) = self.peek.take() else {
             return;
         };
-        let id = self.file_pane(item, path, cx);
+        let id = match source {
+            PeekSource::Local(path) => self.file_pane(item, path, cx),
+            PeekSource::Herdr {
+                session,
+                machine,
+                root,
+                subscription,
+                ..
+            } => {
+                let id = self.alloc_id();
+                let mut pane = Pane {
+                    item,
+                    session: None,
+                    linked_session: Some(session),
+                    cwd: self.space().root.clone(),
+                    path: None,
+                    session_file: None,
+                    herdr_address: None,
+                    agent_target: Some(pi_rpc::AgentTarget::Remote {
+                        machine,
+                        cwd: root,
+                    }),
+                    title: SharedString::default(),
+                    running: false,
+                    needs_you: false,
+                    _subscriptions: vec![subscription],
+                };
+                pane.sync_chrome(cx);
+                self.panes.insert(id, pane);
+                id
+            }
+        };
         self.place_preview(id, window, cx);
         cx.notify();
     }
 
     /// Run `then` once the shown file may be dropped: right away when it has
     /// no unsaved edits, else after "Close without saving?".
-    fn leave_peek(
+    pub(super) fn leave_peek(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
