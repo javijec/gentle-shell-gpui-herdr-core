@@ -1571,3 +1571,68 @@ test("5D refuses a commit when the staged index changed since the snapshot", {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test("8C guarded remote amend updates the message without staged files", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const cp = require("node:child_process");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-8c-amend-"));
+  try {
+    gitInit(root);
+    const h = harness(root);
+    const original = await gitSnapshot(h, root, "amend-s1");
+    const withoutStage = await gitWrite(h, root, original,
+      "herdr_git_commit", "amend-refuse", {
+        summary: "fix: rewritten", description: "Explanation", amend: false,
+      });
+    assert.equal(withoutStage.success, false);
+    const amended = await gitWrite(h, root, original,
+      "herdr_git_commit", "amend-yes", {
+        summary: "fix: rewritten", description: "Explanation", amend: true,
+      });
+    assert.equal(amended.success, true, amended.error);
+    const message = cp.execFileSync("git",
+      ["-C", root, "log", "-1", "--format=%B"]).toString();
+    assert.match(message, /^fix: rewritten\n\nExplanation\n/);
+    assert.notEqual(amended.data.headOid, original.headOid);
+    const stale = await gitWrite(h, root, original,
+      "herdr_git_commit", "amend-stale", {
+        summary: "fix: shouldn't happen", amend: true,
+      });
+    assert.equal(stale.success, false);
+    assert.match(stale.error, /HEAD or branch changed/);
+    assert.equal(h.childWrites.length, 1, "private Git bridge only");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("8C Commit & Push preflights remote transport before changing HEAD", {
+  skip: process.platform === "win32",
+}, async () => {
+  const os = require("node:os");
+  const cp = require("node:child_process");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-8c-push-"));
+  try {
+    const git = gitInit(root);
+    fs.writeFileSync(path.join(root, "tracked.txt"), "staged\n");
+    git("add", "--", "tracked.txt");
+    const h = harness(root);
+    const snap = await gitSnapshot(h, root, "push-s1");
+    const failed = await gitWrite(h, root, snap,
+      "herdr_git_commit", "push-no-remote", {
+        summary: "fix: check remote first", push: true,
+      });
+    assert.equal(failed.success, false);
+    assert.match(failed.error, /safe configured Git remote/);
+    assert.equal(cp.execFileSync("git",
+      ["-C", root, "rev-parse", "HEAD"]).toString().trim(), snap.headOid);
+    assert.equal(cp.execFileSync("git",
+      ["-C", root, "diff", "--cached", "--name-only"]).toString().trim(), "tracked.txt");
+    assert.equal(h.childWrites.length, 1, "no Windows Git fallback or Pi bash");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -806,8 +806,10 @@ impl RemoteFilesView {
                         cx.emit(RemoteFilesEvent::OpenFile(absolute));
                     }
                 }
-                ChangesEvent::RemoteCommit { summary, description } => {
-                    this.git_commit_message(summary.clone(), description.clone(), cx);
+                ChangesEvent::RemoteCommit { summary, description, amend, push } => {
+                    this.git_commit_message(
+                        summary.clone(), description.clone(), *amend, *push, cx,
+                    );
                 }
                 ChangesEvent::RemoteBulkStage { stage } => {
                     this.git_bulk_stage(*stage, cx);
@@ -2028,7 +2030,15 @@ impl RemoteFilesView {
                         this.refresh_git(cx);
                     }
                     Err(error) => {
-                        this.git_error = Some(friendly_error(&error.to_string()));
+                        let message = friendly_error(&error.to_string());
+                        if message.contains("Commit succeeded, but push failed:") {
+                            // Commit changed HEAD even though the network push failed.
+                            // Refresh before the next mutation; never reuse stale guards.
+                            this.refresh_git(cx);
+                            this.git_feedback = Some(message);
+                        } else {
+                            this.git_error = Some(message);
+                        }
                     }
                 }
                 cx.notify();
@@ -2091,12 +2101,15 @@ impl RemoteFilesView {
     }
 
     fn git_commit_message(
-        &mut self, summary: String, description: String, cx: &mut Context<Self>,
+        &mut self, summary: String, description: String, amend: bool, push: bool,
+        cx: &mut Context<Self>,
     ) {
         let Some(snapshot) = self.git.as_ref().filter(|snapshot| {
             snapshot.writes_enabled && !snapshot.files_truncated
-                && snapshot.files.iter().any(|entry| entry.staged().is_some())
+                && (snapshot.files.iter().any(|entry| entry.staged().is_some())
+                    || (amend && snapshot.head_oid.is_some()))
         }) else { return; };
+        if push && snapshot.head_oid.is_none() { return; }
         if summary.trim().is_empty() || summary.len() > 120
             || summary.chars().any(char::is_control)
             || description.len() > 4000 || description.contains('\0')
@@ -2108,6 +2121,7 @@ impl RemoteFilesView {
             "expectedBranch": snapshot.current_branch,
             "expectedIndexToken": snapshot.index_token,
             "summary": summary, "description": description,
+            "amend": amend, "push": push,
         });
         self.git_write(command, cx);
     }

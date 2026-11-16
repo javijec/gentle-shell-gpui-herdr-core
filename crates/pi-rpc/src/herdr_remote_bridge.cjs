@@ -2094,12 +2094,34 @@ async function remoteGitWrite(req) {
           message.includes("\0")) {
         throw new Error("Invalid commit description");
       }
-      if (!hasStaged) {
+      if ((req.amend !== undefined && typeof req.amend !== "boolean") ||
+          (req.push !== undefined && typeof req.push !== "boolean")) {
+        throw new Error("Invalid commit action flags");
+      }
+      const amend = req.amend === true;
+      const push = req.push === true;
+      if (amend && !req.expectedHead) {
+        throw new Error("Amend requires an existing commit");
+      }
+      if (!hasStaged && !amend) {
         throw new Error("No staged changes to commit");
       }
-      const args = ["commit", "--no-verify", "--no-gpg-sign", "-m", summary];
+      // Validate the configured transport before changing HEAD. A credential
+      // or network failure after the commit must be surfaced explicitly.
+      if (push) {
+        await gitNetworkDestination(toplevel, validatedBranchName(req.expectedBranch), false);
+      }
+      const args = ["commit", "--no-verify", "--no-gpg-sign",
+        ...(amend ? ["--amend"] : []), "-m", summary];
       if (message.trim()) args.push("-m", message.trim());
       await runGitMutation(toplevel, args);
+      if (push) {
+        try {
+          await guardedNetworkAction({ ...req, type: "herdr_git_push" }, toplevel);
+        } catch (error) {
+          throw new Error("Commit succeeded, but push failed: " + error.message);
+        }
+      }
     } else if (req.type === "herdr_git_create_branch" ||
                req.type === "herdr_git_switch_branch") {
       if (!req.expectedBranch || !req.expectedHead) {
