@@ -114,7 +114,7 @@ impl PiProcess {
     /// Spawn the backend and start the reader threads. `incoming` receives
     /// every event, UI request, stderr line and finally `Exited`.
     pub fn spawn(spec: &LaunchSpec) -> Result<(Arc<Self>, async_channel::Receiver<Incoming>)> {
-        let mut command = crate::command(&spec.program);
+        let mut command = crate::launch::backend_command(&spec.program);
         command
             .args(&spec.args)
             .current_dir(&spec.cwd)

@@ -19,6 +19,8 @@ In 8D:
 4. Remote Herdr agents continue to use `park_for_app_quit()`; they are excluded from the completion barrier and **never killed just because the window closes**.
 5. A platform test spawns a real native child and verifies that the new completion signal follows actual process reaping.
 
+A recognized self-contained **Windows** `gentle-shell.cmd` launcher is now unwrapped for RPC only: GPUI launches the bundled `node.exe` plus `gentle-shell.mjs` directly. That removes the short-lived CMD parent which could exit before a process-tree termination. Unrecognized/custom launchers still run unchanged. A Windows regression test verifies this direct launch and fallback.
+
 A shutdown timeout reports a diagnostic but cannot guarantee cleanup of a process already orphaned by another launcher. Do not kill the global Herdr Core service or unrelated Node processes as a workaround.
 
 ## Functional parity acceptance checklist
