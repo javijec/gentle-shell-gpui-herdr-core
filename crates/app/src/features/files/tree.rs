@@ -220,6 +220,8 @@ impl FileTreeView {
                 ChangesEvent::RemoteStage { .. }
                 | ChangesEvent::RemoteOpenDiff(_)
                 | ChangesEvent::RemoteOpenFile(_)
+                | ChangesEvent::RemoteGenerateMessage
+                | ChangesEvent::RemoteLastCommitMessage
                 | ChangesEvent::RemoteCommit { .. }
                 | ChangesEvent::RemoteBulkStage { .. }
                 | ChangesEvent::RemoteStashPush(_)
