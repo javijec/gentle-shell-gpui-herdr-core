@@ -483,7 +483,7 @@ impl Workspace {
                 // shutdown path; never kill long-running JaviPi agents here.
                 this.save_now(cx);
                 for session in this.sessions() {
-                    session.read(cx).shutdown_for_app_quit();
+                    let _ = session.read(cx).shutdown_for_app_quit();
                 }
             }),
             // The title-bar update pill follows this app's own update state.
