@@ -45,7 +45,7 @@ pub enum ChangesEvent {
     RemoteOpenDiff(String),
     /// File navigation stays bound to the active Herdr agent, not Windows.
     RemoteOpenFile(String),
-    RemoteCommit(String),
+    RemoteCommit { summary: String, description: String },
     RemoteBulkStage { stage: bool },
     RemoteStashPush(String),
     RemoteDiscard { path: String, index: char, worktree: char, staged: bool },
@@ -103,7 +103,7 @@ pub struct ChangesView {
     remote_tree: Option<WorkTree>,
     remote_writable: bool,
     remote_busy: bool,
-    remote_confirm_commit: Option<String>,
+    remote_confirm_commit: Option<(String, String)>,
     tree_mode: bool,
     collapsed: HashSet<(Side, String)>,
     selected: Option<(Side, String)>,
@@ -1131,14 +1131,21 @@ impl ChangesView {
             return;
         }
         let summary = self.summary_text(cx);
-        if summary.is_empty() {
+        let description = self.description.read(cx).value().to_string();
+        if summary.is_empty() || summary.len() > 120
+            || summary.chars().any(char::is_control)
+            || description.len() > 4000 || description.contains('\0')
+        {
             return;
         }
-        if self.remote_confirm_commit.as_deref() == Some(summary.as_str()) {
+        let reviewed = (summary, description);
+        if self.remote_confirm_commit.as_ref() == Some(&reviewed) {
             self.remote_confirm_commit = None;
-            cx.emit(ChangesEvent::RemoteCommit(summary));
+            cx.emit(ChangesEvent::RemoteCommit {
+                summary: reviewed.0, description: reviewed.1,
+            });
         } else {
-            self.remote_confirm_commit = Some(summary);
+            self.remote_confirm_commit = Some(reviewed);
         }
         cx.notify();
     }
@@ -1149,16 +1156,24 @@ impl ChangesView {
             let staged = self.tree().is_some_and(|tree| {
                 tree.entries.iter().any(|entry| entry.staged().is_some())
             });
+            let description = self.description.read(cx).value().to_string();
             let confirmed = !summary.is_empty()
-                && self.remote_confirm_commit.as_deref() == Some(summary.as_str());
+                && self.remote_confirm_commit.as_ref() == Some(&(summary.clone(), description.clone()));
             return v_flex()
                 .flex_none().mx_2().mb_2().mt_1().px_3().py_2().gap_1()
                 .rounded_xl().bg(ui::surface())
                 .child(Input::new(&self.summary).appearance(false))
+                .child(
+                    div().min_h(px(48.)).text_size(px(13.))
+                        .text_color(ui::muted())
+                        .child(Textarea::new(&self.description).appearance(false)),
+                )
                 .child(Button::new("changes-remote-commit")
                     .primary().small().w_full()
                     .label(if confirmed { "Confirm commit" } else { "Commit" })
                     .disabled(!staged || summary.is_empty() || summary.len() > 120
+                        || summary.chars().any(char::is_control)
+                        || description.len() > 4000 || description.contains('\0')
                         || !self.remote_writable || self.remote_busy)
                     .on_click(cx.listener(|this, _, _, cx| this.submit_remote_commit(cx))))
                 .when(confirmed, |row| row.child(
