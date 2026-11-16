@@ -36,20 +36,48 @@ usual tools, then install and launch through `agent-device`.
 const THEME_GUIDE: &str = include_str!("../../../themes/GUIDE.md");
 
 /// How an agent makes an app theme; `dir` is the app's themes folder, where
-/// the guide is.
+/// the guide, the examples and the previews are.
 fn themes(dir: &Path) -> String {
     format!(
         "\
 - App themes: when the user asks you to theme, restyle or decorate this app itself (its colors, an \
-animated background or scene like falling petals, a koi pond, rain), first read `{guide}`, then write \
-the theme (and its scene) into `{dir}`. The app shows it within seconds; tell the user to pick it in \
-Configuration › Theme › Animated backgrounds. After writing a scene, check `{error}`: if it exists, the \
-scene failed and it says why.
+animated background or scene like falling petals, a koi pond, rain), first read `{guide}` and two \
+similar examples in `{examples}`, then write the theme (and its scene) into `{dir}`. A few seconds \
+after each save, look at `{previews}/<stem>.png` (four moments of the scene) and read \
+`{previews}/<stem>.txt` (frame cost, frame rate, errors); fix and repeat until it looks good and runs \
+at full rate. If the active theme's scene fails, `{error}` says why. Shapes drawn in code look like \
+illustrations: when the user wants something realistic, ask them for a picture and make its own pixels \
+move with `effects` (water flowing, leaves swaying), reading coordinates off `{previews}/<stem>.grid.png` \
+(the guide's \"Realistic themes start from a picture\"). Tell the user to pick the theme in \
+Configuration › Theme › Animated backgrounds.
 ",
         guide = dir.join("GUIDE.md").display(),
+        examples = dir.join("examples").display(),
+        previews = dir.join("previews").display(),
         dir = dir.display(),
         error = dir.join("scene-error.txt").display(),
     )
+}
+
+/// Write the shipped example themes and their scenes into `dir/examples`,
+/// for agents to read; the app doesn't load themes from there.
+fn write_examples(dir: &Path) {
+    let dir = dir.join("examples");
+    for name in crate::shared::backdrop::builtin_scene_names() {
+        if let Some(scene) = crate::shared::backdrop::builtin_scene(name) {
+            write_if_changed(&dir.join(format!("{name}.js")), scene);
+        }
+    }
+    for text in crate::shared::themes::example_theme_texts() {
+        let Ok(theme) = serde_json::from_str::<serde_json::Value>(text) else {
+            continue;
+        };
+        let Some(name) = theme.get("name").and_then(|name| name.as_str()) else {
+            continue;
+        };
+        let stem = crate::shared::backdrop::model::file_stem(name);
+        write_if_changed(&dir.join(format!("{stem}.json")), text);
+    }
 }
 
 /// Write `text` to `path` unless it already holds it.
@@ -77,6 +105,7 @@ pub fn agent_instructions(prefs: Prefs) -> Option<PathBuf> {
             .collect();
         let guide = THEME_GUIDE.replace("BUILTIN_SCENES", &scenes.join(", "));
         if write_if_changed(&dir.join("GUIDE.md"), &guide).is_some() {
+            write_examples(&dir);
             text.push_str(&themes(&dir));
         }
     }

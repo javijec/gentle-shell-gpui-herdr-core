@@ -6,6 +6,7 @@
 //! `cx`, so the resolved colors of the active theme are mirrored in a
 //! process-wide lock that [`select`] and [`init`] keep in step.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 
@@ -528,6 +529,11 @@ pub fn example_themes() -> Vec<Theme> {
         .collect()
 }
 
+/// The example themes' files as shipped, for agents to read as references.
+pub fn example_theme_texts() -> &'static [&'static str] {
+    EXAMPLES
+}
+
 /// Gentle Shell's themes (installed files over the embedded copies), then the
 /// user's Pi and app themes, then the example app themes and the popular
 /// schemes. Names are unique, first wins.
@@ -567,7 +573,8 @@ fn read_user_themes(agent: &Path) -> Vec<Theme> {
 
 /// A cheap fingerprint of a themes folder: each file with its size and
 /// modification time, so a poll notices themes (and their scenes and
-/// images) added, edited or removed.
+/// images) added, edited or removed. Folders (the app's `previews` and
+/// `examples`) don't count: no theme lives in them.
 fn dir_stamp(dir: &Path) -> Vec<(PathBuf, u64, Option<std::time::SystemTime>)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -575,7 +582,7 @@ fn dir_stamp(dir: &Path) -> Vec<(PathBuf, u64, Option<std::time::SystemTime>)> {
     let mut stamp: Vec<_> = entries
         .flatten()
         .filter_map(|e| {
-            let meta = e.metadata().ok()?;
+            let meta = e.metadata().ok().filter(|m| m.is_file())?;
             Some((e.path(), meta.len(), meta.modified().ok()))
         })
         .collect();
@@ -791,15 +798,36 @@ const THEME_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Re-read Pi's and the app's theme folders whenever their files change, so
 /// a theme shows up in the picker (and an edited active theme applies)
-/// without a restart.
+/// without a restart, and keep the previews of the app's themes current
+/// (`backdrop::preview`), so the agent that wrote one can look at it.
 fn watch_user_themes(agent: PathBuf, cx: &mut App) {
+    let app_dir = app_themes_dir();
     let dirs: Vec<PathBuf> = std::iter::once(agent.join("themes"))
-        .chain(app_themes_dir())
+        .chain(app_dir.clone())
         .collect();
     cx.spawn(async move |cx| {
         fn stamp(dirs: &[PathBuf]) -> Vec<Vec<(PathBuf, u64, Option<std::time::SystemTime>)>> {
             dirs.iter().map(|d| dir_stamp(d)).collect()
         }
+        // Previews are drawn off the UI thread, after the themes apply.
+        let preview = |user: Vec<Theme>, mut drawn: HashMap<String, Theme>| {
+            let dir = app_dir.clone();
+            async move {
+                if let Some(dir) = dir {
+                    backdrop::preview::refresh(&user, &dir, &mut drawn);
+                }
+                drawn
+            }
+        };
+        let agent_now = agent.clone();
+        let user = cx
+            .background_executor()
+            .spawn(async move { read_user_themes(&agent_now) })
+            .await;
+        let mut drawn = cx
+            .background_executor()
+            .spawn(preview(user, HashMap::new()))
+            .await;
         let mut last = stamp(&dirs);
         loop {
             cx.background_executor().timer(THEME_POLL).await;
@@ -817,7 +845,8 @@ fn watch_user_themes(agent: PathBuf, cx: &mut App) {
                 continue;
             };
             last = now;
-            cx.update(|cx| replace_user_themes(user, cx));
+            cx.update(|cx| replace_user_themes(user.clone(), cx));
+            drawn = cx.background_executor().spawn(preview(user, drawn)).await;
         }
     })
     .detach();

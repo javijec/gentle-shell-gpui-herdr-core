@@ -72,7 +72,7 @@ crates/
 │       │   ├── session/  workspace/  workspaces/  sessions/  palette/  profiles/  settings/  usage/  setup/
 │       │   ├── browser/  devices/  music/  files/  terminal/  git/  history/  providers/  memory/  onboarding/  notices/  alerts/  hydration/  docs/
 │       │   └── app_update/  updates/  welcome/
-│       ├── platform/            # OS integration: single instance, agent command shims, Dock and window icons, installed editors
+│       ├── platform/            # OS integration: single instance, agent command shims, Dock and window icons, installed editors, power state
 │       └── shared/              # pieces used by several features, with no logic of their own:
 │                                # ui, floating, themes, backdrop (theme scenes), assets, banner, surge, pane, gentle_state
 ├── core/                        # shared pure logic (gentle-core)

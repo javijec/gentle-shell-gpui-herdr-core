@@ -2182,7 +2182,7 @@ dependencies = [
 
 [[package]]
 name = "gentle-core"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "regex",
  "serde",
@@ -2191,7 +2191,7 @@ dependencies = [
 
 [[package]]
 name = "gentle-shell-gpui"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -2208,6 +2208,7 @@ dependencies = [
  "herdr-client",
  "ignore",
  "image",
+ "imagesize 0.14.0",
  "lzma-rs",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -2216,6 +2217,7 @@ dependencies = [
  "pi-rpc",
  "raw-window-handle",
  "regex",
+ "resvg 0.46.0",
  "rquickjs",
  "serde",
  "serde_json",
@@ -3267,7 +3269,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "herdr-client"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "serde",
  "serde_json",
@@ -5337,7 +5339,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rpc"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "async-channel",
