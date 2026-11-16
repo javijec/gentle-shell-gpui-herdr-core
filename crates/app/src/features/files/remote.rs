@@ -2163,16 +2163,12 @@ impl RemoteFilesView {
             let _ = this.update_in(cx, |this, window, cx| {
                 if let Ok(reply) = result
                     && let (Some(summary), Some(description)) = (
-                        reply.data["summary"].as_str(),
-                        reply.data["description"].as_str(),
+                        reply.data["summary"].as_str(), reply.data["description"].as_str(),
                     )
                 {
                     this.changes.update(cx, |view, cx| {
                         view.set_remote_last_message(
-                            summary.to_owned(),
-                            description.to_owned(),
-                            window,
-                            cx,
+                            summary.to_owned(), description.to_owned(), window, cx,
                         );
                     });
                 }
