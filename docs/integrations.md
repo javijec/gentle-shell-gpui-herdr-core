@@ -354,7 +354,7 @@ App paths: `dirs::data_dir()/gentle-shell-gpui/` (on macOS, `~/Library/Applicati
 | `<agent>/gentle-ai/managed-assets.json` | Gentle AI installer | R/W (over RPC, read as the `managed_assets` store; written only by Make default) | `profiles/apply.rs` |
 | `<agent>/claude-bridge.json` | Claude bridge | R/W | `settings/claude.rs` |
 | `<agent>/themes/*.json` | User | R | `shared/themes.rs` |
-| `<data>/gentle-shell-gpui/themes/` (`*.json`, `*.gentletheme`, scene `*.js`, images; `GUIDE.md` and `scene-error.txt` written by the app) | App, the user and their agents | R/W | `shared/themes.rs`, `shared/backdrop/`, `devices/instructions.rs` (`GUIDE.md`) |
+| `<data>/gentle-shell-gpui/themes/` (`*.json`, `*.gentletheme`, scene `*.js`, images; written by the app: `GUIDE.md`, `scene-error.txt`, `examples/` (the shipped example themes and scenes, for agents to read) and `previews/<stem>.png` / `.txt` (each scene theme drawn offscreen), `.grid.png` (a picture with its coordinate grid and effect regions) and `.effects.png` (its effects in motion)) | App, the user and their agents | R/W | `shared/themes.rs`, `shared/backdrop/` (`preview.rs`), `devices/instructions.rs` (`GUIDE.md`, `examples/`) |
 | `<config>/profiles.json`, `<config>/models.json`, `<config>/profile-fallbacks.json` | Gentle AI | R/W (over RPC: the `profiles`, `models`, `profile_fallbacks` stores; Make default still writes `profiles.json` and `models.json` directly) | `profiles/files.rs`, `profiles/env.rs` |
 | `<config>/permission-mode.json` (2 keys, 0600, atomic write) | Gentle AI | R/W | `shared/gentle_state.rs` |
 | `<config>/notifications.json` | Gentle AI | R/W | `features/alerts/policy.rs` |

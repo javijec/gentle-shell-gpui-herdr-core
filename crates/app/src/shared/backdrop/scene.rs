@@ -32,9 +32,15 @@ const CPU_SHARE: f64 = 0.08;
 /// Failed frames in a row before the scene is given up.
 const MAX_FAILURES: u32 = 3;
 
-/// One computed frame: `STRIDE` numbers per command, for a window of `size`.
+/// One computed frame: `STRIDE` numbers per command, the x, y pairs its paths
+/// point into (`kit.js` documents both), where the theme's image sits in it
+/// (`[x, y, w, h]`, moved by its camera) and its effects' patches, for a
+/// window of `size`.
 pub struct Frame {
     pub commands: Vec<f64>,
+    pub points: Vec<f64>,
+    pub image: Option<[f32; 4]>,
+    pub patches: Vec<super::effects::Patch>,
     pub size: (f32, f32),
 }
 
@@ -57,7 +63,7 @@ struct Shared {
 
 /// How long to wait between frames of a scene that takes `cost` each, at
 /// least `floor`.
-fn pace(cost: Duration, floor: Duration) -> Duration {
+pub(super) fn pace(cost: Duration, floor: Duration) -> Duration {
     cost.div_f64(CPU_SHARE).clamp(FASTEST, SLOWEST).max(floor)
 }
 
@@ -77,6 +83,12 @@ pub struct Setup {
     pub speed: f32,
     /// The theme's colors, as a JSON object (`g.theme` in the scene).
     pub colors: String,
+    /// The theme's image size and camera, so each frame places the image
+    /// and the scene can draw on it (`g.image`, `g.fromImage`).
+    pub image: Option<((f32, f32), Option<super::model::Camera>)>,
+    /// The image's bytes and its effects, decoded and prepared on the
+    /// scene's thread.
+    pub effects: Option<(Arc<gpui_kit::Image>, Vec<super::model::Effect>)>,
 }
 
 impl Scene {
@@ -212,34 +224,50 @@ impl Engine {
         );
     }
 
-    /// The commands for a `size` window at scene time `time`.
-    pub fn frame(&self, size: (f32, f32), time: f64) -> Result<Vec<f64>, String> {
+    /// The commands and path points for a `size` window at scene time `time`,
+    /// with the theme's image at `image` (`[x, y, w, h]`), if it has one.
+    pub fn frame(
+        &self,
+        size: (f32, f32),
+        time: f64,
+        image: Option<[f32; 4]>,
+    ) -> Result<(Vec<f64>, Vec<f64>), String> {
         self.arm(FRAME_BUDGET);
         self.context.with(|ctx| {
             let api: Object = ctx.globals().get("__api").map_err(|e| e.to_string())?;
             let frame: Function = api.get("frame").map_err(|e| e.to_string())?;
+            let image = image.map(|rect| rect.to_vec());
             let count = frame
-                .call::<_, f64>((size.0, size.1, time, self.cell))
+                .call::<_, f64>((size.0, size.1, time, self.cell, image))
                 .map_err(|e| js_error(&ctx, e))? as usize;
-            let out: Function = api.get("out").map_err(|e| e.to_string())?;
-            let buffer: TypedArray<f64> = out.call(()).map_err(|e| js_error(&ctx, e))?;
-            let bytes = buffer.arraybuffer().map_err(|e| e.to_string())?;
-            // SAFETY: no JS runs while `bytes` is borrowed, so nothing can
-            // detach or resize the buffer under it; it's copied right away.
-            let bytes = unsafe { bytes.as_bytes() }.ok_or("the frame buffer is gone")?;
-            let used = (count * STRIDE * 8).min(bytes.len());
-            Ok(bytes[..used]
-                .as_chunks::<8>()
-                .0
-                .iter()
-                .map(|b| f64::from_ne_bytes(*b))
-                .collect())
+            let read = |name: &str, len: usize| -> Result<Vec<f64>, String> {
+                let get: Function = api.get(name).map_err(|e| e.to_string())?;
+                let buffer: TypedArray<f64> = get.call(()).map_err(|e| js_error(&ctx, e))?;
+                let bytes = buffer.arraybuffer().map_err(|e| e.to_string())?;
+                // SAFETY: no JS runs while `bytes` is borrowed, so nothing can
+                // detach or resize the buffer under it; it's copied right away.
+                let bytes = unsafe { bytes.as_bytes() }.ok_or("the frame buffer is gone")?;
+                let used = (len * 8).min(bytes.len());
+                Ok(bytes[..used]
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| f64::from_ne_bytes(*b))
+                    .collect())
+            };
+            let pairs: Function = api.get("pointCount").map_err(|e| e.to_string())?;
+            let pairs = pairs.call::<_, f64>(()).map_err(|e| js_error(&ctx, e))? as usize;
+            Ok((read("out", count * STRIDE)?, read("points", pairs * 2)?))
         })
     }
 }
 
 fn run(shared: &Shared, setup: Setup) -> Result<(), String> {
     let engine = Engine::new(&setup.code, &setup.colors, setup.cell)?;
+    let mut effects = setup.effects.as_ref().and_then(|(image, effects)| {
+        let picture = super::effects::Picture::decode(&image.bytes)?;
+        Some(super::effects::Effects::new(picture, effects))
+    });
     let mut time = 0f64;
     let mut last = Instant::now();
     let mut failures = 0;
@@ -266,14 +294,32 @@ fn run(shared: &Shared, setup: Setup) -> Result<(), String> {
             // A still scene shows a moment into it, not its empty start.
             time = 20.;
         }
-        match engine.frame(size, time) {
-            Ok(commands) => {
+        let image = setup.image.map(|(natural, camera)| {
+            super::model::image_rect(size, natural, camera.as_ref(), time)
+        });
+        match engine.frame(size, time, image) {
+            Ok((commands, points)) => {
                 failures = 0;
                 if drawn.is_none() {
                     super::report(&setup.theme, None);
                 }
                 drawn = Some(size);
-                *shared.frame.lock().unwrap() = Some(Arc::new(Frame { commands, size }));
+                // Effects render no finer than the window shows the picture.
+                let shown = match (image, setup.image) {
+                    (Some(rect), Some(((natural, _), _))) => rect[2] / natural,
+                    _ => 1.,
+                };
+                let patches = effects
+                    .as_mut()
+                    .map(|e| e.render(time, shown))
+                    .unwrap_or_default();
+                *shared.frame.lock().unwrap() = Some(Arc::new(Frame {
+                    commands,
+                    points,
+                    image,
+                    patches,
+                    size,
+                }));
             }
             Err(err) => {
                 failures += 1;
@@ -313,8 +359,8 @@ mod tests {
             let engine = Engine::new(code, COLORS, 22.).unwrap_or_else(|e| panic!("{name}: {e}"));
             for t in [0., 7.5, 31.] {
                 let started = Instant::now();
-                let commands = engine
-                    .frame((1440., 900.), t)
+                let (commands, _) = engine
+                    .frame((1440., 900.), t, None)
                     .unwrap_or_else(|e| panic!("{name} at {t}: {e}"));
                 assert!(commands.len() > STRIDE * 10, "{name} drew almost nothing");
                 assert_eq!(commands.len() % STRIDE, 0);
@@ -332,7 +378,7 @@ mod tests {
         let endless = "SCENES.x = { draw() { for (;;) {} } }";
         let engine = Engine::new(endless, COLORS, 22.).unwrap();
         let started = Instant::now();
-        assert!(engine.frame((800., 600.), 0.).is_err());
+        assert!(engine.frame((800., 600.), 0., None).is_err());
         assert!(started.elapsed() < Duration::from_secs(2));
 
         let broken = Engine::new("SCENES.x = { draw( }", COLORS, 22.)
@@ -352,7 +398,7 @@ mod tests {
         let probe = "SCENES.x = { draw(g) { g.text(0, 0, [typeof require, typeof fetch, \
             typeof setTimeout, typeof std, typeof os].join(','), '#fff') } }";
         let engine = Engine::new(probe, COLORS, 22.).unwrap();
-        let commands = engine.frame((100., 100.), 0.).unwrap();
+        let (commands, _) = engine.frame((100., 100.), 0., None).unwrap();
         let text: String = commands
             .as_chunks::<STRIDE>()
             .0
@@ -362,6 +408,108 @@ mod tests {
         assert_eq!(
             text,
             "undefined,undefined,undefined,undefined,undefined".replace(' ', "")
+        );
+    }
+
+    /// The commands of one frame of `scene`, as (op, args) rows, and its points.
+    fn draw(scene: &str) -> (Vec<[f64; STRIDE]>, Vec<f64>) {
+        let engine = Engine::new(scene, COLORS, 22.).unwrap();
+        let (commands, points) = engine.frame((800., 600.), 1., None).unwrap();
+        (commands.as_chunks::<STRIDE>().0.to_vec(), points)
+    }
+
+    #[test]
+    fn a_path_built_once_draws_where_the_transform_puts_it() {
+        // A unit square built at the top of the file, drawn twice: moved and
+        // scaled, then turned a quarter around the same spot.
+        let (commands, points) = draw(
+            "const SQUARE = path().rect(0, 0, 1, 1);
+             SCENES.x = { draw(g) {
+               g.save(); g.translate(100, 50); g.scale(10); SQUARE.fill('#fff'); g.restore();
+               g.translate(100, 50); g.rotate(Math.PI / 2); g.scale(10); SQUARE.stroke('#fff', 1, 2);
+             } }",
+        );
+        assert_eq!(commands.len(), 2);
+        let pairs = |c: &[f64; STRIDE]| {
+            let (start, count) = (c[1] as usize, c[2] as usize);
+            points[start * 2..(start + count) * 2]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|p| [p[0].round(), p[1]])
+                .map(|p| [p[0], if p[0].is_nan() { p[1] } else { p[1].round() }])
+                .collect::<Vec<_>>()
+        };
+        let fill = pairs(&commands[0]);
+        assert_eq!((commands[0][0], commands[0][3]), (7., 0.), "a fill");
+        assert_eq!(
+            &fill[..4],
+            &[[100., 50.], [110., 50.], [110., 60.], [100., 60.]]
+        );
+        assert!(fill[4][0].is_nan() && fill[4][1] == 1., "the square closes");
+        let stroke = pairs(&commands[1]);
+        assert_eq!(commands[1][3], 20., "the width scales with the shape");
+        assert_eq!(&stroke[..3], &[[100., 50.], [100., 60.], [90., 60.]]);
+    }
+
+    #[test]
+    fn shapes_under_a_turn_become_outlines_and_plain_ones_stay_quads() {
+        let (commands, _) = draw(
+            "SCENES.x = { draw(g) {
+               g.rect(0, 0, 10, 10, '#fff'); g.ellipse(5, 5, 4, 2, '#fff');
+               g.translate(20, 0); g.rect(0, 0, 10, 10, '#fff');
+               g.rotate(0.3); g.rect(0, 0, 10, 10, '#fff'); g.ellipse(5, 5, 4, 2, '#fff');
+             } }",
+        );
+        let ops: Vec<f64> = commands.iter().map(|c| c[0]).collect();
+        assert_eq!(ops, [1., 2., 1., 7., 7.]);
+        assert_eq!(
+            commands[2][1], 20.,
+            "a translated rect is still a quad, moved"
+        );
+    }
+
+    #[test]
+    fn noise_is_smooth_and_the_transform_resets_every_frame() {
+        let probe = "SCENES.x = { draw(g) {
+               const a = noise(1.30, 2.70, 0.5), b = noise(1.31, 2.70, 0.5);
+               const far = [0, 1, 2, 3, 4, 5, 6, 7].map(i => noise(i * 3.7, 1.1));
+               const spread = Math.max(...far) - Math.min(...far);
+               g.rect(0, 0, Math.abs(a - b) < 0.05 ? 1 : 0, spread > 0.3 ? 1 : 0, '#fff');
+               g.translate(500, 500);
+             } }";
+        let engine = Engine::new(probe, COLORS, 22.).unwrap();
+        for _ in 0..2 {
+            let (commands, _) = engine.frame((800., 600.), 0., None).unwrap();
+            // Nearby inputs stay close, distant ones vary; a frame's
+            // translate doesn't carry into the next (x stays 0).
+            assert_eq!(&commands[..5], &[1., 0., 0., 1., 1.]);
+        }
+    }
+
+    #[test]
+    fn pixel_art_draws_one_crisp_rect_per_run_and_mirrors() {
+        let (commands, _) = draw(
+            "const ART = pixels(['aab.', '.a  '], { a: '#ff0000', b: '#00ff00' });
+             SCENES.x = { draw(g) { g.pixels(ART, 10.4, 20.6, 3); g.pixels(ART, 0, 0, 2, 1, true); } }",
+        );
+        let rects: Vec<[f64; 5]> = commands
+            .iter()
+            .map(|c| [c[1], c[2], c[3], c[4], c[6]])
+            .collect();
+        let (red, green) = (f64::from(0xff0000), f64::from(0x00ff00));
+        assert_eq!(
+            rects,
+            [
+                // Snapped to (10, 21); "aa" is one rect, see-through skipped.
+                [10., 21., 6., 3., red],
+                [16., 21., 3., 3., green],
+                [13., 24., 3., 3., red],
+                // Mirrored in its 4-pixel width.
+                [4., 0., 4., 2., red],
+                [2., 0., 2., 2., green],
+                [4., 2., 2., 2., red],
+            ]
         );
     }
 }

@@ -15,7 +15,8 @@ base64 = "0.22"
 dunce = "1"
 # Device previews: PNG decoding for iOS screenshots and raw-frame construction;
 # pasted BMP (Windows' Snipping Tool) and TIFF images are re-encoded as PNG.
-image = { version = "0.25", default-features = false, features = ["png", "bmp", "tiff"] }
+# Theme pictures (jpg, png, webp) are decoded for their effects.
+image = { version = "0.25", default-features = false, features = ["png", "bmp", "tiff", "jpeg", "webp"] }
 serde.workspace = true
 serde_json.workspace = true
 gentle-core = { path = "../core" }
@@ -40,6 +41,11 @@ tar = "0.4"
 fontdb = "0.23"
 lzma-rs = "0.3"
 rquickjs = "0.14.0"
+# Theme scene previews for agents: a frame's shapes as SVG, rasterized to PNG
+# (the same resvg GPUI draws icons with).
+resvg = { version = "0.46", default-features = false, features = ["text", "raster-images"] }
+# A theme image's size without decoding it, for the camera over it.
+imagesize = "0.14"
 
 # The X11 window icon (GPUI's `WindowOptions::icon`), and the in-app browser
 # for the Gentle Design canvas: WebKitGTK as a child of the X11 window (GTK's
@@ -59,13 +65,15 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
+    "Win32_System_Power",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
 # The Dock icon when the binary runs outside its `.app` (`cargo run`).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+# NSProcessInfo: Low Power Mode, so animated themes can rest (platform::power).
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSProcessInfo"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder", "NSView", "NSWindow", "objc2-quartz-core"] }
 # The in-app browser for the Gentle Design canvas (WKWebView as a child view),
 # and its layer, rounded to the card's corners.

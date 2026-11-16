@@ -220,9 +220,13 @@ impl SettingsView {
                             .child(format!("{percent:.0}%")),
                     ),
             )
-            .when(active.background.as_ref().is_some_and(|b| b.scene.is_some()), |d| {
+            .when(active.background.as_ref().is_some_and(backdrop::Backdrop::moves), |d| {
                 let motion = backdrop::motion(cx);
                 let labels = backdrop::Motion::ALL.map(backdrop::Motion::label);
+                let note = backdrop::power_note(cx).map_or_else(
+                    || "Calm moves at half the rate; Still costs nothing. Scenes only move while this window is in front, at most Calm on battery, and hold still while saving power.".to_string(),
+                    |why| format!("{why} Scenes only move while this window is in front."),
+                );
                 d.child(
                     h_flex()
                         .pb_2()
@@ -248,7 +252,7 @@ impl SettingsView {
                                 .flex_1()
                                 .text_xs()
                                 .text_color(ui::faint())
-                                .child("Calm moves at half the rate; Still costs nothing. Scenes only move while this window is in front."),
+                                .child(note),
                         ),
                 )
             })

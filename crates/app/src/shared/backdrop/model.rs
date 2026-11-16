@@ -33,6 +33,12 @@ const MAX_IMAGE: u64 = 25 << 20;
 pub struct Backdrop {
     pub scene: Option<SceneCode>,
     pub image: Option<Arc<Image>>,
+    /// The image's size in pixels, when it could be read.
+    pub image_size: Option<(f32, f32)>,
+    /// A slow camera over the image (`camera`); `None` holds it still.
+    pub camera: Option<Camera>,
+    /// Effects on the image's own pixels (`effects`), in the order drawn.
+    pub effects: Vec<Effect>,
     /// Top to bottom; empty for none.
     pub sky: Vec<u32>,
     /// Seconds of scene time per second: 0 holds it still, at most 16.
@@ -44,6 +50,173 @@ pub struct Backdrop {
     /// How much the middle of the window, where the conversation is, is
     /// calmed toward the background (the sides stay lively), 0 to 1.
     pub veil: f32,
+}
+
+impl Backdrop {
+    /// Whether it animates: a scene, or a picture that a camera or effects
+    /// move (those run on an empty scene's clock).
+    pub fn moves(&self) -> bool {
+        self.scene.is_some()
+            || (self.image.is_some()
+                && self.image_size.is_some()
+                && (self.camera.is_some() || !self.effects.is_empty()))
+    }
+}
+
+/// An effect on a region of the picture itself, the way Wallpaper Engine's
+/// Water Flow and Foliage Sway move a painting's own water and leaves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Effect {
+    pub kind: EffectKind,
+    /// The region, a polygon in image coordinates (0–1 across, 0–1 down).
+    pub region: Vec<(f32, f32)>,
+    /// How soft the region's edge is, as a share of the image width.
+    pub feather: f32,
+    /// Cycles (flow), sways (sway) or flickers (light) per second of scene
+    /// time.
+    pub speed: f32,
+    /// How strong it is: flow's travel per cycle as a share of the image
+    /// height, sway's reach as a share of the image width, light's glow.
+    pub strength: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EffectKind {
+    /// The region's content keeps sliding along `direction` (image axes,
+    /// normalized) and loops seamlessly: falling water, a river, clouds.
+    Flow { direction: (f32, f32) },
+    /// The region's content ripples in place: leaves, grass, banners.
+    /// `scale` is how many waves cross the region; `ratio` how much of the
+    /// movement is vertical.
+    Sway { scale: f32, ratio: f32 },
+    /// The region's lights glow and flicker: its pixels brighter than
+    /// `threshold` (0–1), and only warm ones (lamps, fire) when `warm`,
+    /// brighten and bloom out `glow` (a share of the picture width), in
+    /// `color` (`0xrrggbb`) or their own; `flicker` (0–1) is how far the
+    /// light dips.
+    Light {
+        color: Option<u32>,
+        threshold: f32,
+        warm: bool,
+        glow: f32,
+        flicker: f32,
+    },
+}
+
+/// At most this many effects, and points per region.
+const MAX_EFFECTS: usize = 16;
+const MAX_POINTS: usize = 64;
+
+fn effect(value: &Value) -> Option<Effect> {
+    let get = |key: &str| value.get(key).and_then(Value::as_f64).map(|n| n as f32);
+    let pair = |value: &Value| -> Option<(f32, f32)> {
+        let a = value.as_array()?;
+        Some((a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32))
+    };
+    let region: Vec<(f32, f32)> = value
+        .get("region")?
+        .as_array()?
+        .iter()
+        .take(MAX_POINTS)
+        .filter_map(pair)
+        .map(|(u, v)| (u.clamp(0., 1.), v.clamp(0., 1.)))
+        .collect();
+    if region.len() < 3 {
+        return None;
+    }
+    let (kind, speed, strength) = match value.get("type").and_then(Value::as_str)? {
+        "flow" => {
+            let (x, y) = value.get("direction").and_then(pair).unwrap_or((0., 1.));
+            let length = x.hypot(y);
+            if length < 1e-3 {
+                return None;
+            }
+            (
+                EffectKind::Flow {
+                    direction: (x / length, y / length),
+                },
+                get("speed").unwrap_or(0.6).clamp(0.02, 4.),
+                get("strength").unwrap_or(0.02).clamp(0.001, 0.15),
+            )
+        }
+        "sway" => (
+            EffectKind::Sway {
+                scale: get("scale").unwrap_or(12.).clamp(1., 80.),
+                ratio: get("ratio").unwrap_or(0.3).clamp(0., 2.),
+            },
+            get("speed").unwrap_or(0.35).clamp(0.02, 3.),
+            get("strength").unwrap_or(0.003).clamp(0.0002, 0.03),
+        ),
+        "light" => (
+            EffectKind::Light {
+                color: value
+                    .get("color")
+                    .and_then(Value::as_str)
+                    .and_then(|s| hex_colors(s).first().copied()),
+                threshold: get("threshold").unwrap_or(0.45).clamp(0., 0.95),
+                warm: value.get("key").and_then(Value::as_str) != Some("bright"),
+                glow: get("glow").unwrap_or(0.01).clamp(0., 0.04),
+                flicker: get("flicker").unwrap_or(0.3).clamp(0., 1.),
+            },
+            get("speed").unwrap_or(0.5).clamp(0.02, 6.),
+            get("strength").unwrap_or(0.8).clamp(0.05, 3.),
+        ),
+        _ => return None,
+    };
+    Some(Effect {
+        kind,
+        region,
+        feather: get("feather").unwrap_or(0.008).clamp(0., 0.06),
+        speed,
+        strength,
+    })
+}
+
+/// A slow camera over the background image, the "Ken Burns" move that makes
+/// a still picture feel filmed: it breathes in toward `focus` and drifts
+/// sideways, one cycle every `period` seconds of scene time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Camera {
+    /// How much further in it goes at the deepest point, 0 to 0.3.
+    pub zoom: f32,
+    /// How far it drifts sideways, as a share of the window width, 0 to 0.15.
+    pub pan: f32,
+    /// Seconds of scene time per cycle, 10 to 900.
+    pub period: f32,
+    /// The point of the image it moves toward, 0 to 1 on each axis.
+    pub focus: (f32, f32),
+}
+
+/// Where the image sits in a `window`-sized area at scene time `t`, as
+/// `[x, y, w, h]`: covering it like `object-fit: cover`, then moved by the
+/// camera. The image always covers the whole area: the camera works inside
+/// the margin its zoom and pan leave.
+pub fn image_rect(
+    window: (f32, f32),
+    image: (f32, f32),
+    camera: Option<&Camera>,
+    t: f64,
+) -> [f32; 4] {
+    let (w, h) = window;
+    let cover = (w / image.0.max(1.)).max(h / image.1.max(1.));
+    let Some(camera) = camera else {
+        let (iw, ih) = (image.0 * cover, image.1 * cover);
+        return [(w - iw) / 2., (h - ih) / 2., iw, ih];
+    };
+    let phase = std::f64::consts::TAU * t / f64::from(camera.period);
+    // In and out on one cycle; sideways on a longer one, so the path doesn't repeat.
+    let breath = (0.5 - 0.5 * phase.cos()) as f32;
+    let sway = (phase / 1.7).sin() as f32;
+    let scale = cover * (1. + 2. * camera.pan) * (1. + camera.zoom * breath);
+    let (iw, ih) = (image.0 * scale, image.1 * scale);
+    // The focus point stays where cover put it while the image grows round it.
+    let (fx, fy) = camera.focus;
+    let (bw, bh) = (image.0 * cover, image.1 * cover);
+    let anchor = ((w - bw) / 2. + fx * bw, (h - bh) / 2. + fy * bh);
+    let x = anchor.0 - fx * iw + sway * camera.pan * w;
+    let y = anchor.1 - fy * ih;
+    // (`max` then `min`, not `clamp`: rounding may leave `w - iw` a hair above 0.)
+    [x.max(w - iw).min(0.), y.max(h - ih).min(0.), iw, ih]
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -179,9 +352,42 @@ pub fn parse(
         return None;
     }
     let number = |key: &str| field(key).and_then(Value::as_f64).map(|n| n as f32);
+    let image_size = image
+        .as_ref()
+        .and_then(|image| imagesize::blob_size(&image.bytes).ok())
+        .map(|size| (size.width as f32, size.height as f32));
+    let camera = background
+        .get("camera")
+        .filter(|_| image_size.is_some())
+        .and_then(Value::as_object)
+        .map(|camera| {
+            let get = |key: &str| camera.get(key).and_then(Value::as_f64).map(|n| n as f32);
+            let focus = camera.get("focus").and_then(Value::as_array);
+            let at = |i: usize| {
+                focus
+                    .and_then(|f| f.get(i))
+                    .and_then(Value::as_f64)
+                    .map_or(0.5, |n| (n as f32).clamp(0., 1.))
+            };
+            Camera {
+                zoom: get("zoom").unwrap_or(0.06).clamp(0., 0.3),
+                pan: get("pan").unwrap_or(0.02).clamp(0., 0.15),
+                period: get("period").unwrap_or(90.).clamp(10., 900.),
+                focus: (at(0), at(1)),
+            }
+        });
+    let effects = background
+        .get("effects")
+        .filter(|_| image_size.is_some())
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(effect).take(MAX_EFFECTS).collect())
+        .unwrap_or_default();
     Some(Backdrop {
         scene,
         image: image.map(Arc::new),
+        image_size,
+        camera,
+        effects,
         sky,
         speed: number("speed").unwrap_or(1.).clamp(0., 16.),
         cell: number("cell").unwrap_or(22.).clamp(10., 40.),
@@ -385,5 +591,66 @@ mod tests {
         assert_eq!(file_stem("  Sakura Dusk!! v2 "), "sakura-dusk-v2");
         assert_eq!(file_stem("Ñandú"), "ñandú");
         assert_eq!(file_stem("///"), "theme");
+    }
+
+    #[test]
+    fn the_camera_keeps_the_image_over_the_whole_window() {
+        let camera = Camera {
+            zoom: 0.3,
+            pan: 0.15,
+            period: 30.,
+            focus: (0.9, 0.1),
+        };
+        // A wide image in a tall window and a tall image in a wide one, at
+        // many moments: never an edge inside the window.
+        for (window, image) in [
+            ((800., 1000.), (3000., 1000.)),
+            ((1600., 900.), (900., 1600.)),
+        ] {
+            for step in 0..120 {
+                let [x, y, w, h] = image_rect(window, image, Some(&camera), f64::from(step) * 0.7);
+                assert!(x <= 0. && y <= 0., "{x}, {y}");
+                assert!(
+                    x + w >= window.0 - 0.01 && y + h >= window.1 - 0.01,
+                    "{x}+{w}, {y}+{h}"
+                );
+                assert!((w / h - image.0 / image.1).abs() < 0.001, "keeps its shape");
+            }
+        }
+        // Without a camera it is cover: centered, filling the tighter side.
+        assert_eq!(
+            image_rect((800., 600.), (1600., 600.), None, 5.),
+            [-400., 0., 1600., 600.]
+        );
+    }
+
+    #[test]
+    fn a_camera_needs_an_image_it_can_measure() {
+        let dir = temp();
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
+            .unwrap();
+        std::fs::write(dir.join("art.png"), &png).unwrap();
+        let theme = |background: &str| -> Value {
+            serde_json::from_str(&format!(r#"{{"name": "x", "background": {background}}}"#))
+                .unwrap()
+        };
+        let with = parse(
+            &theme(r#"{"image": "art.png", "camera": {"zoom": 9, "focus": [0.2, 2]}}"#),
+            Some(&dir),
+            resolve,
+        )
+        .unwrap();
+        assert_eq!(with.image_size, Some((1., 1.)));
+        let camera = with.camera.unwrap();
+        assert_eq!((camera.zoom, camera.focus), (0.3, (0.2, 1.)), "clamped");
+        assert_eq!((camera.pan, camera.period), (0.02, 90.), "defaults");
+        let without_image = parse(
+            &theme(r##"{"sky": ["#000"], "camera": {}}"##),
+            Some(&dir),
+            resolve,
+        );
+        assert_eq!(without_image.unwrap().camera, None);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
