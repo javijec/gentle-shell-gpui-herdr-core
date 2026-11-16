@@ -37,6 +37,8 @@ use crate::shared::ui;
 
 pub enum RemoteFilesEvent {
     InsertPath(String),
+    /// Open the same History pane for the owning remote session.
+    OpenHistory,
     /// Open an existing remote Linux file in a normal central editor pane.
     OpenFile(String),
     /// Request a native central diff for a changed Linux file.
@@ -259,6 +261,23 @@ fn parse_git_snapshot(data: &serde_json::Value) -> Result<RemoteGitSnapshot, &'s
     })
 }
 
+/// A Git status path is relative to the actual Linux toplevel. Never let
+/// a menu event become a Windows path, an absolute path or a traversal.
+fn remote_git_file_path(toplevel: &str, relative: &str) -> Option<String> {
+    if !toplevel.starts_with('/') || toplevel.contains('\\')
+        || toplevel.chars().any(char::is_control)
+        || relative.is_empty() || relative.starts_with('/')
+        || relative.contains('\\') || relative.contains(':')
+        || relative.len() > 2048 || relative.chars().any(char::is_control)
+        || relative.split('/').any(|segment| {
+            segment.is_empty() || matches!(segment, "." | "..")
+        })
+    {
+        return None;
+    }
+    Some(format!("{}/{}", toplevel.trim_end_matches('/'), relative))
+}
+
 fn shared_remote_worktree(source: &RemoteGitSnapshot) -> WorkTree {
     WorkTree {
         branch: BranchStatus {
@@ -324,8 +343,24 @@ fn shared_remote_refs(source: &RemoteGitSnapshot) -> RefsSnapshot {
 
 #[cfg(test)]
 mod remote_git_snapshot_tests {
-    use super::{parse_git_snapshot, shared_remote_refs, shared_remote_worktree};
+    use super::{
+        parse_git_snapshot, remote_git_file_path, shared_remote_refs, shared_remote_worktree,
+    };
     use serde_json::json;
+
+    #[test]
+    fn git_menu_paths_are_linux_repository_scoped() {
+        assert_eq!(
+            remote_git_file_path("/srv/workspaces/JaviPi", "src/main.rs"),
+            Some("/srv/workspaces/JaviPi/src/main.rs".to_owned()),
+        );
+        for path in ["", "/etc/passwd", "../outside", "src/../outside",
+            "src//main.rs", "src\\main.rs", "C:danger", "a\nb"]
+        {
+            assert!(remote_git_file_path("/srv/workspaces/JaviPi", path).is_none());
+        }
+        assert!(remote_git_file_path("C:/repo", "main.rs").is_none());
+    }
 
     #[test]
     fn remote_worktrees_are_display_only_posix_paths() {
@@ -497,7 +532,6 @@ pub struct RemoteFilesView {
     git_confirm_stash: Option<(String, StashAction)>,
     git_confirm_network: Option<String>,
     git_confirm_worktree: Option<(RemoteWorktreeAction, String)>,
-    git_confirm_discard: Option<(String, bool)>,
     _git_events: Vec<Subscription>,
     focus: FocusHandle,
     tree_children: HashMap<String, Vec<RemoteEntry>>,
@@ -714,6 +748,8 @@ impl RemoteFilesView {
         let refs = cx.new(|cx| RefsView::new_remote(window, cx));
         let refs_events = cx.subscribe(&refs, |this, _, event: &RefsEvent, cx| {
             match event {
+                RefsEvent::RemoteOpenHistory =>
+                    cx.emit(RemoteFilesEvent::OpenHistory),
                 RefsEvent::SwitchRemoteBranch(branch) =>
                     this.git_switch_branch(branch.clone(), cx),
                 RefsEvent::RemoteStash { name, action } =>
@@ -733,11 +769,17 @@ impl RemoteFilesView {
                     );
                 }
                 ChangesEvent::RemoteOpenDiff(path) => {
-                    if let Some(snapshot) = this.git.as_ref() {
-                        let absolute = format!(
-                            "{}/{}", snapshot.toplevel.trim_end_matches('/'), path
-                        );
+                    if let Some(absolute) = this.git.as_ref().and_then(|snapshot| {
+                        remote_git_file_path(&snapshot.toplevel, path)
+                    }) {
                         cx.emit(RemoteFilesEvent::OpenDiff(absolute));
+                    }
+                }
+                ChangesEvent::RemoteOpenFile(path) => {
+                    if let Some(absolute) = this.git.as_ref().and_then(|snapshot| {
+                        remote_git_file_path(&snapshot.toplevel, path)
+                    }) {
+                        cx.emit(RemoteFilesEvent::OpenFile(absolute));
                     }
                 }
                 ChangesEvent::RemoteCommit(summary) => {
@@ -789,7 +831,6 @@ impl RemoteFilesView {
             git_confirm_stash: None,
             git_confirm_network: None,
             git_confirm_worktree: None,
-            git_confirm_discard: None,
             _git_events: git_events,
             focus: cx.focus_handle(),
             tree_children: HashMap::new(),
@@ -1841,7 +1882,6 @@ impl RemoteFilesView {
         self.git_confirm_stash = None;
         self.git_confirm_network = None;
         self.git_confirm_worktree = None;
-        self.git_confirm_discard = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
             view.mark_remote_stash(None, cx);
@@ -1943,7 +1983,6 @@ impl RemoteFilesView {
         self.git_confirm_stash = None;
         self.git_confirm_network = None;
         self.git_confirm_worktree = None;
-        self.git_confirm_discard = None;
         self.refs.update(cx, |view, cx| {
             view.mark_remote_switch(None, cx);
             view.mark_remote_stash(None, cx);
@@ -2077,16 +2116,12 @@ impl RemoteFilesView {
         if !snapshot.files.iter().any(|entry|
             entry.path == path && entry.index == index && entry.worktree == worktree
         ) { return; }
-        let pending = (path.clone(), staged);
-        if self.git_confirm_discard.as_ref() != Some(&pending) {
-            self.git_confirm_discard = Some(pending);
-            self.git_feedback = Some(
-                "Discard replaces local changes; select the action again to confirm.".into(),
-            );
-            cx.notify();
+        // ChangesView already required a native destructive-action dialog.
+        // The bridge still validates the exact HEAD/branch/index token and
+        // porcelain status before it touches this machine's working tree.
+        let Some(absolute) = remote_git_file_path(&snapshot.toplevel, &path) else {
             return;
-        }
-        let absolute = format!("{}/{}", snapshot.toplevel.trim_end_matches('/'), path);
+        };
         let command = json!({
             "type": "herdr_git_discard", "root": self.root,
             "toplevel": snapshot.toplevel,
