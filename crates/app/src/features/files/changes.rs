@@ -1293,7 +1293,7 @@ impl ChangesView {
                         .child("Review the exact message and action before confirming"),
                 ))
                 .when_some(self.error.clone(), |row, error| row.child(
-                    div().max_h(px(96.)).overflow_y_scroll()
+                    div().max_h(px(96.)).overflow_y_scrollbar()
                         .text_xs().text_color(ui::danger()).child(error),
                 ));
         }
