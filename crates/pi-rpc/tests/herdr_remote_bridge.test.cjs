@@ -58,7 +58,7 @@ function harness(cwd = "/srv/workspaces/JaviPi", envOverrides = {}) {
     // Remote Files uses built-in fs and SHA-256 for opt-in revision-checked
     // writes; no I/O occurs until the matching private command arrives.
     assert.ok(["node:fs/promises", "node:fs", "node:crypto",
-               "node:path", "node:util"].includes(name));
+               "node:path", "node:util", "node:perf_hooks"].includes(name));
     return require(name);
   };
   const execute = new Function(
