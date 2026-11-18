@@ -19,9 +19,14 @@ impl Render for Workspace {
             && let Some(tab) = self.tab_mut()
         {
             tab.focused = inside;
+            // Native pane clicks can move focus without calling focus_pane.
+            self.sync_files_root(cx);
         }
-        let sidebar = self.sidebar.clone().filter(|_| self.sidebar_visible);
-        let has_sidebar = self.sidebar.is_some();
+        // Keep the native title bar for window controls, but hide workspace
+        // chrome and Files while the branded empty state is displayed.
+        let empty = self.space().tabs.is_empty();
+        let sidebar = self.sidebar.clone().filter(|_| self.sidebar_visible && !empty);
+        let has_sidebar = self.sidebar.is_some() && !empty;
         // Below this the screen buttons fold into one overflow menu.
         let narrow = window.viewport_size().width < rems(900. / 16.).to_pixels(window.rem_size());
         // Native web views would cover a screen or a dialog opened over
@@ -104,15 +109,18 @@ impl Render for Workspace {
                                     .w_0()
                                     .min_w_0()
                                     .overflow_hidden()
+                                    // Keep the workspace switcher usable when there are no tabs.
                                     .child(self.render_workspace_chip(cx))
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .w(px(1.))
-                                            .h(rems(14. / 16.))
-                                            .bg(ui::border()),
-                                    )
-                                    .child(self.render_tabs(cx)),
+                                    .when(!empty, |d| {
+                                        d.child(
+                                            div()
+                                                .flex_none()
+                                                .w(px(1.))
+                                                .h(rems(14. / 16.))
+                                                .bg(ui::border()),
+                                        )
+                                        .child(self.render_tabs(cx))
+                                    }),
                             )
                             .child(
                                 h_flex()
@@ -426,8 +434,8 @@ impl Render for Workspace {
                                                 })),
                                         )
                                     }),
-                            ),
-                    ),
+                            )
+                    )
             )
             .child(
                 h_flex()

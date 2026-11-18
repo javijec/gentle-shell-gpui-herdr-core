@@ -6,7 +6,7 @@ in this folder; the app notices new or edited files within two seconds, no
 restart. The person picks one in Configuration › Theme › Animated backgrounds.
 
 Never put these files in Pi's own `themes` folder: Pi's theme schema rejects
-the `background` key.
+the `background` and `solid` keys.
 
 ## Workflow
 
@@ -69,6 +69,9 @@ the `background` key.
   3:1 or more. Pi's full format (`vars`, `colors` with `muted`, `dim`,
   `border`, `success`, `error`, `warning`, `toolTitle`, `userMessageBg`,
   `selectedBg`, …, and `export.pageBg`) also works when you want finer control.
+- `solid`: `true` keeps every pane opaque at any transparency, in the
+  theme's own colors (like *Studio* or *Clay*), so the Transparency slider has no
+  visible effect on it.
 - `background` (all optional):
   - `scene`: a built-in scene's name (see below) or a `.js` file beside the
     theme (plain file name, no folders). The examples name built-in scenes;

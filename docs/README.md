@@ -10,6 +10,7 @@ Gentle Shell GPUI is a desktop app in Rust ([GPUI](https://www.gpui.rs) + gpui-k
 | Build or change a screen, a component or an animation | [`design-system.md`](design-system.md) |
 | Talk to Gentle Shell, read or write its configuration, or add an outside service | [`integrations.md`](integrations.md) |
 | Build, test without touching your real app, open a PR or publish a release | [`development.md`](development.md) |
+| Review a pull request, add a dependency, or change CI | [`security.md`](security.md) |
 | Know why something was decided | [`adr/`](adr/) |
 | Install or use the app | [`../README.md`](../README.md) |
 

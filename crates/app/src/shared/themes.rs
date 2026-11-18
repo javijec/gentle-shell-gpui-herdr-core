@@ -26,6 +26,10 @@ const EMBEDDED: &[&str] = &[
     include_str!("../../themes/Gentleman-Cute.json"),
     include_str!("../../themes/Gentleman-Sexy.json"),
     include_str!("../../themes/Gentle.json"),
+    include_str!("../../themes/Studio.json"),
+    include_str!("../../themes/Studio-Light.json"),
+    include_str!("../../themes/Clay.json"),
+    include_str!("../../themes/Clay-Light.json"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +56,10 @@ pub struct Theme {
     /// True black that stays opaque at any transparency, so an OLED panel
     /// turns those pixels off (`ui::Palette::new` keeps every large surface black).
     pub oled: bool,
+    /// Opaque surfaces at any transparency, in the theme's own colors:
+    /// the theme file sets `"solid": true` (`ui::Palette::new` keeps every
+    /// glass role alpha 1.0, like OLED's layers but not black).
+    pub solid: bool,
     pub bg: u32,
     pub fg: u32,
     pub muted: u32,
@@ -240,6 +248,7 @@ pub fn parse_pi_theme(text: &str, source: Source, file: Option<&Path>) -> Option
         source,
         light,
         oled: false,
+        solid: value.get("solid").and_then(Value::as_bool).unwrap_or(false),
         bg,
         fg,
         muted,
@@ -323,6 +332,22 @@ fn gentle_ansi(name: &str) -> Option<[u32; 16]> {
         "Gentle" => [
             0x161d2e, 0xcb7c94, 0xb7cc85, 0xdeba87, 0x7fb4ca, 0xc99ad6, 0xa3b5d6, 0xf3f6f9,
             0x8394a3, 0xe0a3b5, 0xd1e8a9, 0xe0c15a, 0x8fb8dd, 0xb99bf2, 0xc3d1e8, 0xffffff,
+        ],
+        "Studio" => [
+            0x25252a, 0xe07a74, 0x7fb08a, 0xd6b46a, 0x7c9cbf, 0xa58abf, 0x7fb0a8, 0xc8c8cc,
+            0x55555c, 0xeb928c, 0x98c5a2, 0xe2c68b, 0x9db7d5, 0xbda6d4, 0x9cc7bf, 0xececec,
+        ],
+        "Studio Light" => [
+            0x3a3a3f, 0xb3423a, 0x3f7d4f, 0x9a6b12, 0x3f6a9a, 0x8f6a9e, 0x3f7d8a, 0x9a9aa0,
+            0x8e8e93, 0xcc5f57, 0x599a68, 0xb3872f, 0x2f5580, 0x7a5588, 0x2f6572, 0x1f1f1f,
+        ],
+        "Clay" => [
+            0x333230, 0xe0786b, 0x8fb37f, 0xd9b26a, 0x9fb3c8, 0xd8a0b4, 0xa8c8bd, 0xece9e1,
+            0x75726b, 0xeb968a, 0xa8c79a, 0xe4c68f, 0xbcccd9, 0xe2b6c6, 0xc2dcd0, 0xf5f2ea,
+        ],
+        "Clay Light" => [
+            0x3e3d39, 0xb0413a, 0x4f7a43, 0x94661a, 0x4a6d8c, 0xa15c74, 0x3f7d78, 0x7d7870,
+            0x9a958b, 0xc9544c, 0x64945a, 0xb08124, 0x6a8aa6, 0xb8748c, 0x54938d, 0x2b2a27,
         ],
         _ => return None,
     })
@@ -429,6 +454,7 @@ fn from_scheme(s: &Scheme) -> Theme {
         source: Source::Builtin,
         light: s.light,
         oled: false,
+        solid: false,
         bg: s.bg,
         fg: s.fg,
         muted: mix(s.fg, s.bg, 0.35),
@@ -466,6 +492,7 @@ fn oled_black() -> Theme {
         source: Source::Builtin,
         light: false,
         oled: true,
+        solid: false,
         bg: 0x000000,
         fg: 0xdcd4d9,
         muted: 0x958590,
@@ -1085,6 +1112,7 @@ mod tests {
         let cute = parse_pi_theme(EMBEDDED[0], Source::Gentle, None).unwrap();
         assert_eq!(cute.name, "Gentleman-Cute");
         assert!(!cute.light);
+        assert!(!cute.solid);
         assert_eq!(cute.bg, 0x060407);
         assert_eq!(cute.fg, 0xf6eff3);
         assert_eq!(cute.muted, 0xa78e9b);
@@ -1106,6 +1134,132 @@ mod tests {
         assert_eq!(gentle.accent, 0x7fb4ca);
         assert_eq!(gentle.info, 0x7fb4ca);
         assert_eq!(gentle.bg, 0x06080f);
+    }
+
+    #[test]
+    fn parses_the_studio_themes() {
+        let studio = parse_pi_theme(EMBEDDED[3], Source::Gentle, None).unwrap();
+        assert_eq!(studio.name, "Studio");
+        assert!(studio.solid);
+        assert!(!studio.light);
+        assert_eq!(studio.bg, 0x1b1b1d);
+        assert_eq!(studio.fg, 0xececec);
+        assert_eq!(studio.muted, 0xa1a1a6);
+        assert_eq!(studio.faint, 0x6e6e73);
+        assert_eq!(studio.accent, 0x7c9cbf);
+        assert_eq!(studio.accent_active, 0x9db7d5);
+        assert_eq!(studio.raised, 0x2a2a2e);
+        assert_eq!(studio.border, 0x3a3a3f);
+        assert_eq!(studio.heading, 0xe6e1d6);
+        assert_eq!(studio.success, 0x7fb08a);
+        assert_eq!(studio.warning, 0xd6b46a);
+        assert_eq!(studio.danger, 0xe07a74);
+        assert_eq!(studio.selection, 0x34404d);
+        assert_eq!(studio.info, 0x9db7d5);
+
+        let light = parse_pi_theme(EMBEDDED[4], Source::Gentle, None).unwrap();
+        assert_eq!(light.name, "Studio Light");
+        assert!(light.solid);
+        assert!(light.light);
+        assert_eq!(light.bg, 0xf7f6f3);
+        assert_eq!(light.fg, 0x1f1f1f);
+        assert_eq!(light.muted, 0x5f5f63);
+        assert_eq!(light.faint, 0x8e8e93);
+        assert_eq!(light.accent, 0x3f6a9a);
+        assert_eq!(light.accent_active, 0x2f5580);
+        assert_eq!(light.raised, 0xebe9e4);
+        assert_eq!(light.border, 0xd6d3cc);
+        assert_eq!(light.heading, 0x2b2b2b);
+        assert_eq!(light.success, 0x3f7d4f);
+        assert_eq!(light.warning, 0x9a6b12);
+        assert_eq!(light.danger, 0xb3423a);
+        assert_eq!(light.selection, 0xcdd9e6);
+        assert_eq!(light.info, 0x3f6a9a);
+
+        // Both show under "Gentle Shell" exactly once, under their own names.
+        let catalog = load_catalog(Vec::new(), Vec::new());
+        for name in ["Studio", "Studio Light"] {
+            assert_eq!(
+                catalog.iter().filter(|t| t.name == name).count(),
+                1,
+                "{name} should appear once"
+            );
+        }
+        assert_eq!(
+            parse_pi_theme(EMBEDDED[3], Source::Gentle, None)
+                .unwrap()
+                .ansi,
+            gentle_ansi("Studio").unwrap()
+        );
+        assert_eq!(
+            parse_pi_theme(EMBEDDED[4], Source::Gentle, None)
+                .unwrap()
+                .ansi,
+            gentle_ansi("Studio Light").unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_the_clay_themes() {
+        let clay = parse_pi_theme(EMBEDDED[5], Source::Gentle, None).unwrap();
+        assert_eq!(clay.name, "Clay");
+        assert!(clay.solid);
+        assert!(!clay.light);
+        assert_eq!(clay.bg, 0x262624);
+        assert_eq!(clay.fg, 0xece9e1);
+        assert_eq!(clay.muted, 0xa8a49b);
+        assert_eq!(clay.faint, 0x75726b);
+        assert_eq!(clay.accent, 0xd4825f);
+        assert_eq!(clay.accent_active, 0xe39a79);
+        assert_eq!(clay.raised, 0x30302e);
+        assert_eq!(clay.border, 0x3e3d39);
+        assert_eq!(clay.heading, 0xf0ebe0);
+        assert_eq!(clay.success, 0x8fb37f);
+        assert_eq!(clay.warning, 0xd9b26a);
+        assert_eq!(clay.danger, 0xe0786b);
+        assert_eq!(clay.selection, 0x4a3a31);
+        assert_eq!(clay.info, 0xe39a79);
+
+        let light = parse_pi_theme(EMBEDDED[6], Source::Gentle, None).unwrap();
+        assert_eq!(light.name, "Clay Light");
+        assert!(light.solid);
+        assert!(light.light);
+        assert_eq!(light.bg, 0xf6f3ec);
+        assert_eq!(light.fg, 0x2b2a27);
+        assert_eq!(light.muted, 0x6b675f);
+        assert_eq!(light.faint, 0x9a958b);
+        assert_eq!(light.accent, 0xb85c3c);
+        assert_eq!(light.accent_active, 0x9c4a2e);
+        assert_eq!(light.raised, 0xece7dc);
+        assert_eq!(light.border, 0xdcd5c7);
+        assert_eq!(light.heading, 0x23221f);
+        assert_eq!(light.success, 0x4f7a43);
+        assert_eq!(light.warning, 0x94661a);
+        assert_eq!(light.danger, 0xb0413a);
+        assert_eq!(light.selection, 0xefd9cc);
+        assert_eq!(light.info, 0x9c4a2e);
+
+        // Both show under "Gentle Shell" exactly once, under their own names.
+        let catalog = load_catalog(Vec::new(), Vec::new());
+        for name in ["Clay", "Clay Light"] {
+            assert_eq!(
+                catalog.iter().filter(|t| t.name == name).count(),
+                1,
+                "{name} should appear once"
+            );
+        }
+        assert_eq!(
+            parse_pi_theme(EMBEDDED[5], Source::Gentle, None)
+                .unwrap()
+                .ansi,
+            gentle_ansi("Clay").unwrap()
+        );
+        assert_eq!(
+            parse_pi_theme(EMBEDDED[6], Source::Gentle, None)
+                .unwrap()
+                .ansi,
+            gentle_ansi("Clay Light").unwrap()
+        );
     }
 
     #[test]

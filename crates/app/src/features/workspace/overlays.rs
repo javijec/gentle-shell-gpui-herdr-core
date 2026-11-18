@@ -396,11 +396,10 @@ impl Workspace {
                 DocsEvent::Close => this.close_overlay(window, cx),
                 DocsEvent::Run(prompt) => {
                     this.close_overlay(window, cx);
-                    this.open_tab(
-                        PaneKind::Agent,
-                        root.clone(),
-                        Some(prompt.clone()),
-                        None,
+                    this.pick_agent_folder(
+                        AgentDestination::Tab {
+                            prompt: Some(prompt.clone()),
+                        },
                         window,
                         cx,
                     );

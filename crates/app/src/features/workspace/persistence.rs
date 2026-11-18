@@ -10,6 +10,37 @@ impl Workspace {
             .unwrap_or_else(|| self.space().root.clone())
     }
 
+    /// Folder represented by Files in the current tab. Prioritize its selected
+    /// agent (or another agent in that tab), not the workspace's original root.
+    /// For a terminal/file-only tab, follow the selected pane instead.
+    pub fn files_root(&self, cx: &App) -> PathBuf {
+        let Some(tab) = self.tab() else {
+            return self.space().root.clone();
+        };
+        let agent = self
+            .panes
+            .get(&tab.focused)
+            .filter(|pane| pane.session.is_some())
+            .or_else(|| {
+                tab.tree.leaves().into_iter().find_map(|id| {
+                    self.panes.get(&id).filter(|pane| pane.session.is_some())
+                })
+            });
+        agent
+            .or_else(|| self.panes.get(&tab.focused))
+            .map(|pane| self.pane_cwd(pane, cx))
+            .unwrap_or_else(|| self.space().root.clone())
+    }
+
+    /// Re-root Files only when the effective directory really changed.
+    pub(super) fn sync_files_root(&mut self, cx: &mut Context<Self>) {
+        let root = self.files_root(cx);
+        if self.last_files_root.as_ref() != Some(&root) {
+            self.last_files_root = Some(root.clone());
+            cx.emit(WorkspaceEvent::FilesRootChanged(root));
+        }
+    }
+
     /// The agent the screens act on: the focused pane's, else the first agent
     /// in the tab, else any in the workspace.
     pub(super) fn active_session(&self) -> Option<Entity<SessionView>> {

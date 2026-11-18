@@ -96,27 +96,28 @@ pub fn register(cx: &mut App) {
     });
 }
 
-/// The Files | Changes | Branches sidebar for `workspace`, re-rooted when the shown
-/// workspace changes. The subscriptions live as long as the workspace.
+/// Files | Changes | Branches follow the selected agent's folder. Views for
+/// recently visited folders stay cached so their tab, expansion and scroll
+/// position survive switching agents; hidden views never poll Git.
 pub fn attach_sidebar(
     workspace: &Entity<crate::features::workspace::Workspace>,
     window: &mut Window,
     cx: &mut App,
 ) {
+    use std::collections::{HashMap, VecDeque};
+
     use crate::features::files::{FileTreeEvent, FileTreeView};
     use crate::features::workspace::WorkspaceEvent;
 
-    /// A tree for `root` in the sidebar; the returned subscription keeps it
-    /// following the sidebar's visibility.
-    fn mount(
+    const CACHE_LIMIT: usize = 8;
+
+    fn create_tree(
         workspace: &Entity<crate::features::workspace::Workspace>,
         root: PathBuf,
         window: &mut Window,
         cx: &mut App,
-    ) -> Subscription {
+    ) -> Entity<FileTreeView> {
         let tree = cx.new(|cx| FileTreeView::new(root, window, cx));
-        let shown = workspace.read(cx).sidebar_visible();
-        tree.update(cx, |tree, cx| tree.set_visible(shown, cx));
         let target = workspace.downgrade();
         window
             .subscribe(&tree, cx, move |_, event: &FileTreeEvent, window, cx| {
@@ -149,29 +150,63 @@ pub fn attach_sidebar(
                 });
             })
             .detach();
-        let visible = tree.downgrade();
-        let toggled = window.subscribe(workspace, cx, move |_, event: &WorkspaceEvent, _, cx| {
-            if let WorkspaceEvent::SidebarToggled(shown) = event {
-                let _ = visible.update(cx, |tree, cx| tree.set_visible(*shown, cx));
-            }
-        });
-        workspace.update(cx, |workspace, cx| workspace.set_sidebar(tree.into(), cx));
-        toggled
+        tree
     }
 
-    let root = workspace.read(cx).root().to_path_buf();
-    // Replaced (and so dropped) with the tree, so re-rooting doesn't pile up
-    // subscriptions.
-    let mut _toggled = mount(workspace, root, window, cx);
-    // The handler gets the workspace as the emitter: holding it here would
-    // keep it alive forever.
+    let root = workspace.read(cx).files_root(cx);
+    let initial = create_tree(workspace, root.clone(), window, cx);
+    let visible = workspace.read(cx).files_sidebar_visible();
+    initial.update(cx, |tree, cx| tree.set_visible(visible, cx));
+    workspace.update(cx, |workspace, cx| workspace.set_sidebar(initial.clone().into(), cx));
+
+    let mut active = root.clone();
+    let mut cache = HashMap::from([(root.clone(), initial)]);
+    let mut recent = VecDeque::from([root]);
+
+    // This single subscription controls the active tree. Inactive cached
+    // trees remain invisible, so the Git pollers are suspended.
     window
         .subscribe(
             workspace,
             cx,
-            move |owner, event: &WorkspaceEvent, window, cx| {
-                if let WorkspaceEvent::RootChanged(root) = event {
-                    _toggled = mount(&owner, root.clone(), window, cx);
+            move |owner, event: &WorkspaceEvent, window, cx| match event {
+                WorkspaceEvent::FilesRootChanged(root) => {
+                    if *root != active {
+                        if let Some(old) = cache.get(&active) {
+                            old.update(cx, |tree, cx| tree.set_visible(false, cx));
+                        }
+                        let tree = if let Some(cached) = cache.get(root) {
+                            cached.clone()
+                        } else {
+                            let created = create_tree(&owner, root.clone(), window, cx);
+                            cache.insert(root.clone(), created.clone());
+                            created
+                        };
+                        active = root.clone();
+                        recent.retain(|path| path != root);
+                        recent.push_back(root.clone());
+                        while cache.len() > CACHE_LIMIT {
+                            let Some(oldest) = recent.pop_front() else {
+                                break;
+                            };
+                            if oldest != active {
+                                cache.remove(&oldest);
+                            }
+                        }
+                        let visible = owner.read(cx).files_sidebar_visible();
+                        tree.update(cx, |tree, cx| tree.set_visible(visible, cx));
+                        owner.update(cx, |workspace, cx| workspace.set_sidebar(tree.into(), cx));
+                    } else if let Some(tree) = cache.get(&active) {
+                        let visible = owner.read(cx).files_sidebar_visible();
+                        tree.update(cx, |tree, cx| tree.set_visible(visible, cx));
+                    }
+                }
+                WorkspaceEvent::SidebarToggled(shown)
+                | WorkspaceEvent::FilesVisibilityChanged(shown) => {
+                    if let Some(tree) = cache.get(&active) {
+                        let visible = *shown && owner.read(cx).files_sidebar_visible();
+                        tree.update(cx, |tree, cx| tree.set_visible(visible, cx));
+                    }
                 }
             },
         )

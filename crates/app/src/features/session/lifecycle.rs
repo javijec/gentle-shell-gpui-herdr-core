@@ -86,11 +86,14 @@ impl SessionView {
 
     /// Restart the backend in another folder; the conversation starts fresh.
     pub fn change_cwd(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cwd == cwd {
+            return;
+        }
         self.cwd = cwd;
+        // Notify the workspace immediately, including while the backend restarts.
+        self.sync_chrome(cx);
         if self.backend.started {
             self.start(window, cx);
-        } else {
-            self.sync_chrome(cx);
         }
     }
 

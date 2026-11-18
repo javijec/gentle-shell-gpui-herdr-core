@@ -1,0 +1,10 @@
+# zizmor (security.yml → workflows) settings. Every ignore needs a reason.
+rules:
+  cache-poisoning:
+    ignore:
+      # Release builds restore the `dist-<target>` Rust cache that only
+      # cache-warm.yml writes, on pushes to main. Pull requests write to their
+      # own cache scope and can't reach it, so poisoning it takes code already
+      # merged to main. Building every dependency from scratch on each tag is
+      # the alternative.
+      - release.yml

@@ -83,6 +83,7 @@ pub enum SessionEvent {
 #[derive(PartialEq)]
 struct Chrome {
     title: String,
+    cwd: PathBuf,
     running: bool,
     needs_you: bool,
     session_file: Option<PathBuf>,
@@ -427,6 +428,7 @@ impl SessionView {
     fn sync_chrome(&mut self, cx: &mut Context<Self>) {
         let chrome = Chrome {
             title: self.title(),
+            cwd: self.cwd.clone(),
             running: self.is_running(),
             needs_you: self.needs_you(),
             session_file: self.session_file(),

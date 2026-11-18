@@ -1,0 +1,79 @@
+name: Security
+
+# Checks that help reviewers keep malicious or vulnerable code out of a pull
+# request. They complement a maintainer's review, they don't replace it; the
+# full picture is in docs/security.md.
+#
+# Runs with `pull_request` (never `pull_request_target`): a fork's code gets a
+# read-only token and no secrets, so a hostile PR can't publish or push.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # New RustSec advisories land without any change here.
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Known vulnerabilities, wildcard versions, and crates from anywhere other
+  # than crates.io (deny.toml).
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2
+        with:
+          command: check advisories bans sources
+
+  # Dependencies the PR adds or bumps, against GitHub's advisory database.
+  # Off until an admin enables Settings → Code security → Dependency graph:
+  # without it the action fails on every PR ("not supported on this
+  # repository"). Meanwhile cargo-deny covers RustSec. To turn it back on,
+  # delete `false &&` below.
+  dependency-review:
+    if: false && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+
+  # Workflow mistakes that let a PR take over CI: script injection, excessive
+  # token permissions, unpinned actions, dangerous triggers.
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          advanced-security: false
+          # A new zizmor release can add audits; bump it on purpose, not by surprise.
+          version: 1.32.0
+
+  # What a reviewer must read line by line: sensitive files, binaries,
+  # suspicious patterns. Fails only on bidirectional Unicode (Trojan Source).
+  risk-report:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Report
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python3 .github/scripts/pr_risk_report.py --base "origin/$BASE_REF"

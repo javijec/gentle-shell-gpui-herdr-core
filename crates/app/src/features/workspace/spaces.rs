@@ -18,12 +18,10 @@ impl Workspace {
         self.spaces.len() - 1
     }
 
-    /// Build a restored workspace's panes; with `fill`, give an empty one an
-    /// agent tab.
+    /// Restore saved panes without creating an agent in an empty workspace.
     pub(super) fn ensure_open(
         &mut self,
         index: usize,
-        fill: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -51,10 +49,6 @@ impl Workspace {
             let space = &mut self.spaces[index];
             space.active = active.min(space.tabs.len().saturating_sub(1));
         }
-        if fill && self.spaces[index].tabs.is_empty() {
-            let root = self.spaces[index].root.clone();
-            self.open_tab(PaneKind::Agent, root, None, None, window, cx);
-        }
         self.current = previous;
     }
 
@@ -67,15 +61,13 @@ impl Workspace {
         if index >= self.spaces.len() {
             return;
         }
-        self.ensure_open(index, true, window, cx);
-        let changed = index != self.current;
+        self.ensure_open(index, window, cx);
         self.current = index;
         self.space_mut().last_active = workspaces::now();
         self.focus_active(window, cx);
         self.start_shown(window, cx);
-        if changed {
-            cx.emit(WorkspaceEvent::RootChanged(self.space().root.clone()));
-        }
+        self.sync_files_root(cx);
+        cx.emit(WorkspaceEvent::FilesVisibilityChanged(self.tab().is_some()));
         self.schedule_save(cx);
         cx.notify();
     }

@@ -108,7 +108,7 @@ pub(super) fn screen_rows() -> Vec<Row> {
         row(
             IconName::Bot,
             "New agent tab",
-            &format!("Another agent in the same folder ({})", ui::shortcut("T")),
+            &format!("Choose a folder for a new agent ({})", ui::shortcut("T")),
             PaletteAction::NewTab,
         ),
         row(
@@ -144,7 +144,7 @@ pub(super) fn screen_rows() -> Vec<Row> {
         row(
             IconName::Bot,
             "New agent pane",
-            "Split with an agent beside the focused pane",
+            "Choose a folder for an agent beside the focused pane",
             PaletteAction::NewAgentPane,
         ),
         row(

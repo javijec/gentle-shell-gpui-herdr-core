@@ -45,8 +45,7 @@ impl Workspace {
     }
 
     pub(super) fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        let cwd = self.active_cwd(cx);
-        self.open_tab(PaneKind::Agent, cwd, None, None, window, cx);
+        self.pick_agent_folder(AgentDestination::Tab { prompt: None }, window, cx);
     }
 
     pub(super) fn on_new_terminal_tab(
@@ -189,6 +188,11 @@ impl Workspace {
 
     pub fn sidebar_visible(&self) -> bool {
         self.sidebar_visible
+    }
+
+    /// An empty workspace hides Files without changing the user's preference.
+    pub fn files_sidebar_visible(&self) -> bool {
+        self.sidebar_visible() && !self.space().tabs.is_empty()
     }
 
     pub(super) fn on_open_providers(

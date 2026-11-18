@@ -41,6 +41,7 @@ use crate::shared::ui;
 use gentle_core::commands::Screen;
 
 mod actions;
+mod agent_picker;
 mod closed;
 mod layout;
 mod overlays;
@@ -54,6 +55,7 @@ mod view;
 
 use crate::features::devices::{DevicePanel, DevicePanelEvent};
 use crate::features::music::{Music, MusicChanged};
+use agent_picker::AgentDestination;
 use layout::*;
 use stages::Stage;
 use view::*;
@@ -89,10 +91,12 @@ pub const SIDEBAR_WIDTH: f32 = 260.;
 
 /// What the window tells whoever embeds things in it (the sidebar's owner).
 pub enum WorkspaceEvent {
-    /// The shown workspace changed; its root folder.
-    RootChanged(PathBuf),
+    /// The file browser must follow the folder of the selected pane/agent.
+    FilesRootChanged(PathBuf),
     /// The left sidebar was shown or hidden.
     SidebarToggled(bool),
+    /// Tabs appeared or disappeared; pause the sidebar while none are open.
+    FilesVisibilityChanged(bool),
 }
 
 /// A window-level screen drawn over the active tab.
@@ -249,6 +253,8 @@ pub struct Workspace {
     web_shown: std::collections::HashSet<PaneId>,
     sidebar: Option<AnyView>,
     sidebar_visible: bool,
+    /// The last folder sent to the Files sidebar; avoids unnecessary remounts.
+    last_files_root: Option<PathBuf>,
     save_task: Option<Task<()>>,
     /// Re-reads every pane's title and busy state once a second (non-agent
     /// views can't be observed through `AnyView`), redrawing only on change.
@@ -363,6 +369,7 @@ impl Workspace {
             web_shown: Default::default(),
             sidebar: None,
             sidebar_visible: saved.sidebar,
+            last_files_root: None,
             save_task: None,
             notices: cx.new(|_| Notices::default()),
             renaming: None,
@@ -396,7 +403,7 @@ impl Workspace {
             None => this.current,
         };
         this.current = target;
-        this.ensure_open(target, prompt.is_none(), window, cx);
+        this.ensure_open(target, window, cx);
         if let Some(prompt) = prompt {
             let root = this.space().root.clone();
             this.open_tab(PaneKind::Agent, root, Some(prompt), None, window, cx);
@@ -487,11 +494,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The shown workspace's root folder.
-    pub fn root(&self) -> &Path {
-        &self.space().root
-    }
-
     /// Show `path` in the tab's preview pane, or a new split beside the largest pane.
     pub fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.tab().is_none() {
@@ -569,9 +571,20 @@ impl Workspace {
         self.open_tab(PaneKind::File, path, None, None, window, cx);
     }
 
-    /// Open an agent tab working in `folder` (a worktree from the sidebar).
+    /// The worktree action already supplied a folder: open that exact worktree.
+    /// Interactive New Agent commands still use the native folder picker.
     pub fn open_agent_tab(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_tab(PaneKind::Agent, folder, None, None, window, cx);
+        if folder.is_dir() {
+            self.open_tab(PaneKind::Agent, folder, None, None, window, cx);
+        } else {
+            window.push_notification(
+                Notification::warning(format!(
+                    "Worktree folder is no longer available: {}",
+                    folder.display()
+                )),
+                cx,
+            );
+        }
     }
 
     /// Type `text` at the active agent's prompt cursor, spaced from what is

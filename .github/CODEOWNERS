@@ -1,0 +1,21 @@
+# Who must approve a pull request (with the `main` ruleset's "Require review
+# from Code Owners"). Later lines win over earlier ones for the same file.
+# Owners need write access to the repository, or GitHub ignores the line.
+# See docs/security.md.
+
+# Everything: any maintainer.
+*                                       @ismaelosuna7824
+
+# Code that runs on CI, at build time or installs and updates the app on
+# users' machines. Keep this list to people trusted with releases, even when
+# the line above grows.
+/.github/                               @ismaelosuna7824
+/deny.toml                              @ismaelosuna7824
+/Cargo.toml                             @ismaelosuna7824
+/Cargo.lock                             @ismaelosuna7824
+/crates/*/Cargo.toml                    @ismaelosuna7824
+/crates/*/build.rs                      @ismaelosuna7824
+/packaging/                             @ismaelosuna7824
+/crates/app/src/features/app_update/    @ismaelosuna7824
+/crates/app/src/features/setup/         @ismaelosuna7824
+/crates/pi-rpc/                         @ismaelosuna7824

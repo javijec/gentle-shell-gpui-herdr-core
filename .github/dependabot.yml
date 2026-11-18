@@ -1,0 +1,48 @@
+# Keeps the SHA-pinned actions and the crates current. Each update is a PR
+# that goes through the same CI, security checks and review as any other.
+# The cooldown waits a week after a release before proposing it: hijacked
+# versions are usually caught and yanked within days.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    # Minor and patch bumps in one PR; majors one by one, they may need code.
+    groups:
+      crates:
+        update-types: [minor, patch]
+    # Crates that move together with GPUI: a lone bump either doesn't compile
+    # or compiles a second copy. Upgrade them by hand with gpui-kit (see
+    # docs/development.md). In 0.x, Dependabot counts 0.9 → 0.10 as major.
+    ignore:
+      # The UI framework; its releases need code changes and a manual check.
+      - dependency-name: gpui-kit
+        update-types: ["version-update:semver-major"]
+      # Pinned (`=`) to the GPUI that gpui-kit brings, for UI tests.
+      - dependency-name: gpui-pre
+      # Must match the resvg/fontdb GPUI uses (resvg 0.49 dropped
+      # `fontdb::Database::load_system_fonts`).
+      - dependency-name: resvg
+        update-types: ["version-update:semver-major"]
+      - dependency-name: fontdb
+        update-types: ["version-update:semver-major"]
+      # Must match the gtk that wry (the Linux in-app browser) depends on.
+      - dependency-name: gtk
+        update-types: ["version-update:semver-major"]
+    commit-message:
+      prefix: chore(deps)

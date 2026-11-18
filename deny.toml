@@ -1,0 +1,25 @@
+# Dependency policy, checked on every pull request by `security.yml`
+# (`cargo deny check advisories bans sources`). Docs: docs/security.md.
+
+[graph]
+# Every platform's dependencies (wry, gtk, windows, objc2…), not only the host's.
+all-features = true
+
+[advisories]
+# Known vulnerabilities (RustSec) in any crate fail. "Unmaintained" notices
+# only fail for our direct dependencies: transitive ones (GPUI, GTK) aren't
+# ours to replace. To accept an advisory, add it to `ignore` with a reason:
+# ignore = [{ id = "RUSTSEC-YYYY-NNNN", reason = "…" }]
+unmaintained = "workspace"
+
+[bans]
+multiple-versions = "allow"
+# `foo = "*"` would take whatever version is published next.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Crates come from crates.io only: a git or alternative-registry dependency
+# can't be audited from the lockfile and is a common way to slip code in.
+unknown-registry = "deny"
+unknown-git = "deny"

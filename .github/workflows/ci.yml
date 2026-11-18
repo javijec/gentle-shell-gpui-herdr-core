@@ -10,10 +10,19 @@ on:
   pull_request:
     paths-ignore: ["**.md", "packaging/icons/**"]
 
+# Pull requests from forks run untrusted code: the token stays read-only.
+permissions:
+  contents: read
+
 # A newer push to the same branch supersedes an older run.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+# No debug info: CI only needs pass or fail, and it makes the target directory
+# (and so the cache) smaller and linking faster.
+env:
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
   test:
@@ -23,17 +32,25 @@ jobs:
         os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      # Only main saves the cache; pull requests restore main's. GitHub keeps
+      # 10 GB per repository, and each PR saving its own (~3.7 GB for the three
+      # systems) evicted main's, leaving the next PR to build from scratch.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Ubuntu's mirror for GitHub runners can crawl (65 MB took over 10 minutes),
       # so the downloaded .debs are cached and only fetched once per image.
       - name: Restore apt packages
         if: runner.os == 'Linux'
         id: apt-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/apt-archives
           key: apt-${{ runner.arch }}-${{ env.ImageOS }}-v1
@@ -51,7 +68,7 @@ jobs:
           sudo chown -R "$USER" ~/apt-archives
       - name: Save apt packages
         if: runner.os == 'Linux' && steps.apt-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/apt-archives
           key: apt-${{ runner.arch }}-${{ env.ImageOS }}-v1

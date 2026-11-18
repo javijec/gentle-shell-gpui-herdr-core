@@ -6,6 +6,8 @@ members = ["crates/core", "crates/pi-rpc", "crates/app"]
 version = "0.1.23"
 edition = "2024"
 license = "MIT"
+# An app, not libraries: never published to crates.io.
+publish = false
 
 [workspace.dependencies]
 anyhow = "1"

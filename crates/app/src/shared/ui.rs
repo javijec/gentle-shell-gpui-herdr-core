@@ -116,6 +116,25 @@ impl Palette {
             scrollbar_hover: solid(mix(t.border, t.fg, 0.2)),
             backdrop: color(0x000000, if t.light { 0.25 } else { 0.44 }),
         };
+        if t.solid {
+            // Solid themes: the same derived colors, but every glass surface
+            // is opaque whatever the transparency — the glass without the
+            // glass, in the theme's own palette instead of OLED's black.
+            return Self {
+                window_bg: color(mix(t.bg, t.fg, 0.03), 1.),
+                panel: glass(0.045, 1.),
+                surface: glass(0.09, 1.),
+                surface_hover: glass(0.15, 1.),
+                raised: solid(t.raised),
+                well: if t.light {
+                    color(mix(t.bg, t.fg, 0.035), 1.)
+                } else {
+                    glass(0.02, 1.)
+                },
+                border: glass(0.2, 1.),
+                ..palette
+            };
+        }
         if !t.oled {
             return palette;
         }
@@ -885,6 +904,53 @@ mod tests {
                 "{surface:?} lets the desktop show through"
             );
         }
+    }
+
+    #[test]
+    fn solid_surfaces_stay_opaque_at_any_transparency() {
+        // A theme asking for solid surfaces (the way Studio does) keeps every
+        // glass role alpha 1.0 whatever the transparency, in its own colors.
+        let text = r##"{
+            "name": "Solid Check",
+            "solid": true,
+            "vars": {"bg": "#1b1b1d"},
+            "colors": {"text": "#ececec", "userMessageBg": "#2a2a2e"}
+        }"##;
+        let theme = crate::shared::themes::parse_pi_theme(
+            text,
+            crate::shared::themes::Source::Gentle,
+            None,
+        )
+        .unwrap();
+        assert!(theme.solid);
+        let raised = Hsla::from(rgb(0x2a2a2e));
+        for clear in [0., 0.6, 1.] {
+            let p = Palette::new(&theme, clear);
+            for surface in [p.window_bg, p.panel, p.surface, p.well, p.screen, p.popover] {
+                assert_eq!(surface.a, 1., "at transparency {clear}");
+            }
+            // The theme's own colors, not OLED's black.
+            assert_eq!(p.raised, raised, "at transparency {clear}");
+            assert!(p.panel != Hsla::from(rgb(0x000000)));
+        }
+        // Nothing left fades: the whole palette is the same at any setting.
+        assert_eq!(Palette::new(&theme, 0.), Palette::new(&theme, 1.));
+    }
+
+    #[test]
+    fn non_solid_theme_keeps_its_glass() {
+        let catalog = crate::shared::themes::load_catalog(Vec::new(), Vec::new());
+        let cute = catalog.iter().find(|t| t.name == "Gentleman-Cute").unwrap();
+        assert!(!cute.solid);
+        // Pinned glass values, as they were before `solid` existed.
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        let p = Palette::new(cute, 0.6);
+        assert!(close(p.window_bg.a, 0.9 - (0.9 - 0.3) * 0.6));
+        assert!(close(p.panel.a, 0.93 - (0.93 - 0.16) * 0.6));
+        assert!(close(p.surface.a, 0.94 - (0.94 - 0.4) * 0.6));
+        assert!(close(p.well.a, 0.92 - (0.92 - 0.45) * 0.6));
+        assert!(close(p.raised.a, 0.96 - (0.96 - 0.7) * 0.6));
+        assert!(close(p.border.a, 0.69));
     }
 
     #[test]
